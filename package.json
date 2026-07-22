@@ -1,0 +1,89 @@
+{
+  "name": "@doxbrix/doxloop",
+  "version": "0.1.0",
+  "description": "A local-first documentation agent CLI for Codex, Claude Code, and Gemini.",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doxbrix/doxloop.git"
+  },
+  "homepage": "https://github.com/doxbrix/doxloop#readme",
+  "bugs": {
+    "url": "https://github.com/doxbrix/doxloop/issues"
+  },
+  "bin": {
+    "doxloop": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "docs",
+    "skills/doxloop-authoring",
+    "skills/doxloop-doxbrix",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "exports": {
+    "./generator-api": {
+      "types": "./dist/generator-api.d.ts",
+      "import": "./dist/generator-api.js"
+    },
+    "./generator-runtime": {
+      "types": "./dist/generator-runtime.d.ts",
+      "import": "./dist/generator-runtime.js"
+    }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "scripts": {
+    "build": "pnpm run build:core && pnpm run build:generators",
+    "build:core": "rm -rf dist && tsc -p tsconfig.json && node scripts/prepare-dist.mjs",
+    "build:generators": "pnpm --filter './packages/*' run build",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit && pnpm --filter './packages/*' run typecheck",
+    "pretest": "pnpm run build",
+    "test": "vitest run",
+    "eval:agents": "pnpm run build && node scripts/run-authoring-evals.mjs",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run validate:skill && pnpm run check:boundary",
+    "validate:skill": "node scripts/validate-skills.mjs",
+    "check:boundary": "node scripts/check-boundary.mjs",
+    "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "fflate": "^0.8.2",
+    "gray-matter": "^4.0.3",
+    "highlight.js": "^11.11.1"
+  },
+  "devDependencies": {
+    "@doxbrix/doxloop-generator-docusaurus": "workspace:*",
+    "@doxbrix/doxloop-generator-hugo": "workspace:*",
+    "@doxbrix/doxloop-generator-jekyll": "workspace:*",
+    "@doxbrix/doxloop-generator-markdoc": "workspace:*",
+    "@doxbrix/doxloop-generator-mkdocs": "workspace:*",
+    "@doxbrix/doxloop-generator-nextra": "workspace:*",
+    "@doxbrix/doxloop-generator-sphinx": "workspace:*",
+    "@doxbrix/doxloop-generator-starlight": "workspace:*",
+    "@doxbrix/doxloop-generator-static": "workspace:*",
+    "@doxbrix/doxloop-generator-vitepress": "workspace:*",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": ""
+}

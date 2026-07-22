@@ -1,0 +1,57 @@
+{
+  "name": "@doxbrix/doxloop-generator-mkdocs",
+  "version": "0.1.0",
+  "description": "MkDocs Material generator adapter and authoring skill for Doxloop.",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doxbrix/doxloop.git",
+    "directory": "packages/generator-mkdocs"
+  },
+  "homepage": "https://github.com/doxbrix/doxloop#readme",
+  "bugs": {
+    "url": "https://github.com/doxbrix/doxloop/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills"
+  ],
+  "doxloop": {
+    "type": "generator",
+    "apiVersion": 1,
+    "id": "mkdocs",
+    "skill": "./skills/doxloop-mkdocs"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "validate:skill": "python3 ../../scripts/validate-skill.py skills/doxloop-mkdocs",
+    "prepack": "pnpm run typecheck && pnpm run build && pnpm run validate:skill"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@doxbrix/doxloop": "^0.1.0"
+  },
+  "devDependencies": {
+    "@doxbrix/doxloop": "workspace:*",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  }
+}

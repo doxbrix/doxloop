@@ -1,0 +1,4 @@
+interface:
+  display_name: "VitePress"
+  short_description: "Author and maintain native VitePress documentation"
+  default_prompt: "Use $doxloop-vitepress to author documentation using the native VitePress project format."

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Tiny Parser",
+  "spaces": [
+    {
+      "name": "Documentation",
+      "slug": "docs",
+      "nav": [
+        {
+          "type": "page",
+          "file": "index",
+          "title": "Library guide"
+        }
+      ]
+    }
+  ]
+}

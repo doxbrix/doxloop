@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Config Check",
+  "spaces": [
+    {
+      "name": "Documentation",
+      "slug": "docs",
+      "nav": [
+        {
+          "type": "page",
+          "file": "index",
+          "title": "CLI guide"
+        }
+      ]
+    }
+  ]
+}

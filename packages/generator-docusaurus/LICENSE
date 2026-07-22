@@ -1,0 +1,93 @@
+DOXLOOP PROPRIETARY SOFTWARE LICENSE
+Version 1.0, 21 July 2026
+
+Copyright (c) 2026 Doxbrix. All rights reserved.
+
+1. Definitions
+
+"Software" means the Doxloop software and all source code, object code,
+documentation, assets, and other materials distributed with this license.
+
+2. Limited License to Use
+
+Subject to your compliance with this license, Doxbrix grants you a worldwide,
+royalty-free, non-exclusive, non-transferable, and non-sublicensable license to
+download, install, and run unmodified copies of the Software for any lawful
+personal or commercial purpose.
+
+You may make only the copies technically necessary to download, install, run,
+and back up the Software. No other rights are granted.
+
+3. Restrictions
+
+Unless you first obtain explicit written permission from Doxbrix, you may not:
+
+a. copy or reproduce the Software except as expressly permitted in Section 2;
+b. modify, adapt, translate, or create derivative works of the Software;
+c. distribute, publish, sublicense, sell, rent, lease, transfer, mirror,
+   repackage, or otherwise make the Software or any part of it available to
+   another person or entity;
+d. incorporate any source code from the Software into another work, product,
+   or service;
+e. remove, alter, or obscure any copyright, license, attribution, or other
+   proprietary notice; or
+f. reverse engineer, decompile, or disassemble the Software, except to the
+   limited extent that applicable law expressly permits despite this
+   restriction.
+
+For clarity, prohibited redistribution includes publishing a copy or fork of
+the source code outside the rights that GitHub's Terms of Service require for a
+public repository, and republishing any Doxloop package or a modified version
+of it to a package registry.
+
+4. GitHub Public Repository Rights
+
+If the Software is made available in a public repository on GitHub, GitHub and
+GitHub users receive the limited rights required by GitHub's applicable Terms
+of Service, including rights to view and fork the repository through GitHub's
+service. Those platform rights do not grant permission to use, copy, modify, or
+redistribute the Software beyond GitHub's service or beyond the permissions in
+Section 2.
+
+5. Ownership and Reservation of Rights
+
+The Software is licensed, not sold. Doxbrix and its licensors retain all
+right, title, and interest in and to the Software. All rights not expressly
+granted by this license are reserved. No patent, trademark, or other license is
+granted by implication or estoppel.
+
+6. Third-Party Materials
+
+Third-party software and materials included with or used by the Software remain
+subject to their respective licenses. This license does not restrict any rights
+granted under those third-party licenses.
+
+7. Termination
+
+This license terminates automatically if you violate any of its terms. Upon
+termination, you must stop using the Software and delete all copies in your
+possession or control, except copies that applicable law requires you to keep.
+
+8. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+9. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, DOXBRIX AND ITS LICENSORS WILL NOT BE
+LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR
+PUNITIVE DAMAGES, OR FOR ANY LOSS OF DATA, PROFITS, REVENUE, BUSINESS, OR
+GOODWILL, ARISING FROM OR RELATED TO THE SOFTWARE OR THIS LICENSE, REGARDLESS OF
+THE THEORY OF LIABILITY AND EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+10. Severability
+
+If any provision of this license is held unenforceable, that provision will be
+enforced to the maximum extent permitted and the remaining provisions will
+remain in effect.
+
+Use of the Software indicates acceptance of this license. For permissions not
+granted here, contact Doxbrix and obtain explicit written permission before
+proceeding.

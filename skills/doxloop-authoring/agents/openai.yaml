@@ -1,0 +1,4 @@
+interface:
+  display_name: "Doxloop Authoring"
+  short_description: "Create expert, evidence-backed product documentation"
+  default_prompt: "Use $doxloop-authoring to infer the relevant domain and documentation-type expertise, apply audience flavor, compose professional top and left navigation, and create verified documentation that passes the quality gates."

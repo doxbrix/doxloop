@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "title": "Widget API",
+  "contentDir": "docs",
+  "generator": "doxbrix",
+  "sources": [
+    {
+      "name": "product",
+      "path": "../product"
+    }
+  ],
+  "documentation": {
+    "primaryAudience": "Backend application developers",
+    "experienceLevel": "intermediate",
+    "priorityOutcomes": ["Retrieve a widget by ID"],
+    "locale": "en-US",
+    "tone": ["clear", "direct", "professional"],
+    "standardsProfile": "doxloop-v1",
+    "styleGuide": "doxloop",
+    "terminology": {},
+    "exclusions": ["Internal database design"],
+    "accessibilityTarget": "WCAG 2.2 AA"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "cli",
+      "productType": "cli",
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [
+        ["src/cli.ts"],
+        ["tests/cli-contract.ts", "cli-contract.ts"],
+        ["package.json"]
+      ],
+      "signalGroups": [
+        ["--output"],
+        ["--format"],
+        ["exit code", "exit status"],
+        ["json"]
+      ]
+    },
+    {
+      "id": "library",
+      "productType": "library",
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [
+        ["src/index.ts"],
+        ["tests/index-contract.ts", "index-contract.ts"],
+        ["package.json"]
+      ],
+      "signalGroups": [
+        ["default export"],
+        ["parseerror"],
+        ["null"],
+        ["named export"]
+      ]
+    },
+    {
+      "id": "rest-api",
+      "productType": "rest-api",
+      "minimumSignalGroups": 4,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [
+        ["openapi.yaml"],
+        ["tests/route-contract.ts", "route-contract.ts"]
+      ],
+      "signalGroups": [
+        ["post /widgets", "post method"],
+        ["get /widgets/{id}", "get method"],
+        ["bearer"],
+        ["api_key", "query parameter"],
+        ["404"]
+      ]
+    },
+    {
+      "id": "web-app",
+      "productType": "web-app",
+      "minimumSignalGroups": 4,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [
+        ["src/auth.ts"],
+        ["src/permissions.ts"],
+        ["tests/permissions-contract.ts", "permissions-contract.ts"]
+      ],
+      "signalGroups": [
+        ["password"],
+        ["sso", "oidc"],
+        ["admin"],
+        ["alternative text", "alt text", "alt attribute"],
+        ["click here", "link text"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sphinx"
+  short_description: "Author and maintain native Sphinx documentation"
+  default_prompt: "Use $doxloop-sphinx to author documentation using the native Sphinx project format."

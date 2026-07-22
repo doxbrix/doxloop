@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nextra"
+  short_description: "Author and maintain native Nextra documentation"
+  default_prompt: "Use $doxloop-nextra to author documentation using the native Nextra project format."

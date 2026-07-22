@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "title": "Config Check",
+  "contentDir": "docs",
+  "generator": "doxbrix",
+  "sources": [
+    {
+      "name": "product",
+      "path": "../product"
+    }
+  ],
+  "documentation": {
+    "primaryAudience": "Platform engineers",
+    "experienceLevel": "intermediate",
+    "priorityOutcomes": ["Validate a configuration file in CI"],
+    "locale": "en-US",
+    "tone": ["clear", "direct", "professional"],
+    "standardsProfile": "doxloop-v1",
+    "styleGuide": "doxloop",
+    "terminology": {},
+    "exclusions": ["Internal parser architecture"],
+    "accessibilityTarget": "WCAG 2.2 AA"
+  }
+}

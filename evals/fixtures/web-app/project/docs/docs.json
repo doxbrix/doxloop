@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Operations Console",
+  "spaces": [
+    {
+      "name": "Documentation",
+      "slug": "docs",
+      "nav": [
+        {
+          "type": "page",
+          "file": "index",
+          "title": "Administrator guide"
+        }
+      ]
+    }
+  ]
+}

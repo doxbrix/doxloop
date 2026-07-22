@@ -1,0 +1,4 @@
+interface:
+  display_name: "Markdoc"
+  short_description: "Author and maintain native Markdoc documentation"
+  default_prompt: "Use $doxloop-markdoc to author documentation using the native Markdoc project format."

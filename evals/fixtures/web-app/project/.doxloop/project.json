@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "title": "Operations Console",
+  "contentDir": "docs",
+  "generator": "doxbrix",
+  "sources": [
+    {
+      "name": "product",
+      "path": "../product"
+    }
+  ],
+  "documentation": {
+    "primaryAudience": "Workspace administrators",
+    "experienceLevel": "mixed",
+    "priorityOutcomes": ["Sign in and invite an operator"],
+    "locale": "en-US",
+    "tone": ["clear", "direct", "professional"],
+    "standardsProfile": "doxloop-v1",
+    "styleGuide": "doxloop",
+    "terminology": {
+      "organization": "workspace"
+    },
+    "exclusions": ["Identity-provider implementation"],
+    "accessibilityTarget": "WCAG 2.2 AA"
+  }
+}

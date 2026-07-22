@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.generator.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

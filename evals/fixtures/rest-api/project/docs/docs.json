@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Widget API",
+  "spaces": [
+    {
+      "name": "Documentation",
+      "slug": "docs",
+      "nav": [
+        {
+          "type": "page",
+          "file": "index",
+          "title": "API guide"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Doxloop Docusaurus Format"
+  short_description: "Author native Docusaurus documentation sites"
+  default_prompt: "Use $doxloop-docusaurus to author documentation in native Docusaurus Markdown, MDX, and sidebar format."

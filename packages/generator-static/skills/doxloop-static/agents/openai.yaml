@@ -1,0 +1,4 @@
+interface:
+  display_name: "Static HTML"
+  short_description: "Author and maintain prebuilt static HTML documentation"
+  default_prompt: "Use $doxloop-static to author documentation using the native Static HTML project format."

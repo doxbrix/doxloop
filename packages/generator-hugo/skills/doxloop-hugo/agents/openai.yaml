@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hugo"
+  short_description: "Author and maintain native Hugo documentation"
+  default_prompt: "Use $doxloop-hugo to author documentation using the native Hugo project format."

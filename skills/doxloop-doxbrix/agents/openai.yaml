@@ -1,0 +1,4 @@
+interface:
+  display_name: "Doxloop Doxbrix Format"
+  short_description: "Author native Doxbrix docs, API endpoints, and components"
+  default_prompt: "Use $doxloop-doxbrix to author documentation in native Doxbrix MDX and navigation format, using ApiEndpoint with Param and Response for HTTP API reference."

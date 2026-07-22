@@ -1,0 +1,4 @@
+interface:
+  display_name: "Starlight"
+  short_description: "Author and maintain native Starlight documentation"
+  default_prompt: "Use $doxloop-starlight to author documentation using the native Starlight project format."

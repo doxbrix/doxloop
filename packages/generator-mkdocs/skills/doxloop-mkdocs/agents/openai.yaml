@@ -1,0 +1,4 @@
+interface:
+  display_name: "Doxloop MkDocs Format"
+  short_description: "Author native MkDocs Material documentation"
+  default_prompt: "Use $doxloop-mkdocs to author documentation in native MkDocs Material Markdown and navigation format."

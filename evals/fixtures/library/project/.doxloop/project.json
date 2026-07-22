@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "title": "Tiny Parser",
+  "contentDir": "docs",
+  "generator": "doxbrix",
+  "sources": [
+    {
+      "name": "product",
+      "path": "../product"
+    }
+  ],
+  "documentation": {
+    "primaryAudience": "TypeScript application developers",
+    "experienceLevel": "intermediate",
+    "priorityOutcomes": ["Parse a document and handle invalid input"],
+    "locale": "en-US",
+    "tone": ["clear", "direct", "professional"],
+    "standardsProfile": "doxloop-v1",
+    "styleGuide": "doxloop",
+    "terminology": {},
+    "exclusions": ["Parser implementation internals"],
+    "accessibilityTarget": "WCAG 2.2 AA"
+  }
+}

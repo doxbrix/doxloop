@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jekyll"
+  short_description: "Author and maintain native Jekyll documentation"
+  default_prompt: "Use $doxloop-jekyll to author documentation using the native Jekyll project format."

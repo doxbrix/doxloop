@@ -1,0 +1,7 @@
+{
+  "name": "config-check",
+  "version": "2.0.0",
+  "bin": {
+    "config-check": "./dist/cli.js"
+  }
+}

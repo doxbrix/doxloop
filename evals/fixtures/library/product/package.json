@@ -1,0 +1,8 @@
+{
+  "name": "tiny-parser",
+  "version": "1.4.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  }
+}

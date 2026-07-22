@@ -1,0 +1,25 @@
+openapi: 3.1.0
+info:
+  title: Widget API
+  version: 1.0.0
+paths:
+  /widgets/{id}:
+    get:
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Widget found
+        '404':
+          description: Widget not found
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

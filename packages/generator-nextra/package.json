@@ -1,0 +1,25 @@
+{
+  "name": "@doxbrix/doxloop-generator-nextra",
+  "version": "0.1.0",
+  "description": "Nextra generator adapter and authoring skill for Doxloop.",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doxbrix/doxloop.git",
+    "directory": "packages/generator-nextra"
+  },
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" } },
+  "files": ["dist", "skills"],
+  "doxloop": { "type": "generator", "apiVersion": 1, "id": "nextra", "skill": "./skills/doxloop-nextra" },
+  "publishConfig": { "registry": "https://registry.npmjs.org", "access": "public" },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "validate:skill": "python3 ../../scripts/validate-skill.py skills/doxloop-nextra",
+    "prepack": "pnpm run typecheck && pnpm run build && pnpm run validate:skill"
+  },
+  "peerDependencies": { "@doxbrix/doxloop": "^0.1.0" },
+  "devDependencies": { "@doxbrix/doxloop": "workspace:*", "@types/node": "^22.15.3", "typescript": "^5.8.3" },
+  "engines": { "node": ">=20.12.0" }
+}
