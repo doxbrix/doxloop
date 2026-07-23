@@ -9,6 +9,11 @@ import { loadGeneratorAdapter } from './generators.js'
 import { loadProject } from './project.js'
 import { createStepList, formatDuration } from './progress.js'
 import { validateProject } from './validation.js'
+import {
+  deploymentVisibility,
+  updateDeploymentVisibility,
+  type DeploymentVisibility,
+} from './deployment-visibility.js'
 
 const MAX_ZIP_BYTES = 100 * 1024 * 1024
 const MAX_FILES = 20_000
@@ -24,6 +29,7 @@ interface ProjectSummary {
   generator?: string | null
   source?: string | null
   hostedUrl?: string | null
+  visibility?: DeploymentVisibility
 }
 
 interface Reservation {
@@ -47,12 +53,16 @@ export async function deployGeneratedSite(options: {
   name: string
   slug: string
   dryRun?: boolean
+  public?: boolean
   apiUrl?: string
 }): Promise<void> {
   const project = await loadProject(options.root)
   const adapter = await loadGeneratorAdapter(options.root, project)
   const steps = createStepList()
-  process.stdout.write(`Deploying "${options.name}" → ${apiUrl(options.apiUrl)}\n\n`)
+  const visibility = deploymentVisibility(options.public)
+  process.stdout.write(
+    `Deploying "${options.name}" as ${visibility} → ${apiUrl(options.apiUrl)}\n\n`,
+  )
 
   try {
     const validating = steps.start('Validating documentation')
@@ -74,6 +84,7 @@ export async function deployGeneratedSite(options: {
       if (existing?.project) {
         target = existing.project
         assertArtifactProject(target, project.generator)
+        await updateDeploymentVisibility(target, visibility, options.apiUrl)
         locating.done(`Found project "${target.name}" (${target.slug})`)
       } else {
         const created = await authenticatedRequest<{ project: ProjectSummary }>(
@@ -84,6 +95,7 @@ export async function deployGeneratedSite(options: {
             body: JSON.stringify({
               name: options.name,
               slug: options.slug,
+              visibility,
               seedTemplate: false,
               connectedArtifact: { generator: project.generator },
             }),
@@ -108,7 +120,7 @@ export async function deployGeneratedSite(options: {
     )
 
     if (options.dryRun) {
-      process.stdout.write(`\nDeployment is valid.\nGenerator: ${project.generator}\nOutput: ${adapter.build.outputDir}\nFiles: ${packaged.files}\nArtifact: ${formatBytes(packaged.archive.byteLength)}\nSHA-256: ${packaged.sha256}\nNo data was uploaded.\n`)
+      process.stdout.write(`\nDeployment is valid.\nGenerator: ${project.generator}\nVisibility: ${visibility}\nOutput: ${adapter.build.outputDir}\nFiles: ${packaged.files}\nArtifact: ${formatBytes(packaged.archive.byteLength)}\nSHA-256: ${packaged.sha256}\nNo data was uploaded.\n`)
       return
     }
     if (!target) throw new DoxloopError('Doxbrix project resolution failed.')

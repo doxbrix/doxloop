@@ -33,6 +33,13 @@ describe('argument parsing', () => {
     expect(booleanFlag(args, 'open')).toBe(false)
   })
 
+  test('treats public deployment as a boolean flag', () => {
+    const args = parseArgs(['deploy', '--public'])
+
+    expect(booleanFlag(args, 'public')).toBe(true)
+    expect(args.positionals).toEqual([])
+  })
+
   test('rejects options outside a command schema', () => {
     const args = parseArgs(['test', '--formt', 'json'])
 

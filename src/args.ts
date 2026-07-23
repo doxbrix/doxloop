@@ -7,6 +7,7 @@ const BOOLEAN_FLAGS = new Set([
   'help',
   'open',
   'print',
+  'public',
   'screenshots',
   'no-screenshots',
   'v',

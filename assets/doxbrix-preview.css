@@ -6414,7 +6414,7 @@ body.dxb-preview-mobile > .dp-root--published {
 }
 
 .dp-root--published[data-shell-theme='atlas'] .dp-nav-tree {
-  padding: 28px 0 80px;
+  padding: 28px var(--dxb-nav-padding, 24px) 80px;
   /* Scrollbar space stays reserved; thumb is revealed on leftnav hover */
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;

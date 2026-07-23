@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local-first documentation agent CLI for Codex, Claude Code, and Gemini.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -50,6 +50,7 @@
     "test": "vitest run",
     "eval:agents": "pnpm run build && node scripts/run-authoring-evals.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run validate:skill && pnpm run check:boundary",
+    "release:local": "node scripts/release-local.mjs",
     "validate:skill": "node scripts/validate-skills.mjs",
     "check:boundary": "node scripts/check-boundary.mjs",
     "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary"

@@ -39,6 +39,7 @@ import {
   validateProjectSourceBoundaries,
 } from './project.js'
 import { startPreview } from './preview.js'
+import { confirmPublicDeployment } from './public-deploy-confirmation.js'
 import type { ParsedArgs } from './types.js'
 import { formatValidation, validateProject } from './validation.js'
 import { VERSION } from './version.js'
@@ -136,11 +137,17 @@ async function main(): Promise<number> {
       const name = flag(args, 'name')
       const slug = flag(args, 'slug')
       const apiOverride = flag(args, 'api-url')
+      const dryRun = booleanFlag(args, 'dry-run')
+      const publicSite = booleanFlag(args, 'public')
+      if (publicSite && !dryRun && !(await confirmPublicDeployment())) {
+        throw new DoxloopError('Public deployment canceled. No data was uploaded.')
+      }
       await deploy({
         root,
         ...(name ? { name } : {}),
         ...(slug ? { slug } : {}),
-        dryRun: booleanFlag(args, 'dry-run'),
+        dryRun,
+        public: publicSite,
         ...(apiOverride ? { apiUrl: apiOverride } : {}),
       })
       return 0
@@ -400,7 +407,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     login: ['api-url', 'token'],
     logout: [],
     whoami: ['api-url'],
-    deploy: ['dry-run', 'name', 'slug', 'api-url'],
+    deploy: ['dry-run', 'public', 'name', 'slug', 'api-url'],
   }
   if (args.command === undefined) {
     assertAllowedFlags(args, new Set())
@@ -582,6 +589,7 @@ Validate and publish documentation through the public Doxbrix HTTP API.
 
 Options:
   --dry-run                Validate and summarize without uploading
+  --public                 Deploy publicly after an explicit confirmation
   --name <name>            Hosted project name
   --slug <slug>            Hosted project slug
   --api-url <url>          Override the Doxbrix API base URL

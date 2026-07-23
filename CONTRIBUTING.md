@@ -2,6 +2,9 @@
 
 Use Node.js 20.12 or later and the pnpm version declared in `package.json`.
 
+Maintainers publish npm and GitHub releases with the guarded local workflow in
+[`docs/releasing.md`](docs/releasing.md).
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm run check

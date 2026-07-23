@@ -8,6 +8,11 @@ import { DoxloopError } from './errors.js'
 import { listFiles, resolveContainedDirectory } from './fs.js'
 import { deployGeneratedSite } from './artifact-deploy.js'
 import {
+  deploymentVisibility,
+  updateDeploymentVisibility,
+  type DeploymentVisibility,
+} from './deployment-visibility.js'
+import {
   loadPages,
   loadProject,
   loadSiteConfig,
@@ -51,6 +56,7 @@ interface ProjectSummary {
   id: string
   name: string
   slug: string
+  visibility?: DeploymentVisibility
 }
 
 interface PushReport {
@@ -66,11 +72,13 @@ export async function deploy(options: {
   name?: string
   slug?: string
   dryRun?: boolean
+  public?: boolean
   apiUrl?: string
 }): Promise<void> {
   const project = await loadProject(options.root)
   const name = options.name?.trim() || project.title
   const slug = options.slug?.trim() || slugify(project.title)
+  const visibility = deploymentVisibility(options.public)
   process.stdout.write(
     `Documentation project:\n  ${options.root}\nProduct sources excluded from deployment: ${project.sources.length}\n\n`,
   )
@@ -78,7 +86,9 @@ export async function deploy(options: {
     return deployGeneratedSite({ ...options, name, slug })
   }
   const steps = createStepList()
-  process.stdout.write(`Deploying "${name}" → ${apiUrl(options.apiUrl)}\n\n`)
+  process.stdout.write(
+    `Deploying "${name}" as ${visibility} → ${apiUrl(options.apiUrl)}\n\n`,
+  )
 
   try {
     const validating = steps.start('Validating documentation')
@@ -100,7 +110,7 @@ export async function deploy(options: {
 
     if (options.dryRun) {
       process.stdout.write(
-        `\nDeployment is valid.\nProject: ${name}\nSlug: ${slug}\nPages: ${bundle.pages.length}\nMedia files: ${bundle.media.length}\nPayload: ${formatBytes(bytes)}\nNo data was uploaded.\n`,
+        `\nDeployment is valid.\nProject: ${name}\nSlug: ${slug}\nVisibility: ${visibility}\nPages: ${bundle.pages.length}\nMedia files: ${bundle.media.length}\nPayload: ${formatBytes(bytes)}\nNo data was uploaded.\n`,
       )
       return
     }
@@ -113,6 +123,7 @@ export async function deploy(options: {
     )
     let target = existing?.project
     if (target) {
+      await updateDeploymentVisibility(target, visibility, options.apiUrl)
       locating.done(`Found project "${target.name}" (${target.slug})`)
     } else {
       const created = await authenticatedRequest<{ project: ProjectSummary }>(
@@ -122,7 +133,7 @@ export async function deploy(options: {
           headers: { 'Content-Type': 'application/json' },
           // The bundle below is the source of truth. Do not let Doxbrix seed its
           // web starter template (Guides / API Reference / FAQ) first.
-          body: JSON.stringify({ name, slug, seedTemplate: false }),
+          body: JSON.stringify({ name, slug, visibility, seedTemplate: false }),
         },
         options.apiUrl,
       )

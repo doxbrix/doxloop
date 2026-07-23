@@ -254,7 +254,9 @@ describe('generator preview', () => {
     expect(css).toContain(
       "grid-template-columns: var(--dxb-sidebar-width, 256px) minmax(0, 1fr) var(--dxb-toc-width, 248px)",
     )
-    expect(css).toContain('padding: 28px 0 80px')
+    expect(css).toContain(
+      'padding: 28px var(--dxb-nav-padding, 24px) 80px',
+    )
     expect(css).toContain('padding: 40px 0 72px')
     expect(css).toContain('padding: 40px var(--dxb-content-padding, 4px) 96px')
     expect(css).toContain('background-color: var(--dxb-background-light, #fff)')

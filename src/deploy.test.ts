@@ -137,6 +137,7 @@ describe('deployment', () => {
     expect(JSON.parse(String(create?.init?.body))).toMatchObject({
       name: 'Docs',
       slug: 'docs',
+      visibility: 'private',
       seedTemplate: false,
     })
   })
@@ -178,11 +179,67 @@ describe('deployment', () => {
     await deploy({ root, apiUrl: 'https://doxbrix.test' })
 
     const create = requests.find((request) => request.url.endsWith('/api/v1/projects') && request.init?.method === 'POST')
-    expect(JSON.parse(String(create?.init?.body))).toMatchObject({ connectedArtifact: { generator: 'static' } })
+    expect(JSON.parse(String(create?.init?.body))).toMatchObject({
+      connectedArtifact: { generator: 'static' },
+      visibility: 'private',
+    })
     const upload = requests.find((request) => request.url === 'https://upload.test/raw.zip')
     expect(upload?.init?.headers).toMatchObject({ 'x-amz-checksum-sha256': 'checksum' })
     expect(new Headers(upload?.init?.headers).has('authorization')).toBe(false)
     expect(requests.some((request) => request.url.endsWith('/complete'))).toBe(true)
+  })
+
+  test('makes an existing project public when requested', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
+    )
+    await writeFile(
+      join(root, 'docs', 'quickstart.mdx'),
+      '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
+    )
+    vi.stubEnv('DOXLOOP_TOKEN', 'dxb_test')
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.endsWith('/api/v1/projects/docs') && init?.method === 'GET') {
+        return Response.json({
+          project: {
+            id: 'project-1',
+            name: 'Docs',
+            slug: 'docs',
+            visibility: 'private',
+          },
+        })
+      }
+      if (url.endsWith('/settings') && init?.method === 'PATCH') {
+        return Response.json({ settings: { visibility: 'public' } })
+      }
+      return Response.json({
+        result: {
+          spaces: 1,
+          pagesCreated: 0,
+          pagesUpdated: 2,
+          navItems: 3,
+          warnings: [],
+        },
+      })
+    })
+
+    await deploy({ root, public: true, apiUrl: 'https://doxbrix.test' })
+
+    const visibilityUpdate = requests.find(
+      (request) => request.url.endsWith('/api/v1/projects/project-1/settings'),
+    )
+    expect(visibilityUpdate?.init?.method).toBe('PATCH')
+    expect(JSON.parse(String(visibilityUpdate?.init?.body))).toEqual({
+      visibility: 'public',
+    })
   })
 
   test('rejects symbolic links inside generated output', async () => {

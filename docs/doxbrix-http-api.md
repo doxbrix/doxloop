@@ -92,13 +92,14 @@ POST /api/v1/projects
 Authorization: Bearer dxb_…
 Content-Type: application/json
 
-{"name":"Example documentation","slug":"example-documentation","seedTemplate":false}
+{"name":"Example documentation","slug":"example-documentation","visibility":"private","seedTemplate":false}
 ```
 
-The response uses the same `{"project":{…}}` envelope. API-created projects
-default to `seedTemplate: false` so the following bundle is their only
-documentation structure. Pass `true` only when the Doxbrix web starter spaces
-and pages are wanted.
+The response uses the same `{"project":{…}}` envelope. Doxloop explicitly sends
+`visibility: "private"` unless the user confirms `doxloop deploy --public`.
+API-created projects default to `seedTemplate: false` so the following bundle
+is their only documentation structure. Pass `true` only when the Doxbrix web
+starter spaces and pages are wanted.
 
 ## Push a documentation bundle
 
@@ -157,9 +158,13 @@ Create the project with its producing generator:
 {
   "name": "Example documentation",
   "slug": "example-documentation",
+  "visibility": "private",
   "connectedArtifact": { "generator": "docusaurus" }
 }
 ```
+
+When reusing a project, Doxloop sets the requested visibility with
+`PATCH /api/v1/projects/{idOrSlug}/settings` before publishing.
 
 Reserve an upload by sending the ZIP byte length and lowercase/uppercase SHA-256
 hex digest to `POST /api/v1/projects/{idOrSlug}/deployments`. PUT the exact ZIP

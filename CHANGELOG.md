@@ -5,6 +5,8 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.1.1 - 2026-07-23
+
 ### Added
 
 - Request-driven application guide screenshots for `doxloop create` and
@@ -15,6 +17,10 @@ uses semantic versioning after its first stable release.
 - Post-authoring validation receipts and guarded synchronization baselines.
 - Source-content fingerprints for committed and uncommitted synchronization.
 - JSON output for `test` and `status`.
+- Private-by-default deployment visibility and a confirmation-gated `--public`
+  deploy option.
+- Guarded local npm and GitHub releases that automatically include modified
+  generator packages.
 - Security, project-format, agent, CI, generator-authoring, generator-selection,
   and troubleshooting documentation.
 
