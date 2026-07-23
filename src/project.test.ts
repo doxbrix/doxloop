@@ -202,6 +202,15 @@ describe('project scaffolding', () => {
   test('creates a native MkDocs Material project through its generator package', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
     roots.push(parent)
+    const corePackage = JSON.parse(
+      await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string }
+    const generatorPackage = JSON.parse(
+      await readFile(
+        new URL('../packages/generator-mkdocs/package.json', import.meta.url),
+        'utf8',
+      ),
+    ) as { version: string }
     const root = await scaffoldProject({
       directory: join(parent, 'sample-docs'),
       sources: [],
@@ -225,8 +234,8 @@ describe('project scaffolding', () => {
       JSON.parse(await readFile(join(root, 'package.json'), 'utf8')),
     ).toMatchObject({
       devDependencies: {
-        '@doxbrix/doxloop': '^0.1.0',
-        '@doxbrix/doxloop-generator-mkdocs': '^0.1.0',
+        '@doxbrix/doxloop': `^${corePackage.version}`,
+        '@doxbrix/doxloop-generator-mkdocs': `^${generatorPackage.version}`,
       },
     })
   })

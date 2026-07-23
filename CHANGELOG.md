@@ -26,6 +26,8 @@ uses semantic versioning after its first stable release.
 
 ### Changed
 
+- Release validation now runs npm package lifecycle checks against the proposed
+  version before committing or pushing.
 - Expanded native guidance for every official generator skill.
 - Strengthened real-agent review evaluation with evidence, prioritization,
   rubric, and read-only checks.

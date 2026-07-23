@@ -52,7 +52,8 @@ async function main() {
     )
   }
 
-  const manifest = JSON.parse(await readFile(packagePath, 'utf8'))
+  const packageContents = await readFile(packagePath, 'utf8')
+  const manifest = JSON.parse(packageContents)
   const currentVersion = parseVersion(manifest.version, 'package.json version')
   const currentTag = `v${formatVersion(currentVersion)}`
   const currentTagAtHead = await tagPointsAtHead(currentTag)
@@ -152,15 +153,15 @@ async function main() {
     dryRun: options.dryRun,
   })
 
-  process.stdout.write('\nRunning release checks...\n')
-  await run('pnpm', ['check'])
-  await inspectReleasePackages(releasePackages)
-  const fingerprintAfterChecks = await worktreeFingerprint()
-  if (fingerprintAfterChecks !== fingerprintBeforeChecks) {
-    throw new Error(
-      'Release checks changed worktree files. Review those changes and rerun the release.',
-    )
-  }
+  const preparedFingerprint = await validateCandidateRelease({
+    manifest,
+    packageContents,
+    changelog,
+    generators: changedGenerators,
+    version: versionText,
+    packages: releasePackages,
+    originalFingerprint: fingerprintBeforeChecks,
+  })
 
   if (options.dryRun) {
     process.stdout.write(
@@ -173,10 +174,21 @@ async function main() {
   await confirmRelease(versionText)
   await ensureNpmLogin()
 
-  manifest.version = versionText
-  await writeFile(packagePath, `${JSON.stringify(manifest, null, 2)}\n`)
-  await versionGeneratorPackages(changedGenerators, versionText)
-  await promoteChangelog(changelog, versionText)
+  try {
+    await applyReleaseFiles(manifest, changedGenerators, changelog, versionText)
+    if ((await worktreeFingerprint()) !== preparedFingerprint) {
+      throw new Error(
+        'Prepared release files differ from the state that passed validation. Review the worktree and rerun the release.',
+      )
+    }
+  } catch (error) {
+    await restoreReleaseFiles(
+      packageContents,
+      changelog,
+      changedGenerators,
+    )
+    throw error
+  }
 
   await run('git', ['add', '--all'])
   await run('git', ['diff', '--cached', '--check'])
@@ -235,8 +247,7 @@ async function resumeRelease({
     dryRun: options.dryRun,
     resume: true,
   })
-  process.stdout.write('\nRunning release checks...\n')
-  await run('pnpm', ['check'])
+  process.stdout.write('\nRunning npm package lifecycle checks...\n')
   await inspectReleasePackages(releasePackages)
   if (options.dryRun) {
     process.stdout.write(
@@ -251,8 +262,14 @@ async function resumeRelease({
     await ensureNpmLogin()
   }
 
-  const remoteTag = await remoteTagExists(tag)
-  if (!remoteTag) {
+  const remoteTagCommit = await resolveRemoteTagCommit(tag)
+  const head = await output('git', ['rev-parse', 'HEAD'])
+  if (remoteTagCommit && remoteTagCommit !== head) {
+    throw new Error(
+      `Remote tag ${tag} points to ${remoteTagCommit}, but the prepared release is ${head}. Update the remote tag deliberately before resuming.`,
+    )
+  }
+  if (!remoteTagCommit) {
     process.stdout.write('\nPushing the prepared release commit and tag...\n')
     await run('git', [
       'push',
@@ -319,9 +336,11 @@ async function loadGeneratorPackages() {
   for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
     const directory = join(packagesRoot, entry.name)
     const manifestPath = join(directory, 'package.json')
+    let contents
     let manifest
     try {
-      manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      contents = await readFile(manifestPath, 'utf8')
+      manifest = JSON.parse(contents)
     } catch (error) {
       if (error && typeof error === 'object' && error.code === 'ENOENT') continue
       throw error
@@ -337,6 +356,7 @@ async function loadGeneratorPackages() {
       version: manifest.version,
       directory,
       manifestPath,
+      contents,
       manifest,
     })
   }
@@ -430,9 +450,64 @@ function releasePackage(
 
 async function inspectReleasePackages(packages) {
   for (const candidate of packages) {
-    await run('npm', ['pack', '--dry-run', '--ignore-scripts'], {
+    await run('npm', ['pack', '--dry-run'], {
       cwd: candidate.directory,
     })
+  }
+}
+
+async function validateCandidateRelease({
+  manifest,
+  packageContents,
+  changelog,
+  generators,
+  version,
+  packages,
+  originalFingerprint,
+}) {
+  process.stdout.write(
+    `\nValidating npm package lifecycle at version ${version}...\n`,
+  )
+  let preparedFingerprint
+  let validationError
+  try {
+    await applyReleaseFiles(manifest, generators, changelog, version)
+    preparedFingerprint = await worktreeFingerprint()
+    await inspectReleasePackages(packages)
+    if ((await worktreeFingerprint()) !== preparedFingerprint) {
+      throw new Error(
+        'Release checks changed worktree files. Review those changes and rerun the release.',
+      )
+    }
+  } catch (error) {
+    validationError = error
+  } finally {
+    await restoreReleaseFiles(packageContents, changelog, generators)
+  }
+  if ((await worktreeFingerprint()) !== originalFingerprint) {
+    throw new Error(
+      'Could not restore the worktree after release validation. Review the current changes before continuing.',
+    )
+  }
+  if (validationError) throw validationError
+  if (!preparedFingerprint) {
+    throw new Error('Release validation did not prepare a candidate package.')
+  }
+  return preparedFingerprint
+}
+
+async function applyReleaseFiles(manifest, generators, changelog, version) {
+  manifest.version = version
+  await writeFile(packagePath, `${JSON.stringify(manifest, null, 2)}\n`)
+  await versionGeneratorPackages(generators, version)
+  await promoteChangelog(changelog, version)
+}
+
+async function restoreReleaseFiles(packageContents, changelog, generators) {
+  await writeFile(packagePath, packageContents)
+  await writeFile(changelogPath, changelog)
+  for (const generator of generators) {
+    await writeFile(generator.manifestPath, generator.contents)
   }
 }
 
@@ -714,13 +789,24 @@ async function tagPointsAtHead(tag) {
 }
 
 async function remoteTagExists(tag) {
-  const result = await output('git', [
+  return Boolean(await resolveRemoteTagCommit(tag))
+}
+
+async function resolveRemoteTagCommit(tag) {
+  const peeled = await output('git', [
+    'ls-remote',
+    '--tags',
+    'origin',
+    `refs/tags/${tag}^{}`,
+  ])
+  if (peeled) return peeled.split(/\s+/)[0]
+  const direct = await output('git', [
     'ls-remote',
     '--tags',
     'origin',
     `refs/tags/${tag}`,
   ])
-  return result.length > 0
+  return direct ? direct.split(/\s+/)[0] : ''
 }
 
 async function packageVersionExists(packageName, version) {

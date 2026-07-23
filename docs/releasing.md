@@ -40,9 +40,16 @@ before it changes files. If there is no active npm session, it starts
 `npm login`. During each `npm publish`, complete npm's interactive 2FA or
 WebAuthn prompt.
 
+Before confirmation or pushing, the command temporarily applies the proposed
+versions and runs each selected package's complete npm `prepack` lifecycle. It
+then restores the original worktree. This makes a dry run exercise the same
+version-sensitive tests and builds that npm publishing will execute.
+
 If publishing or GitHub Release creation fails after the release commit and tag
 are created, fix the reported issue and rerun `pnpm release:local`. The command
 detects the prepared tag, skips work already completed, and resumes the release.
+It also verifies that the remote tag resolves to the exact prepared commit
+before publishing.
 
 The root package is always released. The command also compares each generator
 package with its currently published source revision. Modified or unpublished
