@@ -174,8 +174,8 @@ async function startDoxbrixPreview(
       send(
         response,
         500,
-        'text/plain; charset=utf-8',
-        error instanceof Error ? error.message : String(error),
+        'text/html; charset=utf-8',
+        previewErrorPage(error),
       )
     }
   })
@@ -988,6 +988,52 @@ function safeStaticPath(contentRoot: string, pathname: string): string | undefin
 
 function errorPage(requested: string, site: DoxbrixSiteConfig): string {
   return `<!doctype html><meta charset="utf-8"><title>Page not found</title><body style="font-family:system-ui;padding:40px"><h1>Page not found</h1><p>No Doxbrix page matches <code>/${escapeHtml(requested)}</code> in ${escapeHtml(site.name ?? 'this project')}.</p></body>`
+}
+
+export function previewErrorPage(error: unknown): string {
+  const rawMessage = error instanceof Error ? error.message : String(error)
+  const message = rawMessage.trim() || 'The content could not be rendered.'
+  const sourceMatch = /(?:^|\s)((?:docs\/)?(?:docs\.json|[^:\n]+\.(?:md|mdx)))(?=\s|:|$)/i.exec(
+    message,
+  )
+  const source = sourceMatch?.[1]
+  const problem = /Cannot read properties of (?:undefined|null)/.test(message)
+    ? 'A required content value is missing or has the wrong type.'
+    : message
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preview content error</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f7f8fb}
+    *{box-sizing:border-box}body{margin:0;padding:48px 24px}.card{max-width:760px;margin:7vh auto;background:#fff;border:1px solid #e3e7ef;border-radius:16px;padding:32px;box-shadow:0 12px 36px rgba(23,32,51,.08)}
+    .label{display:inline-block;margin-bottom:16px;padding:5px 10px;border-radius:999px;background:#fff1f0;color:#b42318;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+    h1{margin:0 0 12px;font-size:28px;line-height:1.2}p{color:#536078;line-height:1.65}dl{margin:24px 0;padding:18px 20px;border-radius:10px;background:#f7f8fb}dt{margin-top:12px;color:#667085;font-size:12px;font-weight:700;text-transform:uppercase}dt:first-child{margin-top:0}dd{margin:5px 0 0;line-height:1.55;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#344054}ol{padding-left:22px;color:#344054;line-height:1.8}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <span class="label">Content error</span>
+    <h1>This page could not be rendered</h1>
+    <p>The preview server is still running. Fix the content described below; the browser will reload when the file changes.</p>
+    <dl>
+      ${source ? `<dt>File</dt><dd><code>${escapeHtml(source)}</code></dd>` : ''}
+      <dt>Problem</dt><dd>${escapeHtml(problem)}</dd>
+    </dl>
+    <ol>
+      <li>Correct the field or markup named in the problem.</li>
+      <li>Run <code>doxloop test</code> to find any other content issues.</li>
+      <li>Save the file; preview will reload automatically.</li>
+    </ol>
+  </main>
+  <script>
+    const events = new EventSource('/__doxloop/events');
+    events.addEventListener('reload', () => location.reload());
+  </script>
+</body>
+</html>`
 }
 
 function send(

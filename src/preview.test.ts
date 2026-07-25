@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   doxbrixDocument,
+  previewErrorPage,
 } from './preview.js'
 import {
   docusaurusInstallInvocation,
@@ -287,5 +288,20 @@ describe('generator preview', () => {
     )
     expect(css).not.toContain("data-imported-source='mintlify'")
     expect(css).not.toContain('.dxb-mint-')
+  })
+
+  test('shows actionable content failures without exposing a raw runtime error', () => {
+    const html = previewErrorPage(
+      new TypeError(
+        "docs/docs.json: Cannot read properties of undefined (reading 'replaceAll')",
+      ),
+    )
+
+    expect(html).toContain('This page could not be rendered')
+    expect(html).toContain('<code>docs/docs.json</code>')
+    expect(html).toContain('A required content value is missing or has the wrong type.')
+    expect(html).toContain('<code>doxloop test</code>')
+    expect(html).toContain("new EventSource('/__doxloop/events')")
+    expect(html).not.toContain('replaceAll')
   })
 })

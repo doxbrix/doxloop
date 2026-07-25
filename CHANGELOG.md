@@ -5,6 +5,8 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.1.3 - 2026-07-25
+
 ## 0.1.2 - 2026-07-25
 
 ### Fixed

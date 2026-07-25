@@ -169,6 +169,25 @@ describe('project scaffolding', () => {
     })
   })
 
+  test('rejects malformed Doxbrix navigation with an actionable field path', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'sample-docs'),
+      sources: [],
+    })
+    const configPath = join(root, 'docs', 'docs.json')
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as {
+      spaces: Array<{ nav: Array<Record<string, unknown>> }>
+    }
+    config.spaces[0]!.nav = [{ type: 'link', href: '/support' }]
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+
+    await expect(loadSiteConfig(root)).rejects.toThrow(
+      'docs/docs.json is invalid: spaces[0].nav[0].title must be a non-empty string.',
+    )
+  })
+
   test('creates a native Docusaurus project when selected', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
     roots.push(parent)

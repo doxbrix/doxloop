@@ -136,8 +136,9 @@ export async function loadSiteConfig(
   const config = await readJson<unknown>(path)
   if (isDoxbrixSiteConfig(config)) return config
   if (isLegacySiteConfig(config)) return convertLegacySiteConfig(config)
+  const problem = doxbrixSiteConfigProblem(config)
   throw new DoxloopError(
-    `${relativePath(root, path)} must contain a Doxbrix version and spaces array.`,
+    `${relativePath(root, path)} is invalid: ${problem ?? 'expected a Doxbrix version and spaces array.'}`,
   )
 }
 
@@ -490,9 +491,104 @@ async function scaffoldDoxbrix(root: string, title: string): Promise<void> {
 }
 
 function isDoxbrixSiteConfig(value: unknown): value is DoxbrixSiteConfig {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<DoxbrixSiteConfig>
-  return candidate.version === 1 && Array.isArray(candidate.spaces)
+  return doxbrixSiteConfigProblem(value) === undefined
+}
+
+function doxbrixSiteConfigProblem(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return 'the root value must be an object.'
+  }
+  const candidate = value as Record<string, unknown>
+  if (candidate.version !== 1) return 'version must be 1.'
+  if (candidate.name !== undefined && typeof candidate.name !== 'string') {
+    return 'name must be a string.'
+  }
+  if (
+    candidate.description !== undefined &&
+    typeof candidate.description !== 'string'
+  ) {
+    return 'description must be a string.'
+  }
+  if (!Array.isArray(candidate.spaces)) return 'spaces must be an array.'
+
+  for (const [spaceIndex, value] of candidate.spaces.entries()) {
+    const location = `spaces[${spaceIndex}]`
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return `${location} must be an object.`
+    }
+    const space = value as Record<string, unknown>
+    if (typeof space.name !== 'string' || space.name.trim() === '') {
+      return `${location}.name must be a non-empty string.`
+    }
+    if (!Array.isArray(space.nav)) return `${location}.nav must be an array.`
+    const optionalStrings = ['slug', 'locale', 'parent', 'icon', 'tag']
+    for (const key of optionalStrings) {
+      if (space[key] !== undefined && typeof space[key] !== 'string') {
+        return `${location}.${key} must be a string.`
+      }
+    }
+    const navProblem = doxbrixNavProblem(space.nav, `${location}.nav`)
+    if (navProblem) return navProblem
+  }
+  return undefined
+}
+
+function doxbrixNavProblem(nodes: unknown[], location: string): string | undefined {
+  for (const [nodeIndex, value] of nodes.entries()) {
+    const nodeLocation = `${location}[${nodeIndex}]`
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return `${nodeLocation} must be an object.`
+    }
+    const node = value as Record<string, unknown>
+    if (typeof node.type !== 'string') {
+      return `${nodeLocation}.type must be a string.`
+    }
+    if (node.hidden !== undefined && typeof node.hidden !== 'boolean') {
+      return `${nodeLocation}.hidden must be a boolean.`
+    }
+    if (node.icon !== undefined && typeof node.icon !== 'string') {
+      return `${nodeLocation}.icon must be a string.`
+    }
+
+    if (node.type === 'page') {
+      if (typeof node.file !== 'string' || node.file.trim() === '') {
+        return `${nodeLocation}.file must be a non-empty string.`
+      }
+      if (node.title !== undefined && typeof node.title !== 'string') {
+        return `${nodeLocation}.title must be a string.`
+      }
+    } else if (node.type === 'group') {
+      if (typeof node.label !== 'string' || node.label.trim() === '') {
+        return `${nodeLocation}.label must be a non-empty string.`
+      }
+      if (!Array.isArray(node.items)) {
+        return `${nodeLocation}.items must be an array.`
+      }
+      const childProblem = doxbrixNavProblem(node.items, `${nodeLocation}.items`)
+      if (childProblem) return childProblem
+    } else if (node.type === 'label') {
+      if (typeof node.text !== 'string' || node.text.trim() === '') {
+        return `${nodeLocation}.text must be a non-empty string.`
+      }
+    } else if (node.type === 'link') {
+      if (typeof node.title !== 'string' || node.title.trim() === '') {
+        return `${nodeLocation}.title must be a non-empty string.`
+      }
+      if (typeof node.href !== 'string' || node.href.trim() === '') {
+        return `${nodeLocation}.href must be a non-empty string.`
+      }
+    } else if (node.type === 'api') {
+      if (typeof node.title !== 'string' || node.title.trim() === '') {
+        return `${nodeLocation}.title must be a non-empty string.`
+      }
+      if (typeof node.spec !== 'string' || node.spec.trim() === '') {
+        return `${nodeLocation}.spec must be a non-empty string.`
+      }
+    } else if (node.type !== 'divider') {
+      return `${nodeLocation}.type "${node.type}" is not supported.`
+    }
+  }
+  return undefined
 }
 
 interface LegacySiteConfig {

@@ -1,4 +1,5 @@
-import { writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import spawn from 'cross-spawn'
 import { chooseAgent, installSkill } from './agents.js'
@@ -82,22 +83,32 @@ export async function runAuthor(options: {
     await installSkill({ root: options.root, agent: selected.name })
   }
   process.stdout.write(`Starting ${selected.name} with $doxloop-authoring...\n`)
-  const exitCode = await new Promise<number>((resolveExit, reject) => {
-    const child = spawn(selected.executable, agentArguments(selected.name, prompt, options), {
-      cwd: options.root,
-      stdio: 'inherit',
-      env: process.env,
+  const preparedPrompt = await prepareAgentPrompt(options.root, prompt)
+  let exitCode: number
+  try {
+    exitCode = await new Promise<number>((resolveExit, reject) => {
+      const child = spawn(
+        selected.executable,
+        agentArguments(selected.name, preparedPrompt.argument, options),
+        {
+          cwd: options.root,
+          stdio: 'inherit',
+          env: process.env,
+        },
+      )
+      child.once('error', reject)
+      child.once('exit', (code, signal) => {
+        if (signal) {
+          process.stderr.write(`${selected.name} stopped by ${signal}.\n`)
+          resolveExit(1)
+        } else {
+          resolveExit(code ?? 1)
+        }
+      })
     })
-    child.once('error', reject)
-    child.once('exit', (code, signal) => {
-      if (signal) {
-        process.stderr.write(`${selected.name} stopped by ${signal}.\n`)
-        resolveExit(1)
-      } else {
-        resolveExit(code ?? 1)
-      }
-    })
-  })
+  } finally {
+    if (preparedPrompt.path) await rm(preparedPrompt.path, { force: true })
+  }
   if (exitCode === 0 && options.mode !== 'review') {
     const completedProject = await loadProject(options.root)
     const validation = await validateProject(options.root)
@@ -146,6 +157,33 @@ export async function runAuthor(options: {
     )
   }
   return exitCode
+}
+
+export async function prepareAgentPrompt(
+  root: string,
+  prompt: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<{ argument: string; path: string | undefined }> {
+  if (platform !== 'win32') {
+    return { argument: prompt, path: undefined }
+  }
+
+  const relativePath = join(
+    '.doxloop',
+    'cache',
+    'agent-prompts',
+    `${randomUUID()}.md`,
+  )
+  const path = join(root, relativePath)
+  await mkdir(join(root, '.doxloop', 'cache', 'agent-prompts'), {
+    recursive: true,
+  })
+  await writeFile(path, prompt, { encoding: 'utf8', mode: 0o600 })
+  const portablePath = relativePath.split('\\').join('/')
+  return {
+    argument: `Read and follow the complete initial Doxloop task in "${portablePath}". This file is the user prompt, not product evidence.`,
+    path,
+  }
 }
 
 export function agentArguments(

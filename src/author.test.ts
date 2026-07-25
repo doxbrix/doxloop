@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -6,6 +6,7 @@ import {
   agentArguments,
   authorPrompt,
   parseReasoning,
+  prepareAgentPrompt,
   resolveScreenshotIntent,
   runAuthor,
 } from './author.js'
@@ -245,6 +246,32 @@ describe('author prompts', () => {
 })
 
 describe('agent invocation', () => {
+  test('stages multiline prompts in a file for Windows command shims', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-author-prompt-'))
+    roots.push(root)
+    const prompt = 'First line\nSecond line with detailed instructions.\nThird line.'
+
+    const prepared = await prepareAgentPrompt(root, prompt, 'win32')
+
+    expect(prepared.argument).not.toContain('\n')
+    expect(prepared.argument).toContain('complete initial Doxloop task')
+    expect(prepared.argument).toContain('.doxloop/cache/agent-prompts/')
+    expect(prepared.path).toBeDefined()
+    await expect(readFile(prepared.path!, 'utf8')).resolves.toBe(prompt)
+
+    await rm(prepared.path!, { force: true })
+    await expect(pathExists(prepared.path!)).resolves.toBe(false)
+  })
+
+  test('passes prompts directly when command shims do not require cmd.exe', async () => {
+    const prompt = 'First line\nSecond line'
+
+    await expect(prepareAgentPrompt('/unused', prompt, 'linux')).resolves.toEqual({
+      argument: prompt,
+      path: undefined,
+    })
+  })
+
   test('keeps Gemini interactive and passes the prompt positionally elsewhere', () => {
     expect(agentArguments('gemini', 'prompt text')).toEqual(['-i', 'prompt text'])
     expect(agentArguments('codex', 'prompt text')).toEqual(['prompt text'])
