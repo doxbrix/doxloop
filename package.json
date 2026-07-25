@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A local-first documentation agent CLI for Codex, Claude Code, and Gemini.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -57,6 +57,7 @@
   },
   "dependencies": {
     "chokidar": "^4.0.3",
+    "cross-spawn": "^7.0.6",
     "fflate": "^0.8.2",
     "gray-matter": "^4.0.3",
     "highlight.js": "^11.11.1"
@@ -72,6 +73,7 @@
     "@doxbrix/doxloop-generator-starlight": "workspace:*",
     "@doxbrix/doxloop-generator-static": "workspace:*",
     "@doxbrix/doxloop-generator-vitepress": "workspace:*",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.15.3",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",

@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import {
@@ -14,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import spawn from 'cross-spawn'
 import { DoxloopError, UsageError } from './errors.js'
 import { pathExists } from './fs.js'
 import { loadGeneratorAdapter } from './generators.js'

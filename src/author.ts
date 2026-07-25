@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import spawn from 'cross-spawn'
 import { chooseAgent, installSkill } from './agents.js'
 import { DoxloopError, UsageError } from './errors.js'
 import { generatorSkillName } from './generators.js'

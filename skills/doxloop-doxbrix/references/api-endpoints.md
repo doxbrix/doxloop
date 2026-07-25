@@ -34,43 +34,17 @@ description: List the projects available to the current API key.
 Lists the projects in your workspace that the API key can access.
 Results use cursor pagination.
 
-<ApiEndpoint
-  method="GET"
-  path="/projects"
-  baseUrl="https://api.example.com/v1"
-  summary="List projects"
-  description="Returns a page of projects."
->
-<Param
-  name="Authorization"
-  in="header"
-  type="string"
-  required
-  example="Bearer api_test_example"
->
+<ApiEndpoint method="GET" path="/projects" baseUrl="https://api.example.com/v1" summary="List projects" description="Returns a page of projects.">
+<Param name="Authorization" in="header" type="string" required example="Bearer api_test_example">
 Bearer token sent in the `Authorization` header.
 </Param>
-<Param
-  name="limit"
-  in="query"
-  type="integer"
-  example="50"
->
+<Param name="limit" in="query" type="integer" example="50">
 Maximum results per page. Defaults to 50; maximum 100.
 </Param>
-<Param
-  name="cursor"
-  in="query"
-  type="string"
-  example="next_page_cursor"
->
+<Param name="cursor" in="query" type="string" example="next_page_cursor">
 Pagination cursor returned by the previous response.
 </Param>
-<Response
-  status={200}
-  contentType="application/json"
-  description="Projects listed"
->
+<Response status={200} contentType="application/json" description="Projects listed">
 {
   "data": [
     {
@@ -81,11 +55,7 @@ Pagination cursor returned by the previous response.
   "nextCursor": null
 }
 </Response>
-<Response
-  status={401}
-  contentType="application/json"
-  description="Authentication failed"
->
+<Response status={401} contentType="application/json" description="Authentication failed">
 {
   "error": {
     "code": "unauthorized",
@@ -121,6 +91,8 @@ request presentation from the block attributes and parameter examples.
 
 Run `doxloop test`, then inspect the page in `doxloop preview --open`. Confirm:
 
+- every component opening tag, including `<ApiEndpoint>`, `<Param>`, and
+  `<Response>`, ends with `>` on the same physical line where it begins;
 - the method and path appear in the endpoint bar;
 - header, path, and query parameters appear in their proper sections;
 - required and type badges are correct;

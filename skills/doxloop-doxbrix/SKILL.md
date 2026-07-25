@@ -40,7 +40,9 @@ skill instead.
   every verified parameter and a `<Response>` for every documented status.
   Never replace the native endpoint block with Markdown tables or standalone
   request and response code fences.
-- Keep component tags balanced and put nested block content on separate lines.
+- Keep every component's complete opening tag, including its final `>`, on one
+  physical line. Keep tags balanced and put nested block content on separate
+  lines. Doxbrix bundle ingestion requires one-line opening tags.
 - Use root-relative page links that match manifest page files.
 
 Do not emit Docusaurus directives such as `:::tip`, Docusaurus theme imports, or

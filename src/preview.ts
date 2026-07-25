@@ -130,6 +130,26 @@ async function startDoxbrixPreview(
         loadSiteConfig(options.root, project),
       ])
       const pagesById = new Map(pages.map((path) => [pageId(contentRoot, path), path]))
+      if (url.pathname === '/__doxloop/search-index') {
+        const entries = await Promise.all(
+          [...pagesById].map(async ([id, path]) => {
+            const page = await readPage(path)
+            return {
+              title: page.title || labelFromId(id),
+              description: page.description ?? '',
+              href: `/${id}`,
+              text: markdownSearchText(page.body),
+            }
+          }),
+        )
+        send(
+          response,
+          200,
+          'application/json; charset=utf-8',
+          JSON.stringify(entries),
+        )
+        return
+      }
       const requested = requestedPage(url.pathname, site, pagesById)
       if (requested === undefined || !pagesById.has(requested)) {
         send(response, 404, 'text/html; charset=utf-8', errorPage(requested ?? '', site))
@@ -313,8 +333,15 @@ export function doxbrixDocument(input: {
     <div class="dxb-atlas-header-main"><div class="dxb-atlas-header-inner">
       <a class="dp-topnav-logo" href="${escapeAttr(logoHref)}">${logo}</a>
       <div class="dxb-atlas-search-cluster">
-        <button class="dp-topnav-search" type="button" aria-disabled="true">${icon('search', 17)}<span>Search...</span><kbd>⌘K</kbd></button>
-        <button class="dxb-atlas-assistant" type="button" aria-disabled="true">${icon('sparkle', 16)}<span>Ask Assistant</span></button>
+        <button class="dp-topnav-search" type="button" aria-label="Search documentation" aria-haspopup="dialog" data-preview-search>${icon('search', 17)}<span>Search...</span><kbd>⌘K</kbd></button>
+        <div class="dxb-atlas-assistant-wrap">
+          <button class="dxb-atlas-assistant" type="button" aria-disabled="true" aria-expanded="false" data-preview-assistant>${icon('sparkle', 16)}<span>Ask Assistant</span></button>
+          <div class="dxb-preview-notice" role="status" aria-live="polite" data-preview-notice hidden>
+            <strong>Ask Assistant isn’t available in preview.</strong>
+            <span>Run <code>doxloop deploy</code> to use it on your deployed site — deployment is free.</span>
+            <button type="button" aria-label="Dismiss notice" data-preview-notice-dismiss>×</button>
+          </div>
+        </div>
       </div>
       <div class="dxb-atlas-header-actions">
         <button class="dp-theme-toggle" type="button" aria-label="Switch color theme" aria-pressed="${resolvedMode === 'dark'}" data-theme-toggle>${icon(resolvedMode === 'dark' ? 'sun' : 'moon', 17)}</button>
@@ -332,6 +359,18 @@ export function doxbrixDocument(input: {
       <div class="dp-blocks">${input.rendered.html}</div>
     </div></main>
     ${toc}
+  </div>
+  <div class="dxb-preview-search" role="dialog" aria-modal="true" aria-label="Search documentation" data-preview-search-dialog hidden>
+    <div class="dxb-preview-search-panel">
+      <div class="dxb-preview-search-input-wrap">
+        ${icon('search', 18)}
+        <input type="search" placeholder="Search documentation..." autocomplete="off" aria-label="Search documentation" data-preview-search-input>
+        <kbd>Esc</kbd>
+      </div>
+      <div class="dxb-preview-search-status" data-preview-search-status>Loading pages…</div>
+      <div class="dxb-preview-search-results" role="listbox" data-preview-search-results></div>
+      <div class="dxb-preview-search-help"><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span></div>
+    </div>
   </div>
 </div>
 <script>
@@ -354,9 +393,159 @@ export function doxbrixDocument(input: {
     themeToggle.innerHTML = dark ? '${icon('sun', 17)}' : '${icon('moon', 17)}';
   }
   updateThemeToggle();
+  const tocLinks = Array.from(document.querySelectorAll('.dp-toc-entry'));
+  const tocHeadings = tocLinks
+    .map((link) => {
+      const id = decodeURIComponent(link.hash.slice(1));
+      const heading = document.getElementById(id);
+      return heading ? { link, heading } : null;
+    })
+    .filter(Boolean);
+  let tocFrame = 0;
+  function updateActiveToc() {
+    tocFrame = 0;
+    if (!tocHeadings.length) return;
+    const header = document.querySelector('.dxb-atlas-header');
+    const activationLine = (header?.getBoundingClientRect().bottom || 0) + 32;
+    let activeIndex = 0;
+    for (let index = 0; index < tocHeadings.length; index += 1) {
+      if (tocHeadings[index].heading.getBoundingClientRect().top <= activationLine) {
+        activeIndex = index;
+      } else {
+        break;
+      }
+    }
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) {
+      activeIndex = tocHeadings.length - 1;
+    }
+    tocHeadings.forEach(({ link }, index) => {
+      const active = index === activeIndex;
+      link.classList.toggle('active', active);
+      if (active) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
+    });
+  }
+  function scheduleTocUpdate() {
+    if (!tocFrame) tocFrame = requestAnimationFrame(updateActiveToc);
+  }
+  updateActiveToc();
+  addEventListener('scroll', scheduleTocUpdate, { passive: true });
+  addEventListener('resize', scheduleTocUpdate);
   const events = new EventSource('/__doxloop/events');
   events.addEventListener('reload', () => location.reload());
+  const previewNotice = document.querySelector('[data-preview-notice]');
+  const previewAssistant = document.querySelector('[data-preview-assistant]');
+  let previewNoticeTimer;
+  function showPreviewNotice() {
+    if (!previewNotice) return;
+    previewNotice.hidden = false;
+    previewAssistant?.setAttribute('aria-expanded', 'true');
+    requestAnimationFrame(() => previewNotice.classList.add('visible'));
+    clearTimeout(previewNoticeTimer);
+    previewNoticeTimer = setTimeout(() => {
+      previewNotice.classList.remove('visible');
+      previewAssistant?.setAttribute('aria-expanded', 'false');
+      setTimeout(() => { previewNotice.hidden = true; }, 180);
+    }, 7000);
+  }
+  const searchButton = document.querySelector('[data-preview-search]');
+  const searchDialog = document.querySelector('[data-preview-search-dialog]');
+  const searchInput = document.querySelector('[data-preview-search-input]');
+  const searchResults = document.querySelector('[data-preview-search-results]');
+  const searchStatus = document.querySelector('[data-preview-search-status]');
+  let searchPages;
+  let activeSearchResult = 0;
+  function searchSnippet(page, query) {
+    const source = page.description || page.text;
+    if (!query) return source.slice(0, 150);
+    const index = source.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+    const start = Math.max(0, index < 0 ? 0 : index - 55);
+    return (start > 0 ? '…' : '') + source.slice(start, start + 150) + (source.length > start + 150 ? '…' : '');
+  }
+  function selectSearchResult(index) {
+    const links = Array.from(searchResults?.querySelectorAll('.dxb-preview-search-result') || []);
+    if (!links.length) return;
+    activeSearchResult = (index + links.length) % links.length;
+    links.forEach((link, itemIndex) => {
+      const active = itemIndex === activeSearchResult;
+      link.classList.toggle('active', active);
+      link.setAttribute('aria-selected', String(active));
+    });
+    links[activeSearchResult]?.scrollIntoView({ block: 'nearest' });
+  }
+  function renderSearchResults() {
+    if (!searchResults || !searchStatus || !searchPages) return;
+    const query = searchInput?.value.trim() || '';
+    const tokens = query.toLocaleLowerCase().split(/\\s+/).filter(Boolean);
+    const matches = searchPages
+      .map((page) => {
+        const title = page.title.toLocaleLowerCase();
+        const description = page.description.toLocaleLowerCase();
+        const text = page.text.toLocaleLowerCase();
+        if (!tokens.every((token) => title.includes(token) || description.includes(token) || text.includes(token))) return null;
+        const score = tokens.reduce((total, token) => total + (title.includes(token) ? 6 : 0) + (description.includes(token) ? 3 : 0) + (text.includes(token) ? 1 : 0), 0);
+        return { page, score };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score || left.page.title.localeCompare(right.page.title))
+      .slice(0, 10);
+    searchResults.replaceChildren();
+    searchStatus.textContent = matches.length
+      ? (query ? matches.length + (matches.length === 1 ? ' result' : ' results') : 'Browse documentation')
+      : 'No matching pages';
+    matches.forEach(({ page }, index) => {
+      const link = document.createElement('a');
+      link.className = 'dxb-preview-search-result' + (index === 0 ? ' active' : '');
+      link.href = page.href;
+      link.setAttribute('role', 'option');
+      link.setAttribute('aria-selected', String(index === 0));
+      const title = document.createElement('strong');
+      title.textContent = page.title;
+      const snippet = document.createElement('span');
+      snippet.textContent = searchSnippet(page, query);
+      link.append(title, snippet);
+      searchResults.append(link);
+    });
+    activeSearchResult = 0;
+  }
+  async function loadSearchPages() {
+    if (searchPages) return;
+    searchStatus.textContent = 'Loading pages…';
+    try {
+      const response = await fetch('/__doxloop/search-index');
+      if (!response.ok) throw new Error('Search index request failed');
+      searchPages = await response.json();
+      renderSearchResults();
+    } catch {
+      searchStatus.textContent = 'Search is unavailable. Reload the preview and try again.';
+    }
+  }
+  function openSearch() {
+    if (!searchDialog) return;
+    searchDialog.hidden = false;
+    document.body.classList.add('dxb-search-open');
+    searchInput?.focus();
+    void loadSearchPages();
+    if (searchPages) renderSearchResults();
+  }
+  function closeSearch() {
+    if (!searchDialog) return;
+    searchDialog.hidden = true;
+    document.body.classList.remove('dxb-search-open');
+    searchButton?.focus();
+  }
   document.addEventListener('click', (event) => {
+    if (event.target.closest('[data-preview-search]')) openSearch();
+    if (event.target === searchDialog) closeSearch();
+    if (event.target.closest('[data-preview-assistant]')) {
+      showPreviewNotice();
+    }
+    if (event.target.closest('[data-preview-notice-dismiss]') && previewNotice) {
+      clearTimeout(previewNoticeTimer);
+      previewNotice.classList.remove('visible');
+      previewNotice.hidden = true;
+      previewAssistant?.setAttribute('aria-expanded', 'false');
+    }
     const toggle = event.target.closest('[data-theme-toggle]');
     if (toggle && root) {
       root.dataset.colorTheme = root.dataset.colorTheme === 'dark' ? 'light' : 'dark';
@@ -414,6 +603,31 @@ export function doxbrixDocument(input: {
       }
     }
   });
+  searchInput?.addEventListener('input', renderSearchResults);
+  document.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === 'k') {
+      event.preventDefault();
+      searchDialog?.hidden ? openSearch() : closeSearch();
+      return;
+    }
+    if (searchDialog?.hidden) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSearch();
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      selectSearchResult(activeSearchResult + 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      selectSearchResult(activeSearchResult - 1);
+    } else if (event.key === 'Enter') {
+      const active = searchResults?.querySelector('.dxb-preview-search-result.active');
+      if (active) {
+        event.preventDefault();
+        location.href = active.href;
+      }
+    }
+  });
 </script>
 </body>
 </html>`
@@ -456,6 +670,19 @@ function tocHtml(entries: TocEntry[]): string {
         `<a class="dp-toc-entry level-${entry.level}${index === 0 ? ' active' : ''}" href="#${escapeAttr(entry.id)}">${escapeHtml(entry.title)}</a>`,
     )
     .join('')}</aside>`
+}
+
+function markdownSearchText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[#>*_~|=-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 12_000)
 }
 
 function firstPage(nodes: DoxbrixNavNode[]): string | undefined {
@@ -771,7 +998,10 @@ function send(
 ): void {
   response.writeHead(status, {
     'Content-Type': type,
-    'Cache-Control': type.startsWith('text/html') ? 'no-store' : 'public, max-age=60',
+    'Cache-Control':
+      type.startsWith('text/html') || type.startsWith('application/json')
+        ? 'no-store'
+        : 'public, max-age=60',
   })
   response.end(body)
 }

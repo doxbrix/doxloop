@@ -161,6 +161,18 @@ function parseElement(lines: string[], start: number): { node: ElNode; next: num
   const rest = lines.slice(start).join('\n')
   const open = readOpenTag(rest)
   if (!open) return null
+  if ('error' in open) {
+    const consumedLines = countNewlines(rest.slice(0, open.errorAt))
+    return {
+      node: {
+        type: 'el',
+        name: 'ParseError',
+        props: { message: open.error },
+        inner: '',
+      },
+      next: Math.max(start + 1, start + consumedLines),
+    }
+  }
 
   if (open.selfClosed) {
     return {
@@ -183,7 +195,10 @@ function parseElement(lines: string[], start: number): { node: ElNode; next: num
   }
 }
 
-function readOpenTag(s: string): { name: string; props: Props; selfClosed: boolean; tagEnd: number } | null {
+function readOpenTag(s: string):
+  | { name: string; props: Props; selfClosed: boolean; tagEnd: number }
+  | { error: string; errorAt: number }
+  | null {
   const m = /^\s*<([A-Z][A-Za-z0-9]*)/.exec(s)
   if (!m) return null
   const name = m[1]!
@@ -193,6 +208,12 @@ function readOpenTag(s: string): { name: string; props: Props; selfClosed: boole
   let brace = 0
   for (; i < s.length; i++) {
     const c = s[i]!
+    if (c === '\n') {
+      return {
+        error: `<${name}> opening tag must end with ">" on the same line for Doxbrix ingestion.`,
+        errorAt: i,
+      }
+    }
     if (quote) {
       if (c === quote) quote = null
       continue
@@ -200,9 +221,20 @@ function readOpenTag(s: string): { name: string; props: Props; selfClosed: boole
     if (c === '"' || c === "'") quote = c
     else if (c === '{') brace++
     else if (c === '}') brace--
+    else if (brace === 0 && c === '<') {
+      return {
+        error: `<${name}> opening tag is missing ">" before the next component.`,
+        errorAt: i,
+      }
+    }
     else if (brace === 0 && c === '>') break
   }
-  if (i >= s.length) return null
+  if (i >= s.length) {
+    return {
+      error: `<${name}> opening tag is missing ">".`,
+      errorAt: s.length,
+    }
+  }
 
   const inside = s.slice(m[0].length, i)
   const selfClosed = /\/\s*$/.test(inside)
@@ -283,6 +315,9 @@ const CALLOUTS: Record<string, { icon: string; cls: string }> = {
 
 function renderElement(node: ElNode): string {
   const { name, props, inner } = node
+  if (name === 'ParseError') {
+    return renderParseError(str(props.message) || 'Malformed component tag.')
+  }
   const callout = CALLOUTS[name]
   if (callout) {
     return `<div class="dp-callout ${callout.cls}"><span class="dp-callout-icon">${callout.icon}</span><span class="dp-callout-body">${stripBlockWrap(renderNodes(inner))}</span></div>`

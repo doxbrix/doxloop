@@ -213,6 +213,96 @@ Open **Settings**.
     expect(result.issues.map((issue) => issue.code)).toContain('component-tag')
   })
 
+  test('rejects an ApiEndpoint opening tag that borrows a child delimiter', async () => {
+    const root = await fixture()
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      `---
+title: List projects
+description: List accessible projects.
+---
+
+<ApiEndpoint
+  method="GET"
+  path="/projects"
+  baseUrl="https://api.example.com/v1"
+  summary="List projects"
+  description="Returns a page of projects."
+<Param name="limit" in="query" type="integer" example="50">Maximum results.</Param>
+<Response status={200} contentType="application/json" description="Projects listed">
+{ "data": [] }
+</Response>
+</ApiEndpoint>
+`,
+    )
+
+    const result = await validateProject(root)
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'component-tag',
+          message: expect.stringContaining('opening tag is missing ">" before'),
+        }),
+      ]),
+    )
+  })
+
+  test('requires Doxbrix component opening tags on one physical line', async () => {
+    const root = await fixture()
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      `---
+title: List projects
+description: List accessible projects.
+---
+
+<ApiEndpoint
+  method="GET"
+  path="/projects"
+>
+<Response status={200} contentType="application/json" description="Projects listed">
+{ "data": [] }
+</Response>
+</ApiEndpoint>
+`,
+    )
+
+    const result = await validateProject(root)
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'component-tag',
+          message: expect.stringContaining('must end with ">" on the same line'),
+        }),
+      ]),
+    )
+  })
+
+  test('ignores Doxbrix component examples inside code spans and fences', async () => {
+    const root = await fixture()
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      `---
+title: Component syntax
+description: Learn how component syntax works.
+---
+
+Write \`<ApiEndpoint>\` for an endpoint.
+
+\`\`\`mdx
+<ApiEndpoint
+  method="GET"
+</ApiEndpoint>
+\`\`\`
+`,
+    )
+
+    const result = await validateProject(root)
+    expect(
+      result.issues.filter((issue) => issue.code === 'component-tag'),
+    ).toHaveLength(0)
+  })
+
   test('enforces the native Doxbrix ApiEndpoint contract', async () => {
     const root = await fixture()
     await writeFile(
@@ -250,13 +340,7 @@ title: Get project
 description: Retrieve one project.
 ---
 
-<ApiEndpoint
-  method="GET"
-  path="/projects/{projectId}"
-  baseUrl="https://api.example.com/v1"
-  summary="Get project"
-  description="Returns one project."
->
+<ApiEndpoint method="GET" path="/projects/{projectId}" baseUrl="https://api.example.com/v1" summary="Get project" description="Returns one project.">
 <Param name="Authorization" in="header" type="string" required example="Bearer api_test_example">Bearer token.</Param>
 <Param name="projectId" in="path" type="string" required example="prj_01H9">Project identifier.</Param>
 <Response status={200} contentType="application/json" description="Project returned">

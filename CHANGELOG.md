@@ -5,6 +5,13 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.1.2 - 2026-07-25
+
+### Fixed
+
+- Launch Codex, Claude Code, and Gemini correctly through npm and Volta
+  command shims on Windows.
+
 ## 0.1.1 - 2026-07-23
 
 ### Added

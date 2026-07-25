@@ -111,6 +111,44 @@ Continue from here.
     expect(result.html).toContain('"id": "prj_01H9"')
   })
 
+  test('shows a parse error when ApiEndpoint is missing its opening delimiter', () => {
+    const result = renderMarkdown(`
+<ApiEndpoint
+  method="GET"
+  path="/projects"
+<Param name="limit" in="query" type="integer" example="50">Maximum results.</Param>
+<Response status={200} contentType="application/json" description="Projects listed">
+{ "data": [] }
+</Response>
+</ApiEndpoint>
+`)
+
+    expect(result.html).toContain('Preview parse error')
+    expect(result.html).toContain(
+      '&lt;ApiEndpoint&gt; opening tag must end with "&gt;" on the same line for Doxbrix ingestion.',
+    )
+    expect(result.html).not.toContain('class="dp-api-ref"')
+  })
+
+  test('shows a parse error for a multiline component opening tag', () => {
+    const result = renderMarkdown(`
+<ApiEndpoint
+  method="GET"
+  path="/projects"
+>
+<Response status={200} contentType="application/json" description="Projects listed">
+{ "data": [] }
+</Response>
+</ApiEndpoint>
+`)
+
+    expect(result.html).toContain('Preview parse error')
+    expect(result.html).toContain(
+      'opening tag must end with "&gt;" on the same line for Doxbrix ingestion.',
+    )
+    expect(result.html).not.toContain('class="dp-api-ref"')
+  })
+
   test('preserves body example types and nests dotted parameter names', () => {
     const result = renderMarkdown(`
 <ApiEndpoint method="POST" path="/tokens" baseUrl="https://api.example.com/v1" summary="Create token" description="Creates a token.">

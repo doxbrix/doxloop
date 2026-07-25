@@ -341,28 +341,211 @@ const DOXBRIX_CONTAINER_COMPONENTS = [
   'ResponseExample',
 ] as const
 
+type DoxbrixContainerName = (typeof DOXBRIX_CONTAINER_COMPONENTS)[number]
+
+interface DoxbrixComponentTag {
+  name: DoxbrixContainerName
+  kind: 'open' | 'close' | 'self-close'
+  line: number
+  endLine: number
+}
+
 function validateDoxbrixComponents(
   content: string,
   file: string,
 ): ValidationIssue[] {
-  const issues: ValidationIssue[] = []
-  const withoutFences = content.replace(/```[\s\S]*?```/g, '')
-  for (const name of DOXBRIX_CONTAINER_COMPONENTS) {
-    const openings =
-      withoutFences.match(new RegExp(`<${name}(?:\\s[^>]*)?(?<!/)>`, 'g'))?.length ?? 0
-    const closings = withoutFences.match(new RegExp(`</${name}>`, 'g'))?.length ?? 0
-    if (openings !== closings) {
+  const masked = maskDoxbrixCode(content)
+  const scanned = scanDoxbrixComponentTags(masked, file)
+  const issues = [...scanned.issues]
+  const stack: DoxbrixComponentTag[] = []
+
+  for (const tag of scanned.tags) {
+    if (tag.kind === 'self-close') continue
+    if (tag.kind === 'open') {
+      stack.push(tag)
+      continue
+    }
+    const opening = stack.at(-1)
+    if (!opening) {
       issues.push(
         error(
           'component-tag',
-          `<${name}> tags are not balanced (${openings} opening, ${closings} closing).`,
+          `Line ${tag.line}: unexpected closing </${tag.name}> tag.`,
+          file,
+        ),
+      )
+      continue
+    }
+    if (opening.name !== tag.name) {
+      issues.push(
+        error(
+          'component-tag',
+          `Line ${tag.line}: </${tag.name}> closes before <${opening.name}> opened on line ${opening.line}.`,
+          file,
+        ),
+      )
+      continue
+    }
+    stack.pop()
+  }
+  for (const opening of stack) {
+    issues.push(
+      error(
+        'component-tag',
+        `Line ${opening.line}: <${opening.name}> does not have a matching closing tag.`,
+        file,
+      ),
+    )
+  }
+
+  if (issues.length === 0) {
+    issues.push(...validateDoxbrixApiEndpoints(masked, file))
+  }
+  return issues
+}
+
+function scanDoxbrixComponentTags(
+  content: string,
+  file: string,
+): { tags: DoxbrixComponentTag[]; issues: ValidationIssue[] } {
+  const names = new Set<string>(DOXBRIX_CONTAINER_COMPONENTS)
+  const tags: DoxbrixComponentTag[] = []
+  const issues: ValidationIssue[] = []
+  let index = 0
+  let line = 1
+
+  while (index < content.length) {
+    if (content[index] === '\n') {
+      line += 1
+      index += 1
+      continue
+    }
+    if (content[index] !== '<') {
+      index += 1
+      continue
+    }
+
+    const start = index
+    const startLine = line
+    const closing = content[index + 1] === '/'
+    const nameStart = index + (closing ? 2 : 1)
+    let nameEnd = nameStart
+    while (/[A-Za-z0-9]/.test(content[nameEnd] ?? '')) nameEnd += 1
+    const name = content.slice(nameStart, nameEnd)
+    if (!names.has(name)) {
+      index += 1
+      continue
+    }
+
+    let quote: '"' | "'" | null = null
+    let braces = 0
+    let cursor = nameEnd
+    let endLine = line
+    let malformed = false
+    for (; cursor < content.length; cursor += 1) {
+      const character = content[cursor]!
+      if (character === '\n') endLine += 1
+      if (quote) {
+        if (character === quote && content[cursor - 1] !== '\\') quote = null
+        continue
+      }
+      if (character === '"' || character === "'") {
+        quote = character
+      } else if (character === '{') {
+        braces += 1
+      } else if (character === '}') {
+        braces = Math.max(0, braces - 1)
+      } else if (braces === 0 && character === '<') {
+        issues.push(
+          error(
+            'component-tag',
+            `Line ${startLine}: <${name}> opening tag is missing ">" before the component beginning on line ${endLine}.`,
+            file,
+          ),
+        )
+        malformed = true
+        break
+      } else if (braces === 0 && character === '>') {
+        break
+      }
+    }
+
+    if (malformed) {
+      index = cursor
+      line = endLine
+      continue
+    }
+    if (cursor >= content.length) {
+      issues.push(
+        error(
+          'component-tag',
+          `Line ${startLine}: <${name}> opening tag is missing ">".`,
+          file,
+        ),
+      )
+      break
+    }
+    if (endLine !== startLine) {
+      issues.push(
+        error(
+          'component-tag',
+          `Line ${startLine}: <${name}> opening tag must end with ">" on the same line for Doxbrix ingestion.`,
           file,
         ),
       )
     }
+
+    const beforeClose = content.slice(start, cursor).trimEnd()
+    tags.push({
+      name: name as DoxbrixContainerName,
+      kind: closing ? 'close' : beforeClose.endsWith('/') ? 'self-close' : 'open',
+      line: startLine,
+      endLine,
+    })
+    index = cursor + 1
+    line = endLine
   }
-  issues.push(...validateDoxbrixApiEndpoints(withoutFences, file))
-  return issues
+
+  return { tags, issues }
+}
+
+function maskDoxbrixCode(content: string): string {
+  const lines = content.split('\n')
+  let fence: { marker: '`' | '~'; length: number } | undefined
+  const masked = lines.map((line) => {
+    const match = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (match) {
+      const marker = match[1]![0] as '`' | '~'
+      const length = match[1]!.length
+      if (!fence) fence = { marker, length }
+      else if (fence.marker === marker && length >= fence.length) fence = undefined
+      return ' '.repeat(line.length)
+    }
+    if (fence) return ' '.repeat(line.length)
+
+    const characters = [...line]
+    let index = 0
+    while (index < characters.length) {
+      if (characters[index] !== '`') {
+        index += 1
+        continue
+      }
+      let ticks = 1
+      while (characters[index + ticks] === '`') ticks += 1
+      const closing = '`'.repeat(ticks)
+      const end = line.indexOf(closing, index + ticks)
+      if (end === -1) {
+        index += ticks
+        continue
+      }
+      for (let cursor = index; cursor < end + ticks; cursor += 1) {
+        characters[cursor] = ' '
+      }
+      index = end + ticks
+    }
+    return characters.join('')
+  })
+  return masked.join('\n')
 }
 
 function validateDoxbrixApiEndpoints(

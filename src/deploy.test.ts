@@ -14,6 +14,37 @@ afterEach(async () => {
 })
 
 describe('deployment', () => {
+  test('rejects malformed Doxbrix components before making a network request', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      `---
+title: List projects
+description: List accessible projects.
+---
+
+<ApiEndpoint method="GET" path="/projects"
+<Response status={200} contentType="application/json" description="Projects listed">
+{ "data": [] }
+</Response>
+</ApiEndpoint>
+`,
+    )
+    await writeFile(
+      join(root, 'docs', 'quickstart.mdx'),
+      '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
+    )
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+    await expect(deploy({ root })).rejects.toThrow(
+      'Deployment stopped because documentation has',
+    )
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   test('dry run validates without making a network request', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
     roots.push(parent)
