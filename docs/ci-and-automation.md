@@ -54,3 +54,13 @@ every pull request.
 Never run `doxloop deploy` in an untrusted pull-request context. Use protected
 environments and short-lived or scoped credentials. Run `doxloop deploy
 --dry-run` before an approved deployment.
+
+Project identity, slug, destination, and visibility can be committed through
+`doxloop settings`. An approved non-interactive job then runs:
+
+```bash
+doxloop deploy --yes
+```
+
+Use `doxloop deploy --public --yes` only when the job is explicitly authorized
+to override the saved visibility and publish to everyone.

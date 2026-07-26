@@ -2431,6 +2431,10 @@
 
 /* ── Try It Modal ──────────────────────────────────────────────────────── */
 
+body.dxb-tryit-open {
+  overflow: hidden;
+}
+
 .tryit-overlay {
   position: fixed;
   inset: 0;
@@ -2441,6 +2445,10 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+
+.tryit-overlay[hidden] {
+  display: none;
 }
 
 .tryit-modal {

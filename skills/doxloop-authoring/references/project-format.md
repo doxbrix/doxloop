@@ -16,6 +16,11 @@ Read this reference before creating or moving documentation pages.
     {
       "name": "product",
       "path": "../product"
+    },
+    {
+      "name": "api",
+      "path": "https://example.com/openapi.json",
+      "kind": "openapi"
     }
   ],
   "designReferences": [
@@ -23,6 +28,12 @@ Read this reference before creating or moving documentation pages.
       "url": "https://docs.example.com/"
     }
   ],
+  "deployment": {
+    "name": "Example documentation",
+    "slug": "example-docs",
+    "visibility": "private",
+    "apiUrl": "https://app.doxbrix.com"
+  },
   "application": {
     "baseUrl": "http://localhost:3000/",
     "source": "product",
@@ -63,6 +74,15 @@ Read this reference before creating or moving documentation pages.
   Doxbrix is built in and does not use this field.
 - Treat `contentDir` as the only documentation content directory.
 - Treat `sources` as an allowlist for product research.
+- A source with `"kind": "openapi"` is an OpenAPI or Swagger document — a
+  local file path or an HTTP(S) URL. Read it as authoritative API evidence for
+  endpoints, parameters, schemas, and examples. A source without `kind` is a
+  read-only local directory.
+- `defaultAgent` optionally records the coding agent (`codex`, `claude`, or
+  `gemini`) the user chose for this project. Do not change it.
+- `deployment` optionally records the hosted project identity, visibility, and
+  Doxbrix destination. Preserve it during authoring; users change it through
+  `doxloop settings`.
 - Treat `designReferences` as presentation and information-architecture
   evidence only. Never use them as evidence for product behavior.
 - Treat `application` as the optional safe browser surface for application

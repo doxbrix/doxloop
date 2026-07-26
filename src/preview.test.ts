@@ -210,6 +210,9 @@ describe('generator preview', () => {
     expect(html).toContain("fetch('/__doxloop/search-index')")
     expect(html).toContain("event.metaKey || event.ctrlKey")
     expect(html).toContain("event.key === 'ArrowDown'")
+    expect(html).toContain('async function sendApiTryRequest')
+    expect(html).toContain('modal.hidden = false')
+    expect(html).toContain("allows requests from ' + location.origin + ' (CORS)")
     expect(html).toContain('data-preview-assistant')
     expect(html).toContain('class="dxb-atlas-assistant-wrap"')
     expect(html).toContain('Ask Assistant isn’t available in preview.')
@@ -275,6 +278,7 @@ describe('generator preview', () => {
     expect(css).toContain('background-color: var(--dxb-background-light, #fff)')
     expect(css).toContain('.dxb-atlas-nav-icon img')
     expect(css).toContain('object-fit: contain')
+    expect(css).toContain('.tryit-overlay[hidden]')
     expect(css).not.toContain(
       "[data-shell-theme='atlas'] .dp-nav-item.active {\n  padding-left: 12px;"
     )

@@ -9,6 +9,7 @@ import {
   parseDesignReference,
   parseSource,
   resolveSeparateProjectLayout,
+  saveProjectSettings,
   scaffoldProject,
   validateProjectSourceBoundaries,
 } from './project.js'
@@ -167,6 +168,38 @@ describe('project scaffolding', () => {
         },
       ],
     })
+  })
+
+  test('persists user-facing project and deployment settings', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'sample-docs'),
+      sources: [],
+    })
+
+    await saveProjectSettings(root, {
+      title: 'Payments API',
+      defaultAgent: 'codex',
+      deployment: {
+        name: 'Payments Documentation',
+        slug: 'payments-docs',
+        visibility: 'public',
+        apiUrl: 'https://docs.example.com',
+      },
+    })
+
+    expect(await loadProject(root)).toMatchObject({
+      title: 'Payments API',
+      defaultAgent: 'codex',
+      deployment: {
+        name: 'Payments Documentation',
+        slug: 'payments-docs',
+        visibility: 'public',
+        apiUrl: 'https://docs.example.com',
+      },
+    })
+    expect((await loadSiteConfig(root)).name).toBe('Payments API')
   })
 
   test('rejects malformed Doxbrix navigation with an actionable field path', async () => {

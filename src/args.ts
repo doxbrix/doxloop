@@ -12,6 +12,7 @@ const BOOLEAN_FLAGS = new Set([
   'no-screenshots',
   'v',
   'version',
+  'yes',
 ])
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -61,7 +62,7 @@ export function assertAllowedFlags(
   args: ParsedArgs,
   allowed: ReadonlySet<string>,
 ): void {
-  const common = new Set(['cwd', 'h', 'help', 'v', 'version'])
+  const common = new Set(['cwd', 'h', 'help', 'v', 'version', 'yes'])
   for (const name of args.flags.keys()) {
     if (!common.has(name) && !allowed.has(name)) {
       throw new UsageError(

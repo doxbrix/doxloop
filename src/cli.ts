@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { resolve } from 'node:path'
+import { mkdir, readFile } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import {
   assertAllowedFlags,
   booleanFlag,
@@ -9,8 +10,8 @@ import {
   numberFlag,
   parseArgs,
 } from './args.js'
-import { chooseAgent, installSkill, parseAgent, skillStatus } from './agents.js'
-import { login, logout, whoami } from './auth.js'
+import { installSkill, parseAgent, skillStatus } from './agents.js'
+import { loadUserConfig, login, logout, whoami } from './auth.js'
 import {
   parseReasoning,
   resolveScreenshotIntent,
@@ -27,20 +28,44 @@ import {
   formatGeneratorList,
   removeGenerator,
 } from './generator-manager.js'
-import { GENERATOR_CATALOG, parseGenerator } from './generators.js'
+import {
+  GENERATOR_CATALOG,
+  generatorCatalogEntry,
+  parseGenerator,
+  resolveGeneratorPackage,
+} from './generators.js'
+import {
+  formatInitPlan,
+  promptForRequest,
+  replayInitCommand,
+  runCreateRescueWizard,
+  runInitWizard,
+  selectAgentInteractive,
+  type InitPlan,
+} from './interactive.js'
 import {
   addDesignReferences,
+  assertNewProjectDirectory,
   findProjectRoot,
+  isSpecUrl,
   loadProject,
   parseDesignReference,
   parseSource,
+  parseSpec,
   resolveSeparateProjectLayout,
+  saveDefaultAgent,
   scaffoldProject,
   validateProjectSourceBoundaries,
 } from './project.js'
+import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
 import { startPreview } from './preview.js'
-import { confirmPublicDeployment } from './public-deploy-confirmation.js'
-import type { ParsedArgs } from './types.js'
+import {
+  effectiveDeployment,
+  formatProjectSettings,
+  runSettingsWizard,
+} from './settings.js'
+import { collectSourceChanges, formatSourceChanges } from './sync.js'
+import type { GeneratorName, ParsedArgs, SourceChange } from './types.js'
 import { formatValidation, validateProject } from './validation.js'
 import { VERSION } from './version.js'
 
@@ -78,7 +103,11 @@ async function main(): Promise<number> {
       return report.ready ? 0 : 1
     }
     case 'create':
-      if (flag(args, 'source') !== undefined || flag(args, 'output') !== undefined) {
+      if (
+        flag(args, 'source') !== undefined ||
+        flag(args, 'output') !== undefined ||
+        flags(args, 'spec').length > 0
+      ) {
         return createProjectCommand(args, cwd)
       }
       return authorCommand(args, cwd, 'create')
@@ -105,6 +134,17 @@ async function main(): Promise<number> {
     }
     case 'status':
       return statusCommand(cwd, outputFormat(flag(args, 'format')))
+    case 'settings': {
+      const root = await findProjectRoot(cwd)
+      if (!isInteractive(args)) {
+        process.stdout.write(
+          `${formatProjectSettings(root, await loadProject(root))}\n`,
+        )
+        return 0
+      }
+      await runSettingsWizard(root, cwd, promptIo())
+      return 0
+    }
     case 'preview': {
       const root = await findProjectRoot(cwd)
       await startPreview({
@@ -134,21 +174,63 @@ async function main(): Promise<number> {
       return 0
     case 'deploy': {
       const root = await findProjectRoot(cwd)
-      const name = flag(args, 'name')
-      const slug = flag(args, 'slug')
-      const apiOverride = flag(args, 'api-url')
+      const project = await loadProject(root)
+      const userConfig = await loadUserConfig()
+      const savedDeployment = effectiveDeployment(project, userConfig.apiUrl)
+      const name = flag(args, 'name') ?? savedDeployment.name
+      const slug = flag(args, 'slug') ?? savedDeployment.slug
+      const apiOverride = flag(args, 'api-url') ?? savedDeployment.apiUrl
       const dryRun = booleanFlag(args, 'dry-run')
-      const publicSite = booleanFlag(args, 'public')
-      if (publicSite && !dryRun && !(await confirmPublicDeployment())) {
-        throw new DoxloopError('Public deployment canceled. No data was uploaded.')
+      const publicSite =
+        flag(args, 'public') !== undefined
+          ? booleanFlag(args, 'public')
+          : savedDeployment.visibility === 'public'
+      if (isInteractive(args) && !dryRun) {
+        const validation = await validateProject(root)
+        if (validation.errors > 0) {
+          throw new DoxloopError(
+            `Deployment stopped because documentation has ${validation.errors} validation error${validation.errors === 1 ? '' : 's'}. Run \`doxloop test\`.`,
+          )
+        }
+        process.stdout.write(
+          `\nDeployment summary\n\n  Project:      ${name}\n  Slug:         ${slug}\n  Destination:  ${apiOverride}\n  Visibility:   ${publicSite ? 'PUBLIC' : 'Private'}\n  Pages:        ${validation.pages.length}\n  Warnings:     ${validation.warnings}\n  Product files: 0\n\n`,
+        )
+        if (publicSite) {
+          process.stdout.write(
+            'Anyone on the internet will be able to access this documentation.\n\n',
+          )
+        }
+        const proceed = await promptConfirm({
+          message: publicSite ? 'Deploy publicly?' : 'Deploy now?',
+          initial: !publicSite,
+        })
+        if (!proceed) {
+          process.stdout.write('Deployment canceled. No data was uploaded.\n')
+          return 0
+        }
+
+        const token =
+          userConfig.token ?? process.env.DOXLOOP_TOKEN ?? process.env.DOXBRIX_TOKEN
+        if (!token) {
+          process.stdout.write('You are not signed in to Doxbrix.\n')
+          const signIn = await promptConfirm({
+            message: 'Sign in now?',
+            initial: true,
+          })
+          if (!signIn) {
+            process.stdout.write('Deployment canceled. No data was uploaded.\n')
+            return 0
+          }
+          await login({ apiUrl: apiOverride })
+        }
       }
       await deploy({
         root,
-        ...(name ? { name } : {}),
-        ...(slug ? { slug } : {}),
+        name,
+        slug,
         dryRun,
         public: publicSite,
-        ...(apiOverride ? { apiUrl: apiOverride } : {}),
+        apiUrl: apiOverride,
       })
       return 0
     }
@@ -160,33 +242,112 @@ async function main(): Promise<number> {
 }
 
 async function initCommand(args: ParsedArgs, cwd: string): Promise<number> {
-  const directory = args.positionals[0]
-  if (!directory) throw new UsageError('Usage: doxloop init <directory> [--source name=path]')
+  const providedDirectory = args.positionals[0]
+  let sources = [
+    ...flags(args, 'source').map(parseSource),
+    ...flags(args, 'spec').map(parseSpec),
+  ]
+  let title = flag(args, 'title')
+  let generator = parseGenerator(flag(args, 'generator'))
+  let fromWizard = false
+  let directory = providedDirectory
+  if (!providedDirectory) {
+    if (!isInteractive(args)) {
+      throw new UsageError(
+        'Guided setup requires an interactive terminal. For automation, use `doxloop init <directory>` with optional --source or --spec values.',
+      )
+    }
+    const plan = await runInitWizard(cwd)
+    directory = plan.directory
+    if (sources.length === 0) sources = plan.sources
+    title = title ?? plan.title
+    generator = generator ?? plan.generator
+    fromWizard = true
+  }
   if (args.positionals.length > 1) {
     throw new UsageError('The init command accepts one destination directory.')
   }
-  const sources = flags(args, 'source').map(parseSource)
-  const designReferences = flags(args, 'reference').map(parseDesignReference)
-  const title = flag(args, 'title')
-  const generator = parseGenerator(flag(args, 'generator'))
-  const projectRoot = resolve(cwd, directory)
-  await validateProjectSourceBoundaries(projectRoot, sources)
-  const root = await scaffoldProject({
-    directory: projectRoot,
+  if (!directory) throw new UsageError('A documentation project directory is required.')
+  const plan: InitPlan = {
+    directory,
     ...(title ? { title } : {}),
     sources,
+    generator: generator ?? 'doxbrix',
+  }
+  if (fromWizard && !(await confirmInitPlan(cwd, plan))) {
+    process.stdout.write('Setup canceled. No project was created.\n')
+    return 0
+  }
+  const root = await initializeProject(
+    args,
+    cwd,
+    plan,
+    flags(args, 'reference').map(parseDesignReference),
+  )
+  if (fromWizard) {
+    process.stdout.write(
+      `\nRerun this setup non-interactively:\n  ${replayInitCommand(plan)}\n`,
+    )
+  }
+  process.stdout.write(
+    `\nNext:\n  cd ${directory}\n  doxloop create\n  doxloop preview --open\n  doxloop test\n`,
+  )
+  return 0
+}
+
+async function confirmInitPlan(cwd: string, plan: InitPlan): Promise<boolean> {
+  process.stdout.write(`\n${formatInitPlan(cwd, plan)}\n\n`)
+  return promptConfirm({ message: 'Create this project?', initial: true })
+}
+
+async function initializeProject(
+  args: ParsedArgs,
+  cwd: string,
+  plan: InitPlan,
+  designReferences: ReturnType<typeof parseDesignReference>[] = [],
+): Promise<string> {
+  const projectRoot = resolve(cwd, plan.directory)
+  await validateProjectSourceBoundaries(projectRoot, plan.sources)
+  if (plan.generator !== 'doxbrix') {
+    await ensureGeneratorAvailable(args, projectRoot, plan.generator)
+  }
+  const root = await scaffoldProject({
+    directory: projectRoot,
+    ...(plan.title ? { title: plan.title } : {}),
+    sources: plan.sources,
     designReferences,
-    ...(generator ? { generator } : {}),
+    generator: plan.generator,
   })
   const installs = await installSkill({ root })
   process.stdout.write(`Created Doxloop project at ${root}\n`)
   for (const install of installs) {
     process.stdout.write(`${install.action}: ${install.path}\n`)
   }
-  process.stdout.write(
-    `\nNext:\n  cd ${directory}\n  doxloop create\n  doxloop preview --open\n  doxloop test\n`,
-  )
-  return 0
+  return root
+}
+
+async function ensureGeneratorAvailable(
+  args: ParsedArgs,
+  projectRoot: string,
+  generator: GeneratorName,
+): Promise<void> {
+  const entry = generatorCatalogEntry(generator)
+  if (!entry?.packageName) return
+  if (resolveGeneratorPackage(projectRoot, entry.packageName)) return
+  if (isInteractive(args)) {
+    const install = await promptConfirm({
+      message: `${entry.displayName} support needs ${entry.packageName}. Install it into the new project now?`,
+      initial: true,
+    })
+    if (!install) {
+      throw new DoxloopError(
+        `${entry.displayName} support is not installed. Install it with \`doxloop generator add ${generator}\` inside the documentation project.`,
+        2,
+      )
+    }
+  }
+  await mkdir(projectRoot, { recursive: true })
+  await addGenerator(projectRoot, generator)
 }
 
 async function createProjectCommand(
@@ -195,9 +356,10 @@ async function createProjectCommand(
 ): Promise<number> {
   const source = flag(args, 'source')
   const output = flag(args, 'output')
-  if (!source || !output) {
+  const specs = flags(args, 'spec').map(parseSpec)
+  if (!output || (!source && specs.length === 0)) {
     throw new UsageError(
-      'Creating a new documentation project requires both `--source <product-directory>` and `--output <documentation-directory>`.',
+      'Creating a new documentation project requires `--output <documentation-directory>` plus `--source <product-directory>`, `--spec <openapi-file-or-url>`, or both.',
     )
   }
   if (flags(args, 'source').length > 1 || flags(args, 'output').length > 1) {
@@ -206,56 +368,44 @@ async function createProjectCommand(
     )
   }
 
-  const layout = await resolveSeparateProjectLayout({ cwd, source, output })
-  const requestedAgent = parseAgent(flag(args, 'agent'))
+  const layout = source
+    ? await resolveSeparateProjectLayout({ cwd, source, output })
+    : undefined
+  const projectRoot = layout?.projectRoot ?? resolve(cwd, output)
+  const sources = [
+    ...(layout ? [layout.sourceBinding] : []),
+    ...specs.map((spec) => projectRelativeSpec(spec, cwd, projectRoot)),
+  ]
   const print = booleanFlag(args, 'print')
-  const selectedAgent = print ? requestedAgent : (await chooseAgent(requestedAgent)).name
   const designReferences = flags(args, 'reference').map(parseDesignReference)
-  const model = flag(args, 'model')
-  const reasoning = parseReasoning(flag(args, 'reasoning'))
-  const screenshots = screenshotIntent(args)
-  if (reasoning && selectedAgent && selectedAgent !== 'codex') {
-    throw new DoxloopError(
-      `--reasoning is only supported with Codex. Configure the reasoning behavior of ${selectedAgent} in its own settings.`,
-      2,
-    )
-  }
 
+  if (!layout) await assertNewProjectDirectory(projectRoot)
+  await validateProjectSourceBoundaries(projectRoot, sources)
+
+  const sourceText = layout
+    ? `Product source:\n  ${layout.sourceRoot}\n  Read-only — product files will not be changed or deployed.\n\n`
+    : specs.length > 0
+      ? `API specification${specs.length === 1 ? '' : 's'}:\n${specs.map((spec) => `  ${spec.path}`).join('\n')}\n  Read-only API evidence.\n\n`
+      : ''
   process.stdout.write(
-    `Welcome to Doxloop\n\nProduct source:\n  ${layout.sourceRoot}\n  Read-only — product files will not be changed or deployed.\n\nDocumentation project:\n  ${layout.projectRoot}\n  Only this project can be previewed or deployed.\n\n`,
+    `Welcome to Doxloop\n\n${sourceText}Documentation project:\n  ${projectRoot}\n  Only this project can be previewed or deployed.\n\n`,
   )
 
   const root = await scaffoldProject({
-    directory: layout.projectRoot,
-    sources: [layout.sourceBinding],
+    directory: projectRoot,
+    sources,
     designReferences,
   })
   if (print) {
+    const requestedAgent = parseAgent(flag(args, 'agent'))
     await installSkill({
       root,
-      ...(selectedAgent ? { agent: selectedAgent } : {}),
+      ...(requestedAgent ? { agent: requestedAgent } : {}),
     })
   }
 
-  const result = await runAuthor({
-    root,
-    mode: 'create',
-    ...(selectedAgent ? { agent: selectedAgent } : {}),
-    ...(model ? { model } : {}),
-    ...(reasoning ? { reasoning } : {}),
-    screenshots,
-    print,
-    ...(args.positionals.length > 0
-      ? { request: args.positionals.join(' ') }
-      : {}),
-  })
+  const result = await authorCommand(args, root, 'create')
 
-  if (result === 0 && !print) {
-    const validation = await validateProject(root)
-    process.stdout.write(
-      `\nDocumentation created successfully.\n\nPages created: ${validation.pages.length}\nDocumentation project: ${root}\nProduct source files included in deployment: 0\n\nPreview the documentation:\n  cd ${root}\n  doxloop preview --open\n\nWhen the product changes:\n  cd ${root}\n  doxloop update\n`,
-    )
-  }
   return result
 }
 
@@ -264,21 +414,128 @@ async function authorCommand(
   cwd: string,
   mode: 'create' | 'update' | 'review',
 ): Promise<number> {
-  const root = await findProjectRoot(cwd)
+  const interactive = isInteractive(args)
+  const print = booleanFlag(args, 'print')
+  let root: string
+  try {
+    root = await findProjectRoot(cwd)
+  } catch (error) {
+    if (mode === 'create' && interactive && !print) {
+      const plan = await runCreateRescueWizard(cwd, promptIo())
+      if (plan) {
+        if (!(await confirmInitPlan(cwd, plan))) {
+          process.stdout.write('Setup canceled. No project was created.\n')
+          return 0
+        }
+        root = await initializeProject(args, cwd, plan)
+        process.stdout.write(
+          '\nSetup complete. Tell Doxloop what documentation to create.\n\n',
+        )
+      } else {
+        throw error
+      }
+    } else {
+      throw error
+    }
+  }
+  const project = await loadProject(root)
   if (mode !== 'review') {
-    const project = await loadProject(root)
     await validateProjectSourceBoundaries(root, project.sources)
   }
-  const selectedAgent = parseAgent(flag(args, 'agent'))
-  const request = args.positionals.join(' ') || undefined
+  let selectedAgent = parseAgent(flag(args, 'agent')) ?? project.defaultAgent
+  let request = args.positionals.join(' ') || undefined
+  let changeSummary: string | undefined
+  let requestedInteractively = false
+  let offerToRememberAgent = false
+
+  if (mode === 'update') {
+    if (interactive && !print && !(await hasCompletedAuthoringRun(root))) {
+      process.stdout.write(
+        'This project has not completed its first documentation run yet.\n\nNext:\n  doxloop create\n',
+      )
+      return 0
+    }
+    if (project.sources.length === 0) {
+      if (interactive && !print) {
+        process.stdout.write(
+          'No product source or API specification is configured.\nUse `doxloop settings` to add evidence, or describe a documentation-only change below.\n\n',
+        )
+        if (!request) {
+          request = await promptForRequest('update', promptIo(), false)
+          requestedInteractively = true
+          if (!request) {
+            process.stdout.write('No documentation change requested.\n')
+            return 0
+          }
+        }
+      }
+    } else {
+      const changes = await collectSourceChanges(root, project.sources)
+      changeSummary = formatSourceChanges(changes)
+      if (interactive && !print) {
+        process.stdout.write(`${formatSourceChangeOverview(changes)}\n\n`)
+        if (!hasPendingSourceChanges(changes) && !request) {
+          const proceed = await promptConfirm({
+            message: 'Documentation is synchronized. Make a documentation-only change?',
+            initial: false,
+          })
+          if (!proceed) {
+            process.stdout.write(
+              'Documentation is synchronized with the recorded source baseline.\n',
+            )
+            return 0
+          }
+        }
+      }
+    }
+  }
+
+  if (
+    interactive &&
+    !print &&
+    !request &&
+    !requestedInteractively &&
+    (mode === 'create' || mode === 'update')
+  ) {
+    request = await promptForRequest(mode, promptIo(), project.sources.length > 0)
+  }
+  if (interactive && !print && !selectedAgent) {
+    selectedAgent = await selectAgentInteractive(promptIo())
+    if (selectedAgent && mode !== 'review' && !project.defaultAgent) {
+      offerToRememberAgent = true
+    }
+  }
+
+  if (interactive && !print && mode === 'create') {
+    process.stdout.write(
+      `\nAuthoring summary\n\n  Project:    ${project.title}\n  Evidence:   ${project.sources.length === 0 ? 'None yet' : `${project.sources.length} configured source${project.sources.length === 1 ? '' : 's'}`}\n  Generator:  ${project.generator}\n  Agent:      ${selectedAgent ?? 'Automatically detected'}\n  Request:    ${request ?? 'Let the agent propose a documentation plan'}\n\n`,
+    )
+    const proceed = await promptConfirm({
+      message: 'Start creating documentation?',
+      initial: true,
+    })
+    if (!proceed) {
+      process.stdout.write('Authoring canceled. Project settings were preserved.\n')
+      return 0
+    }
+  }
+  if (offerToRememberAgent && selectedAgent) {
+    const remember = await promptConfirm({
+      message: `Remember ${selectedAgent} as this project's default agent?`,
+      initial: true,
+    })
+    if (remember) await saveDefaultAgent(root, selectedAgent)
+  }
+
   const designReferences = flags(args, 'reference').map(parseDesignReference)
   if (mode !== 'review') await addDesignReferences(root, designReferences)
   const model = flag(args, 'model')
   const reasoning = parseReasoning(flag(args, 'reasoning'))
   const screenshots = screenshotIntent(args)
-  return runAuthor({
+  const result = await runAuthor({
     root,
     mode,
+    ...(changeSummary !== undefined ? { changeSummary } : {}),
     ...(selectedAgent ? { agent: selectedAgent } : {}),
     ...(model ? { model } : {}),
     ...(reasoning ? { reasoning } : {}),
@@ -300,6 +557,13 @@ async function authorCommand(
         }
       : {}),
   })
+  if (result === 0 && !print && mode === 'create') {
+    const validation = await validateProject(root)
+    process.stdout.write(
+      `\nDocumentation created successfully.\n\nPages created: ${validation.pages.length}\nDocumentation project: ${root}\nProduct source files included in deployment: 0\n\nNext:\n  cd ${root}\n  doxloop preview --open\n  doxloop test\n\nWhen the product changes:\n  doxloop update\n`,
+    )
+  }
+  return result
 }
 
 async function agentCommand(args: ParsedArgs, cwd: string): Promise<number> {
@@ -361,6 +625,7 @@ async function generatorCommand(args: ParsedArgs, cwd: string): Promise<number> 
 async function statusCommand(cwd: string, format?: string): Promise<number> {
   const root = await findProjectRoot(cwd)
   const project = await loadProject(root)
+  const deployment = effectiveDeployment(project)
   const result = await validateProject(root)
   if (format === 'json') {
     process.stdout.write(
@@ -373,6 +638,7 @@ async function statusCommand(cwd: string, format?: string): Promise<number> {
           sources: project.sources,
           designReferences: project.designReferences,
           ...(project.application ? { application: project.application } : {}),
+          deployment,
           errors: result.errors,
           warnings: result.warnings,
         },
@@ -382,7 +648,7 @@ async function statusCommand(cwd: string, format?: string): Promise<number> {
     )
   } else {
     process.stdout.write(
-      `${project.title}\nRoot: ${root}\nGenerator: ${project.generator}\nPages: ${result.pages.length}\nSources: ${project.sources.length}\nDesign references: ${project.designReferences.length}\nApplication screenshots: ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} (${project.application.baseUrl})` : 'not configured'}\nErrors: ${result.errors}\nWarnings: ${result.warnings}\n`,
+      `${project.title}\nRoot: ${root}\nGenerator: ${project.generator}\nPages: ${result.pages.length}\nSources: ${project.sources.length}\nDesign references: ${project.designReferences.length}\nApplication screenshots: ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} (${project.application.baseUrl})` : 'not configured'}\nDeployment: ${deployment.slug} (${deployment.visibility}) → ${deployment.apiUrl}\nErrors: ${result.errors}\nWarnings: ${result.warnings}\n`,
     )
     for (const source of project.sources) {
       process.stdout.write(`source ${source.name}: ${source.path}\n`)
@@ -393,16 +659,17 @@ async function statusCommand(cwd: string, format?: string): Promise<number> {
 
 function validateCommandArguments(args: ParsedArgs): void {
   const allowed: Record<string, string[]> = {
-    init: ['title', 'source', 'reference', 'generator'],
+    init: ['title', 'source', 'spec', 'reference', 'generator'],
     agent: ['agent'],
     generator: [],
     doctor: ['source', 'output', 'agent'],
-    create: ['agent', 'model', 'reasoning', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'output'],
+    create: ['agent', 'model', 'reasoning', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
     update: ['agent', 'model', 'reasoning', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'reference', 'print'],
     capture: [],
     test: ['format'],
     status: ['format'],
+    settings: [],
     preview: ['host', 'port', 'open'],
     login: ['api-url', 'token'],
     logout: [],
@@ -426,6 +693,76 @@ function validateCommandArguments(args: ParsedArgs): void {
   }
 }
 
+function promptIo(): PromptIo {
+  return { input: process.stdin, output: process.stdout }
+}
+
+function hasPendingSourceChanges(changes: SourceChange[]): boolean {
+  return changes.some(
+    (change) => change.kind !== 'unchanged' && change.kind !== 'spec-unchanged',
+  )
+}
+
+function formatSourceChangeOverview(changes: SourceChange[]): string {
+  const pending = changes.filter(
+    (change) => change.kind !== 'unchanged' && change.kind !== 'spec-unchanged',
+  )
+  const committedFiles = changes.reduce(
+    (total, change) =>
+      total + (change.kind === 'changed' ? change.changedFiles.length : 0),
+    0,
+  )
+  const workingTreeFiles = changes.reduce(
+    (total, change) =>
+      total +
+      ('uncommittedFiles' in change ? change.uncommittedFiles.length : 0),
+    0,
+  )
+  const status =
+    pending.length === 0
+      ? 'Synchronized'
+      : `${pending.length} source${pending.length === 1 ? '' : 's'} need inspection`
+  return `Source check\n\n  Sources checked:       ${changes.length}\n  Status:                ${status}\n  Committed files:       ${committedFiles}\n  Working-tree files:    ${workingTreeFiles}`
+}
+
+async function hasCompletedAuthoringRun(root: string): Promise<boolean> {
+  try {
+    const receipt = JSON.parse(
+      await readFile(join(root, '.doxloop', 'last-run.json'), 'utf8'),
+    ) as { mode?: unknown; completedAt?: unknown }
+    return (
+      (receipt.mode === 'create' || receipt.mode === 'update') &&
+      typeof receipt.completedAt === 'string'
+    )
+  } catch {
+    try {
+      const syncState = JSON.parse(
+        await readFile(join(root, '.doxloop', 'sync-state.json'), 'utf8'),
+      ) as { schemaVersion?: unknown; sources?: unknown }
+      return (
+        syncState.schemaVersion === 1 &&
+        syncState.sources !== null &&
+        typeof syncState.sources === 'object' &&
+        !Array.isArray(syncState.sources)
+      )
+    } catch {
+      return false
+    }
+  }
+}
+
+function projectRelativeSpec(
+  spec: ReturnType<typeof parseSpec>,
+  cwd: string,
+  projectRoot: string,
+): ReturnType<typeof parseSpec> {
+  if (isSpecUrl(spec.path)) return spec
+  return {
+    ...spec,
+    path: relative(projectRoot, resolve(cwd, spec.path)).split('\\').join('/'),
+  }
+}
+
 function screenshotIntent(args: ParsedArgs): 'auto' | 'enabled' | 'disabled' {
   if (args.command === 'review') return 'disabled'
   return resolveScreenshotIntent(
@@ -442,16 +779,24 @@ function outputFormat(value: string | undefined): 'text' | 'json' {
 
 function help(command?: string): string {
   if (command === 'init') {
-    return `Usage: doxloop init <directory> [options]
+    return `Usage: doxloop init [directory] [options]
 
 Create a local documentation project and install the authoring and format skills.
+Run without arguments in a terminal to answer a short set of setup questions.
 
 Options:
   --title <title>          Documentation site title
   --source <name=path>     Add a local product source; may be repeated
+  --spec <name=file|url>   Add an OpenAPI specification as API evidence; may be repeated
   --reference <url>        Add a documentation design reference; may be repeated
   --generator <name>       Generator: ${GENERATOR_CATALOG.map((entry) => entry.id).join(', ')}
+  --yes                    Never prompt; fail instead of asking
   --cwd <directory>        Resolve paths from this directory
+
+Examples:
+  doxloop init
+  doxloop init my-docs --source product=../my-app
+  doxloop init api-docs --spec https://example.com/openapi.json
 `
   }
   if (command === 'agent') {
@@ -503,10 +848,10 @@ Options:
   --no-screenshots         Do not capture application screenshots
 `
     const createUsage = command === 'create'
-      ? `\nCreate a separate documentation project from an existing product:\n  doxloop create --source <product-directory> --output <documentation-directory> [request]\n`
+      ? `\nRun inside a Doxloop project to answer a short set of authoring questions.\nWhen run inside a detected product repository, Doxloop offers the complete setup\nwizard first. No flags are required for interactive use.\n\nOptional automation form:\n  doxloop create --source <product-directory> --output <documentation-directory> [request]\n  doxloop create --spec <openapi-file-or-url> --output <documentation-directory> [request]\n`
       : ''
     const createOptions = command === 'create'
-      ? `  --source <directory>      Read-only product source for a new documentation project\n  --output <directory>      New, separate documentation project directory\n`
+      ? `  --source <directory>      Read-only product source for a new documentation project\n  --spec <name=file|url>    OpenAPI specification used as read-only API evidence\n  --output <directory>      New, separate documentation project directory\n`
       : ''
     return `Usage: doxloop ${command} [request] [options]
 ${createUsage}
@@ -557,6 +902,17 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'settings') {
+    return `Usage: doxloop settings
+
+View or interactively change the current project's evidence, identity, default
+agent, documentation preferences, design references, screenshots, and
+deployment settings. When output is not a terminal, prints the saved settings.
+
+Options:
+  --cwd <directory>        Run from this project directory
+`
+  }
   if (command === 'login') {
     return `Usage: doxloop login [options]
 
@@ -593,6 +949,7 @@ Options:
   --name <name>            Hosted project name
   --slug <slug>            Hosted project slug
   --api-url <url>          Override the Doxbrix API base URL
+  --yes                    Use saved settings without prompting
   --cwd <directory>        Run from this project directory
 `
   }
@@ -615,6 +972,7 @@ Author:
 Verify:
   doctor     Check runtime, source, agent, generator, skills, and documentation
   status     Summarize the documentation project
+  settings   View or change project settings
   test       Validate pages, navigation, links, and code fences
   preview    Run a beautiful local preview
 
@@ -626,8 +984,14 @@ Publish:
 
 Global options:
   --cwd <directory>  Run as if started in this directory
+  --yes              Never prompt; accept safe defaults or fail instead of asking
   -h, --help         Show help
   -v, --version      Show version
+
+Get started:
+  doxloop init                       Answer a few questions interactively
+  doxloop create                     Create docs from saved project settings
+  doxloop settings                   View or change project settings
 
 Run \`doxloop <command> --help\` for command details.
 `

@@ -498,6 +498,7 @@ function apiEndpoint(props: Props, inner: string): string {
   const method = (str(props.method) || 'GET').toUpperCase()
   const path = str(props.path) || '/'
   const baseUrl = str(props.baseUrl).replace(/\/+$/, '')
+  const summary = str(props.summary) || `${method} ${path}`
   const description = str(props.description)
   const params = childElements(inner, 'Param')
   const responses = childElements(inner, 'Response')
@@ -555,7 +556,54 @@ function apiEndpoint(props: Props, inner: string): string {
       ? `<div class="dp-api-resp-card"><div class="dp-api-resp-header"><div class="dp-api-resp-tabs">${responseTabs}</div><button class="dp-api-light-copy" type="button">Copy</button></div>${responsePanels}</div>`
       : ''
 
-  return `<div class="dp-api-ref">${description ? `<p class="dp-api-ref-desc">${inline(description)}</p>` : ''}<div class="dp-api-ref-body"><div class="dp-api-ref-left"><div class="dp-api-ref-url-row"><span class="dp-api-method-badge ${method}">${esc(method)}</span><code class="dp-api-ref-path">${esc(path)}</code><button class="dp-api-try-btn" type="button" disabled title="Interactive Try it is available in published Doxbrix">Try it ▶</button></div>${parameterSection('Authorizations', 'header', '#059669')}${parameterSection('Path Parameters', 'path', '#d97706')}${parameterSection('Query Parameters', 'query', '#2563eb')}${parameterSection('Body Parameters', 'body', '#7c3aed')}${responseSection}</div><div class="dp-api-ref-right"><div class="dp-api-code-card"><div class="dp-api-code-card-header"><span class="dp-api-code-card-lang">cURL</span><div class="dp-api-code-card-actions"><span class="dp-api-code-copy">cURL⌄</span><button class="dp-api-code-copy" type="button">Copy</button></div></div><pre class="dp-api-code-body" id="${requestId}">${esc(curl)}</pre></div>${responseCard}</div></div></div>`
+  const tryItGroups = [
+    tryItParameterGroup(params, 'header', 'Headers'),
+    tryItParameterGroup(params, 'path', 'Path parameters'),
+    tryItParameterGroup(params, 'query', 'Query parameters'),
+    tryItParameterGroup(params, 'body', 'Request body'),
+  ].join('')
+  const initialUrl = `${baseUrl}${path}`
+  const tryItModal = `<div class="tryit-overlay" data-api-try-modal hidden><section class="tryit-modal" role="dialog" aria-modal="true" aria-label="Try ${escAttr(summary)}"><header class="tryit-header"><div class="tryit-header-left"><span class="dp-api-method-badge ${method}">${esc(method)}</span><span class="tryit-summary">${esc(summary)}</span></div><div class="tryit-header-center"><code class="tryit-url-bar" data-api-request-url>${esc(initialUrl)}</code></div><div class="tryit-header-right"><button class="tryit-send-btn" type="button" data-api-send>Send request</button><button class="tryit-close-btn" type="button" data-api-try-close aria-label="Close Try it">Close</button></div></header><div class="tryit-body"><div class="tryit-left">${description ? `<p class="tryit-description">${inline(description)}</p>` : ''}${tryItGroups || '<p class="tryit-description">This endpoint has no parameters.</p>'}</div><div class="tryit-right"><div class="tryit-code-card"><div class="tryit-code-header"><span class="tryit-code-label">Request</span><button class="tryit-copy-btn" type="button" data-api-try-copy>Copy</button></div><pre class="tryit-code-pre" data-api-live-request>${esc(curl)}</pre></div><div class="tryit-code-card" data-api-live-response hidden><div class="tryit-code-header"><span class="tryit-code-label">Response</span><button class="tryit-copy-btn" type="button" data-api-try-copy>Copy</button></div><div class="tryit-status-bar" data-api-live-status role="status"></div><pre class="tryit-code-pre" data-api-live-body></pre></div></div></div></section></div>`
+
+  return `<div class="dp-api-ref" data-api-method="${escAttr(method)}" data-api-base-url="${escAttr(baseUrl)}" data-api-path="${escAttr(path)}">${description ? `<p class="dp-api-ref-desc">${inline(description)}</p>` : ''}<div class="dp-api-ref-body"><div class="dp-api-ref-left"><div class="dp-api-ref-url-row"><span class="dp-api-method-badge ${method}">${esc(method)}</span><code class="dp-api-ref-path">${esc(path)}</code><button class="dp-api-try-btn" type="button" data-api-try>Try it ▶</button></div>${parameterSection('Authorizations', 'header', '#059669')}${parameterSection('Path Parameters', 'path', '#d97706')}${parameterSection('Query Parameters', 'query', '#2563eb')}${parameterSection('Body Parameters', 'body', '#7c3aed')}${responseSection}</div><div class="dp-api-ref-right"><div class="dp-api-code-card"><div class="dp-api-code-card-header"><span class="dp-api-code-card-lang">cURL</span><div class="dp-api-code-card-actions"><span class="dp-api-code-copy">cURL⌄</span><button class="dp-api-code-copy" type="button">Copy</button></div></div><pre class="dp-api-code-body" id="${requestId}">${esc(curl)}</pre></div>${responseCard}</div></div>${tryItModal}</div>`
+}
+
+function tryItParameterGroup(
+  params: ElNode[],
+  location: string,
+  title: string,
+): string {
+  const matching = params.filter(
+    (param) => (str(param.props.in) || 'query') === location,
+  )
+  if (matching.length === 0) return ''
+  const rows = matching
+    .map((param) => {
+      const name = str(param.props.name)
+      const type = str(param.props.type) || 'string'
+      const required =
+        param.props.required === true || str(param.props.required) === 'true'
+      const description = stripBlockWrap(renderNodes(param.inner))
+      const example = apiTryItValue(param, location)
+      const className =
+        location === 'body' && /^(?:array|object)$/i.test(type)
+          ? 'tryit-body-textarea'
+          : 'tryit-param-input'
+      const attributes = `class="${className}" data-api-param-location="${escAttr(location)}" data-api-param-name="${escAttr(name)}" data-api-param-type="${escAttr(type)}"${required ? ' required' : ''} aria-label="${escAttr(`${name} (${location})`)}"`
+      const control =
+        className === 'tryit-body-textarea'
+          ? `<textarea ${attributes} rows="4">${esc(example)}</textarea>`
+          : `<input ${attributes} type="text" value="${escAttr(example)}">`
+      return `<div class="tryit-param-row"><label><span class="tryit-param-label"><span class="tryit-param-name">${esc(name)}</span><span class="tryit-param-type">${esc(type)}</span>${required ? '<span class="tryit-param-required">required</span>' : ''}</span>${description ? `<span class="tryit-param-desc">${description}</span>` : ''}${control}</label></div>`
+    })
+    .join('')
+  return `<section class="tryit-param-group"><h3 class="tryit-group-title">${title}${location === 'body' ? '<span class="tryit-ct">application/json</span>' : ''}</h3>${rows}</section>`
+}
+
+function apiTryItValue(param: ElNode, location: string): string {
+  if (location !== 'body') return str(param.props.example)
+  const value = apiBodyExample(param)
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
 }
 
 function apiCurlExample(

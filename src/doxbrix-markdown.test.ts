@@ -100,6 +100,14 @@ Continue from here.
     expect(result.html).toContain('Authorizations')
     expect(result.html).toContain('Query Parameters')
     expect(result.html).toContain('Try it ▶')
+    expect(result.html).toContain('data-api-try')
+    expect(result.html).not.toContain('data-api-try disabled')
+    expect(result.html).toContain('class="tryit-overlay"')
+    expect(result.html).toContain('data-api-try-modal hidden')
+    expect(result.html).toContain('data-api-send')
+    expect(result.html).toContain('data-api-param-location="header"')
+    expect(result.html).toContain('value="Bearer api_test_example"')
+    expect(result.html).toContain('data-api-param-location="query"')
     expect(result.html).toContain('curl --request GET')
     expect(result.html).toContain(
       'https://api.example.com/v1/projects?limit=50',
@@ -173,5 +181,8 @@ Continue from here.
     expect(result.html).toContain(
       '"metadata": {\n    "owner": "Ada"\n  }',
     )
+    expect(result.html).toContain('class="tryit-body-textarea"')
+    expect(result.html).toContain('data-api-param-name="metadata"')
+    expect(result.html).toContain('data-api-param-name="metadata.owner"')
   })
 })

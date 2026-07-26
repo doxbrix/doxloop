@@ -5,6 +5,37 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.1.4 - 2026-07-26
+
+### Added
+
+- Interactive mode: `doxloop init` with no arguments walks through project
+  location, detected product evidence, title, and simplified generator
+  selection, shows a setup summary, then prints the equivalent non-interactive
+  command. Prompts appear only in a terminal and never in CI; the new global
+  `--yes` flag disables them everywhere.
+- Command-first workflow: normal interactive use requires only `doxloop init`,
+  `doxloop create`, `doxloop update`, and `doxloop deploy`; configuration flags
+  remain optional automation overrides.
+- `doxloop settings` provides an interactive home for product evidence, site
+  identity, the default agent, documentation preferences, design references,
+  screenshots, and saved deployment settings.
+- OpenAPI specifications as first-class evidence: `--spec <name=file-or-url>`
+  on `init` and `create`, including creating a documentation project from a
+  specification alone. Spec files are fingerprinted for `doxloop update`
+  change tracking, and remote specs are flagged for comparison.
+- `doxloop create` run inside a product directory now offers the complete setup
+  wizard for a separate sibling documentation project, then continues into the
+  same request, agent, and confirmation flow as an existing project.
+- `doxloop update` shows the source-change summary before starting the agent
+  and, when everything is in sync, asks before spending an agent run. When no
+  request is given interactively, `create` and `update` ask what you need.
+- Agent selection prompt when several agent CLIs are installed, with an
+  optional remembered `defaultAgent` per project.
+- `doxloop deploy` uses saved project settings, validates before approval,
+  shows the exact destination and deployment summary, uses one confirmation
+  (default-no for public sites), and offers sign-in only after approval.
+
 ## 0.1.3 - 2026-07-25
 
 ## 0.1.2 - 2026-07-25

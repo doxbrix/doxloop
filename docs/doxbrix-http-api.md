@@ -96,7 +96,8 @@ Content-Type: application/json
 ```
 
 The response uses the same `{"project":{…}}` envelope. Doxloop explicitly sends
-`visibility: "private"` unless the user confirms `doxloop deploy --public`.
+the private-by-default visibility saved through `doxloop settings` or selected
+for the current deployment.
 API-created projects default to `seedTemplate: false` so the following bundle
 is their only documentation structure. Pass `true` only when the Doxbrix web
 starter spaces and pages are wanted.

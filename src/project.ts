@@ -33,6 +33,7 @@ import {
 import { PACKAGE_NAME, VERSION } from './version.js'
 import type {
   ApplicationConfig,
+  DeploymentConfig,
   DocumentationBrief,
   DesignReference,
   DoxloopProject,
@@ -65,7 +66,7 @@ export async function findProjectRoot(start: string): Promise<string> {
     current = parent
   }
   throw new DoxloopError(
-    'No Doxloop project found. Run `doxloop init <directory>` first.',
+    'No Doxloop project found. Run `doxloop init` first.',
     2,
   )
 }
@@ -84,6 +85,8 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
       !isDesignReferences(project.designReferences)) ||
     (project.application !== undefined &&
       !isApplicationConfig(project.application, project.sources)) ||
+    (project.deployment !== undefined &&
+      !isDeploymentConfig(project.deployment)) ||
     (project.generator !== undefined &&
       generatorCatalogEntry(project.generator) === undefined) ||
     (project.generatorPackage !== undefined &&
@@ -91,6 +94,8 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
         project.generatorPackage.trim() === '' ||
         project.generatorPackage !== expectedGeneratorPackage)) ||
     !isSourceBindings(project.sources) ||
+    (project.defaultAgent !== undefined &&
+      !['codex', 'claude', 'gemini'].includes(project.defaultAgent)) ||
     (project.documentation !== undefined &&
       !isDocumentationBrief(project.documentation))
   ) {
@@ -105,10 +110,49 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     ...(project.generatorPackage
       ? { generatorPackage: project.generatorPackage }
       : {}),
+    ...(project.defaultAgent ? { defaultAgent: project.defaultAgent } : {}),
     sources: project.sources,
     designReferences: project.designReferences ?? [],
     ...(project.application ? { application: project.application } : {}),
+    ...(project.deployment ? { deployment: project.deployment } : {}),
     documentation: project.documentation ?? defaultDocumentationBrief(),
+  }
+}
+
+export async function saveDefaultAgent(
+  root: string,
+  agent: DoxloopProject['defaultAgent'],
+): Promise<void> {
+  const path = join(root, PROJECT_FILE)
+  const raw = await readJson<Record<string, unknown>>(path)
+  await writeJson(path, { ...raw, defaultAgent: agent })
+}
+
+export async function saveProjectSettings(
+  root: string,
+  changes: {
+    [Key in
+      | 'title'
+      | 'defaultAgent'
+      | 'sources'
+      | 'designReferences'
+      | 'application'
+      | 'deployment'
+      | 'documentation']?: DoxloopProject[Key] | undefined
+  },
+): Promise<void> {
+  const path = join(root, PROJECT_FILE)
+  const raw = await readJson<Record<string, unknown>>(path)
+  const next: Record<string, unknown> = { ...raw, ...changes }
+  for (const key of ['defaultAgent', 'application', 'deployment'] as const) {
+    if (key in changes && changes[key] === undefined) delete next[key]
+  }
+  await writeJson(path, next)
+  const updated = await loadProject(root)
+  if (changes.title !== undefined && updated.generator === 'doxbrix') {
+    const configPath = await siteConfigPath(root, updated)
+    const config = await readJson<Record<string, unknown>>(configPath)
+    await writeJson(configPath, { ...config, name: changes.title })
   }
 }
 
@@ -167,7 +211,51 @@ export function parseSource(raw: string): SourceBinding {
   if (!/^[a-z][a-z0-9-]*$/.test(name)) {
     throw new DoxloopError(`Invalid source name "${name}".`, 2)
   }
+  if (isSpecLocation(path)) return { name, path, kind: 'openapi' }
   return { name, path }
+}
+
+export function parseSpec(raw: string): SourceBinding {
+  const equals = raw.indexOf('=')
+  const name = equals > 0 ? raw.slice(0, equals).trim() : 'api'
+  const location = (equals > 0 ? raw.slice(equals + 1) : raw).trim()
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
+    throw new DoxloopError(`Invalid source name "${name}".`, 2)
+  }
+  if (location === '') {
+    throw new DoxloopError(
+      `Invalid specification "${raw}". Use an OpenAPI file path or URL, for example --spec ./openapi.json or --spec api=https://example.com/openapi.json.`,
+      2,
+    )
+  }
+  if (isSpecUrl(location)) {
+    let url: URL
+    try {
+      url = new URL(location)
+    } catch {
+      throw new DoxloopError(`Invalid specification URL "${location}".`, 2)
+    }
+    if (url.username || url.password) {
+      throw new DoxloopError(
+        `Invalid specification URL "${location}". Remove embedded credentials.`,
+        2,
+      )
+    }
+    return { name, path: url.toString(), kind: 'openapi' }
+  }
+  return { name, path: location, kind: 'openapi' }
+}
+
+export function isSpecUrl(location: string): boolean {
+  return /^https?:\/\//i.test(location)
+}
+
+function isSpecLocation(location: string): boolean {
+  return isSpecUrl(location) || /\.(json|ya?ml)$/i.test(location)
+}
+
+export function sourceKind(source: SourceBinding): 'directory' | 'openapi' {
+  return source.kind ?? 'directory'
 }
 
 export async function resolveSeparateProjectLayout(options: {
@@ -183,22 +271,7 @@ export async function resolveSeparateProjectLayout(options: {
   const projectRoot = resolve(options.cwd, options.output)
   await assertSourceDirectory(sourceRoot)
   await assertSeparateDirectories(sourceRoot, projectRoot)
-
-  if (await pathExists(projectRoot)) {
-    const projectStats = await stat(projectRoot)
-    if (!projectStats.isDirectory()) {
-      throw new DoxloopError(
-        `The documentation output is not a directory: ${projectRoot}`,
-        2,
-      )
-    }
-    if ((await readdir(projectRoot)).length > 0) {
-      throw new DoxloopError(
-        `The documentation output is not empty: ${projectRoot}\nChoose a new directory, or run \`doxloop create\` inside an existing Doxloop project.`,
-        2,
-      )
-    }
-  }
+  await assertNewProjectDirectory(projectRoot)
 
   return {
     sourceRoot,
@@ -215,9 +288,46 @@ export async function validateProjectSourceBoundaries(
   sources: SourceBinding[],
 ): Promise<void> {
   for (const source of sources) {
+    if (sourceKind(source) === 'openapi') {
+      if (isSpecUrl(source.path)) continue
+      await assertSpecFile(resolve(projectRoot, source.path))
+      continue
+    }
     const sourceRoot = resolve(projectRoot, source.path)
     await assertSourceDirectory(sourceRoot)
     await assertSeparateDirectories(sourceRoot, projectRoot)
+  }
+}
+
+export async function assertNewProjectDirectory(projectRoot: string): Promise<void> {
+  if (!(await pathExists(projectRoot))) return
+  const projectStats = await stat(projectRoot)
+  if (!projectStats.isDirectory()) {
+    throw new DoxloopError(
+      `The documentation output is not a directory: ${projectRoot}`,
+      2,
+    )
+  }
+  if ((await readdir(projectRoot)).length > 0) {
+    throw new DoxloopError(
+      `The documentation output is not empty: ${projectRoot}\nChoose a new directory, or run \`doxloop create\` inside an existing Doxloop project.`,
+      2,
+    )
+  }
+}
+
+async function assertSpecFile(path: string): Promise<void> {
+  let stats
+  try {
+    stats = await stat(path)
+  } catch {
+    throw new DoxloopError(
+      `The API specification does not exist: ${path}\nChoose an existing OpenAPI document and try again.`,
+      2,
+    )
+  }
+  if (!stats.isFile()) {
+    throw new DoxloopError(`The API specification is not a file: ${path}`, 2)
   }
 }
 
@@ -630,7 +740,10 @@ function isSourceBindings(value: unknown): value is SourceBinding[] {
         source !== null &&
         typeof source === 'object' &&
         typeof (source as Partial<SourceBinding>).name === 'string' &&
-        typeof (source as Partial<SourceBinding>).path === 'string',
+        typeof (source as Partial<SourceBinding>).path === 'string' &&
+        ((source as Partial<SourceBinding>).kind === undefined ||
+          (source as Partial<SourceBinding>).kind === 'directory' ||
+          (source as Partial<SourceBinding>).kind === 'openapi'),
     )
   )
 }
@@ -713,6 +826,34 @@ function isApplicationConfig(
     screenshots.viewport.height >= 320 &&
     screenshots.viewport.height <= 2160
   )
+}
+
+function isDeploymentConfig(value: unknown): value is DeploymentConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const deployment = value as Partial<DeploymentConfig>
+  const optionalText = (candidate: unknown): boolean =>
+    candidate === undefined ||
+    (typeof candidate === 'string' && candidate.trim() !== '')
+  if (!optionalText(deployment.name) || !optionalText(deployment.slug)) return false
+  if (
+    deployment.visibility !== undefined &&
+    !['private', 'public'].includes(deployment.visibility)
+  ) {
+    return false
+  }
+  if (deployment.apiUrl === undefined) return true
+  try {
+    const url = new URL(deployment.apiUrl)
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === ''
+    )
+  } catch {
+    return false
+  }
 }
 
 function isApplicationBaseUrl(value: unknown): value is string {

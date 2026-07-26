@@ -49,24 +49,38 @@ Requires Node.js 20.12 or later.
 npm install --global @doxbrix/doxloop
 ```
 
-### 2. Generate
+### 2. Set up the documentation project
 
 Run this from your product directory:
 
 ```bash
-doxloop create \
-  --source . \
-  --output ../my-docs \
-  "Create developer documentation with a quickstart and API reference."
+doxloop init
 ```
 
-Doxloop automatically starts the first supported agent it finds. Choose one
-explicitly with `--agent codex`, `--agent claude`, or `--agent gemini`.
+Doxloop detects the product repository and guides you through the project
+location, product evidence, site title, and generator. It shows a complete
+summary before creating anything. Product code and documentation are kept in
+separate sibling directories.
 
-### 3. Preview and validate
+Documenting an API without a product checkout? Run the same command in the
+directory where you want to work, then choose **API specification** and enter
+the OpenAPI file or URL when asked.
+
+### 3. Create the documentation
 
 ```bash
-cd ../my-docs
+cd ../my-product-docs
+doxloop create
+```
+
+`create` asks what readers need and which installed agent to use, shows an
+authoring summary, and starts the agent only after confirmation. Press Enter
+at the documentation request to let the agent recommend a complete,
+evidence-backed plan.
+
+### 4. Preview and validate
+
+```bash
 doxloop preview --open
 doxloop test
 ```
@@ -75,35 +89,50 @@ Your source and docs remain separate:
 
 ```text
 workspace/
-├── my-product/  ← read-only source evidence
-└── my-docs/     ← editable and deployable documentation
+├── my-product/       ← read-only source evidence
+└── my-product-docs/  ← editable and deployable documentation
 ```
+
+From then on, the everyday workflow is deliberately short:
+
+```bash
+doxloop update
+doxloop deploy
+doxloop settings
+```
+
+No configuration flags are required for interactive use. Advanced flags remain
+available as optional one-run overrides for scripts and CI.
 
 ## Real examples
 
 ### Lodash developer docs from the CLI
 
-This command was run from the
-[Lodash](https://github.com/lodash/lodash) source directory:
+From the [Lodash](https://github.com/lodash/lodash) source directory:
 
 ```bash
-doxloop create \
-  --source . \
-  --output ../lodash-docs \
-  --agent claude \
-  --model claude-sonnet-5 \
-  "Create documentation for developers for this utility library. Include a quickstart and also include class and function API reference for the developers and simplified example of each function."
+doxloop init
+cd ../lodash-docs
+doxloop create
 ```
+
+At the `create` prompt, request developer documentation with a quickstart,
+class and function reference, and a simple example for every function. Choose
+Claude Code when Doxloop asks which installed agent to use. That choice can be
+remembered for later updates.
 
 **Generated documentation:** <https://apps-lodash-docs.sites.doxbrix.com/>
 
 ### Petstore API docs from VS Code with Codex
 
-First, initialize a documentation project and open it in VS Code:
+First, initialize a documentation project. Use `petstore-docs` as the project
+directory, choose **API specification**, and enter
+`https://petstore3.swagger.io/api/v3/openapi.json` when asked:
 
 ```bash
-doxloop init petstore-docs
-code petstore-docs
+doxloop init
+cd petstore-docs
+code .
 ```
 
 Then give Codex this prompt:
@@ -119,11 +148,7 @@ examples, and navigation directly in the opened folder.
 
 When it finishes:
 
-```bash
-cd petstore-docs
-doxloop preview --open
-doxloop test
-```
+Run `doxloop preview --open` and `doxloop test` when it finishes.
 
 ## Use Doxloop in VS Code, Codex, or Claude
 
@@ -131,16 +156,16 @@ Prefer working in Visual Studio Code, the Codex app, Claude Code, or another
 local agent experience? Initialize the project first:
 
 ```bash
-doxloop init my-docs --source product=../my-product
+doxloop init
 ```
 
 Then open the generated folder where you want to work:
 
 | Where | Open the project |
 | --- | --- |
-| VS Code with Codex | `code my-docs` |
-| Codex app | Open the `my-docs` folder |
-| Claude Code | `cd my-docs && claude` |
+| VS Code with Codex | `code ../my-product-docs` |
+| Codex app | Open the generated documentation folder |
+| Claude Code | `cd ../my-product-docs && claude` |
 
 Ask the agent to use Doxloop authoring:
 
@@ -183,18 +208,44 @@ doxloop create --print \
 
 | Goal | Command |
 | --- | --- |
-| Create a docs project | `doxloop init my-docs` |
-| Generate documentation | `doxloop create "Describe what you need"` |
+| Create a docs project | `doxloop init` |
+| Generate documentation | `doxloop create` |
 | Update docs after code changes | `doxloop update` |
+| View or change project settings | `doxloop settings` |
 | Run a read-only quality review | `doxloop review` |
 | Preview locally | `doxloop preview --open` |
 | Validate the project | `doxloop test` |
 | Check setup and agent readiness | `doxloop doctor` |
 | See project status | `doxloop status` |
+| Deploy using saved settings | `doxloop deploy` |
 
 Run `doxloop <command> --help` for every option.
 
-### Choose an agent or model
+### Change project settings
+
+Use one settings command instead of editing `.doxloop/project.json` or
+remembering configuration flags:
+
+```bash
+doxloop settings
+```
+
+The interactive settings menu manages:
+
+- product source directories and OpenAPI specifications;
+- the site title and default authoring agent;
+- audience, locale, tone, and reader outcomes;
+- design references and application screenshot behavior; and
+- hosted project name, slug, visibility, and Doxbrix destination.
+
+Generator changes are intentionally not performed in place because changing
+frameworks can overwrite generator-native files. Create a new project with
+`doxloop init` when migrating generators.
+
+### Optional automation overrides
+
+Interactive users do not need flags. Scripts can still override saved settings
+for one run:
 
 ```bash
 doxloop create --agent codex --reasoning high
@@ -230,13 +281,17 @@ doxloop preview --open
 To deploy through [Doxbrix](https://www.doxbrix.com/):
 
 ```bash
-doxloop login
-doxloop deploy --dry-run
 doxloop deploy
 ```
 
-Deployments are private by default. To make the site accessible to anyone, run
-`doxloop deploy --public` and confirm the public-access warning.
+`deploy` validates the documentation, shows the exact name, slug, destination,
+visibility, page count, and warnings, then asks once before uploading. It offers
+sign-in after you approve the summary. Deployments are private by default.
+
+Use `doxloop settings` to change visibility or the hosted address. A public
+deployment always shows a default-no warning in an interactive terminal. For
+CI, the explicit combination `doxloop deploy --public --yes` runs without
+prompts.
 
 ## Supported generators
 
@@ -257,9 +312,9 @@ adapter package, so each documentation project installs only what it needs.
 | Jekyll | `@doxbrix/doxloop-generator-jekyll` | Markdown and Liquid | `_site/` |
 | Static HTML | `@doxbrix/doxloop-generator-static` | HTML | `site/` |
 
-Pass `--generator <name>` to `doxloop init` to select one. Doxbrix needs no
-extra installation; install an external generator's adapter package before
-initializing its project. The
+Choose a generator during `doxloop init`. Doxbrix is the recommended first
+choice and needs no extra installation. Selecting another framework opens a
+second list and Doxloop offers to install its adapter package. The
 [public generator guide](https://doxloop.sites.doxbrix.com/generators) covers
 installation, selection, inspection, removal, and migration.
 

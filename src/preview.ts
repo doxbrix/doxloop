@@ -534,6 +534,159 @@ export function doxbrixDocument(input: {
     document.body.classList.remove('dxb-search-open');
     searchButton?.focus();
   }
+  function setApiBodyValue(body, path, value) {
+    const key = path[0];
+    if (!key) return;
+    if (path.length === 1) {
+      body[key] = value;
+      return;
+    }
+    if (!body[key] || typeof body[key] !== 'object' || Array.isArray(body[key])) {
+      body[key] = {};
+    }
+    setApiBodyValue(body[key], path.slice(1), value);
+  }
+  function apiBodyValue(input) {
+    const value = input.value.trim();
+    const type = (input.dataset.apiParamType || 'string').toLocaleLowerCase();
+    if (type === 'integer') {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed)) throw new Error(input.dataset.apiParamName + ' must be an integer.');
+      return parsed;
+    }
+    if (type === 'number') {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) throw new Error(input.dataset.apiParamName + ' must be a number.');
+      return parsed;
+    }
+    if (type === 'boolean') {
+      if (value !== 'true' && value !== 'false') throw new Error(input.dataset.apiParamName + ' must be true or false.');
+      return value === 'true';
+    }
+    if (type === 'array' || type === 'object') {
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        throw new Error(input.dataset.apiParamName + ' must contain valid JSON.');
+      }
+      if (type === 'array' && !Array.isArray(parsed)) throw new Error(input.dataset.apiParamName + ' must be a JSON array.');
+      if (type === 'object' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+        throw new Error(input.dataset.apiParamName + ' must be a JSON object.');
+      }
+      return parsed;
+    }
+    return input.value;
+  }
+  function apiRequestFromModal(modal) {
+    const endpoint = modal.closest('.dp-api-ref');
+    const method = endpoint?.dataset.apiMethod || 'GET';
+    const baseUrl = (endpoint?.dataset.apiBaseUrl || '').replace(/\\/+$/, '');
+    let path = endpoint?.dataset.apiPath || '/';
+    const query = new URLSearchParams();
+    const headers = new Headers();
+    const body = {};
+    modal.querySelectorAll('[data-api-param-location]').forEach((input) => {
+      const name = input.dataset.apiParamName || '';
+      const locationName = input.dataset.apiParamLocation || 'query';
+      const value = input.value.trim();
+      if (input.required && !value) throw new Error(name + ' is required.');
+      if (!name || !value) return;
+      if (locationName === 'path') {
+        path = path.split('{' + name + '}').join(encodeURIComponent(input.value));
+      } else if (locationName === 'query') {
+        query.append(name, input.value);
+      } else if (locationName === 'header') {
+        headers.set(name, input.value);
+      } else if (locationName === 'body') {
+        setApiBodyValue(body, name.split('.'), apiBodyValue(input));
+      }
+    });
+    const unresolved = path.match(/\\{([^}]+)\\}/);
+    if (unresolved) throw new Error('Path parameter ' + unresolved[1] + ' needs a value.');
+    const queryString = query.toString();
+    const url = baseUrl + path + (queryString ? '?' + queryString : '');
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      throw new Error('The endpoint baseUrl and path do not form a valid URL.');
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new Error('Try it only supports HTTP and HTTPS endpoints.');
+    }
+    const hasBody = Object.keys(body).length > 0 && method !== 'GET' && method !== 'HEAD';
+    if (hasBody && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    const init = { method, headers };
+    if (hasBody) init.body = JSON.stringify(body);
+    const headerLines = Array.from(headers.entries()).map(([name, value]) => name + ': ' + value);
+    const requestText = [
+      method + ' ' + url,
+      ...headerLines,
+      ...(hasBody ? ['', JSON.stringify(body, null, 2)] : []),
+    ].join('\\n');
+    return { url, init, requestText };
+  }
+  function showApiTryError(modal, error) {
+    const responseCard = modal.querySelector('[data-api-live-response]');
+    const status = modal.querySelector('[data-api-live-status]');
+    const body = modal.querySelector('[data-api-live-body]');
+    responseCard.hidden = false;
+    status.className = 'tryit-status-bar error';
+    status.textContent = 'Request error';
+    body.textContent = error instanceof Error ? error.message : String(error);
+  }
+  function updateApiTryRequest(modal) {
+    const request = apiRequestFromModal(modal);
+    modal.querySelector('[data-api-request-url]').textContent = request.url;
+    modal.querySelector('[data-api-live-request]').textContent = request.requestText;
+    modal.querySelector('[data-api-live-response]').hidden = true;
+    return request;
+  }
+  async function sendApiTryRequest(button) {
+    const modal = button.closest('[data-api-try-modal]');
+    let request;
+    try {
+      request = updateApiTryRequest(modal);
+    } catch (error) {
+      showApiTryError(modal, error);
+      return;
+    }
+    const responseCard = modal.querySelector('[data-api-live-response]');
+    const status = modal.querySelector('[data-api-live-status]');
+    const body = modal.querySelector('[data-api-live-body]');
+    button.disabled = true;
+    button.textContent = 'Sending…';
+    responseCard.hidden = false;
+    status.className = 'tryit-status-bar';
+    status.textContent = 'Sending request…';
+    body.textContent = '';
+    try {
+      const response = await fetch(request.url, request.init);
+      const responseText = await response.text();
+      let formatted = responseText || '(empty response body)';
+      try {
+        formatted = JSON.stringify(JSON.parse(responseText), null, 2);
+      } catch {}
+      status.className = 'tryit-status-bar ' + (response.ok ? 'success' : 'error');
+      status.textContent = response.status + ' ' + (response.statusText || (response.ok ? 'Success' : 'Error'));
+      body.textContent = formatted;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      showApiTryError(
+        modal,
+        new Error('The browser could not complete the request. ' + detail + ' Check that the API is reachable and allows requests from ' + location.origin + ' (CORS).'),
+      );
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Send request';
+    }
+  }
+  function closeApiTryModal(modal) {
+    modal.hidden = true;
+    document.body.classList.remove('dxb-tryit-open');
+    modal.closest('.dp-api-ref')?.querySelector('[data-api-try]')?.focus();
+  }
   document.addEventListener('click', (event) => {
     if (event.target.closest('[data-preview-search]')) openSearch();
     if (event.target === searchDialog) closeSearch();
@@ -574,6 +727,30 @@ export function doxbrixDocument(input: {
       const code = card?.querySelector('pre:not([hidden])');
       if (code && navigator.clipboard) navigator.clipboard.writeText(code.innerText);
     }
+    const tryIt = event.target.closest('[data-api-try]');
+    if (tryIt) {
+      const modal = tryIt.closest('.dp-api-ref')?.querySelector('[data-api-try-modal]');
+      if (modal) {
+        modal.hidden = false;
+        document.body.classList.add('dxb-tryit-open');
+        try {
+          updateApiTryRequest(modal);
+        } catch (error) {
+          showApiTryError(modal, error);
+        }
+        modal.querySelector('[data-api-param-location]')?.focus();
+      }
+    }
+    const tryItClose = event.target.closest('[data-api-try-close]');
+    if (tryItClose) closeApiTryModal(tryItClose.closest('[data-api-try-modal]'));
+    if (event.target.matches('[data-api-try-modal]')) closeApiTryModal(event.target);
+    const tryItSend = event.target.closest('[data-api-send]');
+    if (tryItSend) void sendApiTryRequest(tryItSend);
+    const tryItCopy = event.target.closest('[data-api-try-copy]');
+    if (tryItCopy && navigator.clipboard) {
+      const code = tryItCopy.closest('.tryit-code-card')?.querySelector('pre');
+      if (code) navigator.clipboard.writeText(code.innerText);
+    }
     const responseTab = event.target.closest('[data-api-response-tab]');
     if (responseTab) {
       const card = responseTab.closest('.dp-api-resp-card');
@@ -603,8 +780,25 @@ export function doxbrixDocument(input: {
       }
     }
   });
+  document.querySelectorAll('[data-api-try-modal]').forEach((modal) => {
+    modal.addEventListener('input', () => {
+      try {
+        updateApiTryRequest(modal);
+      } catch (error) {
+        showApiTryError(modal, error);
+      }
+    });
+  });
   searchInput?.addEventListener('input', renderSearchResults);
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      const openTryIt = document.querySelector('[data-api-try-modal]:not([hidden])');
+      if (openTryIt) {
+        event.preventDefault();
+        closeApiTryModal(openTryIt);
+        return;
+      }
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === 'k') {
       event.preventDefault();
       searchDialog?.hidden ? openSearch() : closeSearch();

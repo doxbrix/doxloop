@@ -4,7 +4,10 @@ import { lstat, readFile, readlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathExists, readJson } from './fs.js'
+import { isSpecUrl, sourceKind } from './project.js'
 import type { SourceBinding, SourceChange, SyncState } from './types.js'
+
+const SPEC_BASELINE = 'openapi-spec'
 
 export const SYNC_STATE_FILE = join('.doxloop', 'sync-state.json')
 
@@ -28,6 +31,18 @@ export async function recordSyncState(
 ): Promise<SyncState> {
   const state: SyncState = { schemaVersion: 1, sources: {} }
   for (const source of sources) {
+    if (sourceKind(source) === 'openapi') {
+      if (isSpecUrl(source.path)) continue
+      const fingerprint = await specFileFingerprint(resolve(root, source.path))
+      if (fingerprint) {
+        state.sources[source.name] = {
+          commit: SPEC_BASELINE,
+          recordedAt: new Date().toISOString(),
+          contentFingerprint: fingerprint,
+        }
+      }
+      continue
+    }
     const commit = await headCommit(resolve(root, source.path))
     if (commit) {
       const sourcePath = resolve(root, source.path)
@@ -53,6 +68,10 @@ export async function collectSourceChanges(
   const state = await readSyncState(root)
   const changes: SourceChange[] = []
   for (const source of sources) {
+    if (sourceKind(source) === 'openapi') {
+      changes.push(await collectSpecChange(root, source, state))
+      continue
+    }
     const path = resolve(root, source.path)
     if (!(await pathExists(path))) {
       changes.push({ ...source, kind: 'missing-path' })
@@ -95,6 +114,30 @@ export async function collectSourceChanges(
   return changes
 }
 
+async function collectSpecChange(
+  root: string,
+  source: SourceBinding,
+  state: SyncState,
+): Promise<SourceChange> {
+  if (isSpecUrl(source.path)) return { ...source, kind: 'spec-remote' }
+  const fingerprint = await specFileFingerprint(resolve(root, source.path))
+  if (!fingerprint) return { ...source, kind: 'missing-path' }
+  const record = state.sources[source.name]
+  if (record?.contentFingerprint === fingerprint) {
+    return { ...source, kind: 'spec-unchanged' }
+  }
+  return { ...source, kind: 'spec-changed' }
+}
+
+async function specFileFingerprint(path: string): Promise<string | undefined> {
+  try {
+    const content = await readFile(path)
+    return createHash('sha256').update(content).digest('hex')
+  } catch {
+    return undefined
+  }
+}
+
 export function formatSourceChanges(changes: SourceChange[]): string {
   if (changes.length === 0) return ''
   const sections = changes.map((change) => {
@@ -102,6 +145,12 @@ export function formatSourceChanges(changes: SourceChange[]): string {
     switch (change.kind) {
       case 'missing-path':
         return `${heading}: the configured path does not exist. Report this instead of guessing.`
+      case 'spec-remote':
+        return `${heading}: remote API specification. Fetch the current document and compare it with the documented API surface before updating.`
+      case 'spec-unchanged':
+        return `${heading}: the API specification is unchanged since the last documentation sync.`
+      case 'spec-changed':
+        return `${heading}: the API specification changed since the last documentation sync, or no baseline is recorded yet. Compare it with the documented endpoints and update every affected page; the baseline is recorded when this task completes.`
       case 'not-git':
         return `${heading}: not a Git repository, so no change baseline is available. Inspect the source directly.`
       case 'no-baseline':

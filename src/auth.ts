@@ -251,7 +251,7 @@ async function authenticatedRequestInternal<T>(
     )
   }
   if (allowNotFound && response.status === 404) return undefined
-  if (!response.ok) throw await responseError(response)
+  if (!response.ok) throw await responseError(response, init.method, url)
   return (await response.json()) as T
 }
 
@@ -264,7 +264,7 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
       `Cannot connect to ${new URL(url).origin}: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  if (!response.ok) throw await responseError(response)
+  if (!response.ok) throw await responseError(response, init.method, url)
   return (await response.json()) as T
 }
 
@@ -277,20 +277,68 @@ function isLoopbackHost(hostname: string): boolean {
   )
 }
 
-async function responseError(response: Response): Promise<DoxloopError> {
+async function responseError(
+  response: Response,
+  method = 'GET',
+  url?: string,
+): Promise<DoxloopError> {
   let message = `${response.status} ${response.statusText}`
+  let code: string | undefined
+  let details: unknown
+  let requestId = response.headers.get('x-request-id') ?? undefined
   try {
     const body = (await response.json()) as {
       error?: { message?: string } | string
       message?: string
+      code?: string
+      details?: unknown
+      requestId?: string
     }
     if (typeof body.error === 'string') message = body.error
     else if (body.error?.message) message = body.error.message
     else if (body.message) message = body.message
+    code = body.code
+    details = body.details
+    requestId = body.requestId ?? requestId
   } catch {
     // Keep the HTTP status when the response is not JSON.
   }
-  return new DoxloopError(`Doxbrix API error: ${message}`)
+  const operation = formatApiOperation(method, url)
+  const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
+  const lines = [
+    `Doxbrix API error: ${operation} returned ${status}${code ? ` [${code}]` : ''}`,
+    message,
+  ]
+  if (details !== undefined) lines.push(`Details: ${formatErrorDetails(details)}`)
+  if (requestId) {
+    lines.push(`Request ID: ${requestId}`)
+    if (code === 'internal_error' && details === undefined) {
+      lines.push('The underlying exception is recorded in the Doxbrix server logs under this request ID.')
+    }
+  }
+  return new DoxloopError(lines.join('\n'))
+}
+
+function formatApiOperation(method: string | undefined, url: string | undefined): string {
+  let target = url ?? 'Doxbrix API'
+  if (url) {
+    try {
+      const parsed = new URL(url)
+      target = `${parsed.pathname}${parsed.search}`
+    } catch {
+      // Keep the supplied target when it is not a valid URL.
+    }
+  }
+  return `${method?.toUpperCase() || 'GET'} ${target}`
+}
+
+function formatErrorDetails(details: unknown): string {
+  if (typeof details === 'string') return details
+  try {
+    return JSON.stringify(details)
+  } catch {
+    return String(details)
+  }
 }
 
 function configPath(): string {

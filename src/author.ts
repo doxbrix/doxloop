@@ -13,6 +13,7 @@ import type {
   ApplicationConfig,
   DocumentationBrief,
   GeneratorName,
+  SourceBinding,
 } from './types.js'
 
 export type AuthorMode = 'create' | 'update' | 'review'
@@ -50,11 +51,13 @@ export async function runAuthor(options: {
   model?: string
   reasoning?: ReasoningLevel
   screenshots?: ScreenshotIntent
+  changeSummary?: string
 }): Promise<number> {
   const project = await loadProject(options.root)
   const changeSummary =
     options.mode === 'update'
-      ? formatSourceChanges(await collectSourceChanges(options.root, project.sources))
+      ? (options.changeSummary ??
+        formatSourceChanges(await collectSourceChanges(options.root, project.sources)))
       : undefined
   const prompt = authorPrompt(
     options.mode,
@@ -228,7 +231,7 @@ export function agentArguments(
 
 export function authorPrompt(
   mode: AuthorMode,
-  sources: Array<{ name: string; path: string }>,
+  sources: SourceBinding[],
   request?: string,
   generator: GeneratorName = 'doxbrix',
   documentation?: DocumentationBrief,
@@ -239,9 +242,13 @@ export function authorPrompt(
 ): string {
   const sourceText =
     sources.length === 0
-      ? 'No product source is configured. Ask before inventing product behavior.'
-      : `Research only these configured local sources when needed:\n${sources
-          .map((source) => `- ${source.name}: ${source.path}`)
+      ? 'No product source is configured. Author from the request and the persisted brief, and ask before inventing product behavior.'
+      : `Research only these configured sources when needed:\n${sources
+          .map((source) =>
+            (source.kind ?? 'directory') === 'openapi'
+              ? `- ${source.name}: OpenAPI specification at ${source.path} — read it as authoritative API evidence for endpoints, parameters, schemas, and examples.`
+              : `- ${source.name}: ${source.path}`,
+          )
           .join('\n')}`
   const requestText = request?.trim()
     ? `\nThe user also requested:\n${request.trim()}\n`

@@ -6,8 +6,11 @@ and synchronization state when a team should share the same authoring decisions.
 Create a new documentation project beside, never inside, the product source:
 
 ```bash
-doxloop create --source ./my-product --output ./my-docs
+doxloop init
 ```
+
+Run `doxloop settings` inside the documentation project to change shared
+configuration without editing JSON by hand.
 
 ## `project.json`
 
@@ -19,6 +22,12 @@ doxloop create --source ./my-product --output ./my-docs
   "generator": "doxbrix",
   "sources": [{ "name": "product", "path": "../product" }],
   "designReferences": [{ "url": "https://docs.example.com/" }],
+  "deployment": {
+    "name": "Example documentation",
+    "slug": "example-docs",
+    "visibility": "private",
+    "apiUrl": "https://app.doxbrix.com"
+  },
   "application": {
     "baseUrl": "http://localhost:3000/",
     "source": "product",
@@ -57,6 +66,9 @@ doxloop create --source ./my-product --output ./my-docs
   surface for guide screenshots. `source` names a configured source and is
   required when `startCommand` is present. Screenshot policy is `requested`,
   `auto`, or `off`; projects without this object keep the existing behavior.
+- `deployment` optionally saves the hosted project name, slug, visibility, and
+  Doxbrix destination used by `doxloop deploy`. Missing values are derived from
+  the project title and default to private.
 - `documentation` persists confirmed reader, scope, terminology, editorial, and
   accessibility decisions.
 

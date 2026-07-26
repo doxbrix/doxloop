@@ -12,9 +12,12 @@ export type GeneratorName =
   | 'jekyll'
   | 'static'
 
+export type SourceKind = 'directory' | 'openapi'
+
 export interface SourceBinding {
   name: string
   path: string
+  kind?: SourceKind
 }
 
 export interface DesignReference {
@@ -38,6 +41,15 @@ export interface ApplicationConfig {
   startCommand?: string
   readyPath?: string
   screenshots?: ApplicationScreenshots
+}
+
+export type DeploymentVisibilitySetting = 'private' | 'public'
+
+export interface DeploymentConfig {
+  name?: string
+  slug?: string
+  visibility?: DeploymentVisibilitySetting
+  apiUrl?: string
 }
 
 export type DocumentationExperienceLevel =
@@ -65,9 +77,11 @@ export interface DoxloopProject {
   contentDir: string
   generator: GeneratorName
   generatorPackage?: string
+  defaultAgent?: AgentName
   sources: SourceBinding[]
   designReferences: DesignReference[]
   application?: ApplicationConfig
+  deployment?: DeploymentConfig
   documentation: DocumentationBrief
 }
 
@@ -109,10 +123,13 @@ export interface SyncState {
   sources: Record<string, SourceSyncRecord>
 }
 
-export type SourceChange = SourceBinding &
+export type SourceChange = Omit<SourceBinding, 'kind'> &
   (
     | { kind: 'missing-path' }
     | { kind: 'not-git' }
+    | { kind: 'spec-remote' }
+    | { kind: 'spec-unchanged' }
+    | { kind: 'spec-changed' }
     | { kind: 'no-baseline'; head: string; uncommittedFiles: string[] }
     | { kind: 'baseline-lost'; head: string; uncommittedFiles: string[] }
     | {

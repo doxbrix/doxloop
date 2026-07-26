@@ -78,8 +78,10 @@ bundle to the Doxbrix API. External generators are built on the user's machine;
 Doxloop removes its Doxbrix tokens from the child build environment, scans only
 the declared static output, rejects symbolic links/private keys/likely secret
 files, omits source maps, and enforces file and expansion limits before packaging.
-Deployments are private by default. `doxloop deploy --public` requires an
-interactive confirmation that anyone will be able to access the site.
+Deployments are private by default. A saved public deployment or
+`doxloop deploy --public` shows a default-no warning that anyone will be able
+to access the site. Non-interactive publishing requires explicit saved settings
+or `--public` together with `--yes`.
 
 The archive is uploaded directly to one short-lived, single-object S3 URL whose
 SHA-256 checksum is signed. Doxbrix verifies the object size and checksum before

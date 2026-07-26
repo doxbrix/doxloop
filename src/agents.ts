@@ -136,6 +136,17 @@ function skillDestinationsFor(
   return destinations
 }
 
+export async function detectAgents(): Promise<
+  Array<{ name: AgentName; executable: string }>
+> {
+  const found: Array<{ name: AgentName; executable: string }> = []
+  for (const name of ['codex', 'claude', 'gemini'] as const) {
+    const executable = await findExecutable(name)
+    if (executable) found.push({ name, executable })
+  }
+  return found
+}
+
 export async function chooseAgent(preferred?: AgentName): Promise<{
   name: AgentName
   executable: string
