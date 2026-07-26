@@ -1,7 +1,6 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { basename, join, relative, resolve } from 'node:path'
-import { detectAgents } from './agents.js'
-import { DoxloopError } from './errors.js'
+import { AGENT_CATALOG, detectAgents, installAgent } from './agents.js'
 import { pathExists } from './fs.js'
 import { GENERATOR_CATALOG, resolveGeneratorPackage } from './generators.js'
 import { PROJECT_FILE, isSpecUrl, parseSpec } from './project.js'
@@ -254,26 +253,23 @@ export async function selectAgentInteractive(
   io: PromptIo,
 ): Promise<AgentName | undefined> {
   const agents = await detectAgents()
-  if (agents.length === 0) {
-    throw new DoxloopError(
-      'Codex, Claude Code, or Gemini is not available on PATH. Install an agent, or run `doxloop create --print` to prepare the authoring prompt.',
-      2,
-    )
-  }
-  if (agents.length === 1) return agents[0]?.name
-  const labels: Record<AgentName, string> = {
-    codex: 'Codex',
-    claude: 'Claude Code',
-    gemini: 'Gemini',
-  }
-  return promptSelect<AgentName>({
+  const installed = new Set(agents.map((agent) => agent.name))
+  const selected = await promptSelect<AgentName>({
     message: 'Which agent should author this run?',
-    choices: agents.map((agent) => ({
+    choices: AGENT_CATALOG.map((agent) => ({
       value: agent.name,
-      label: labels[agent.name],
+      label: agent.displayName,
+      hint: installed.has(agent.name) ? 'installed' : 'not installed · will install',
     })),
     io,
   })
+  if (!installed.has(selected)) {
+    const agent = AGENT_CATALOG.find((candidate) => candidate.name === selected)
+    note(io, `Installing ${agent?.displayName ?? selected}...`)
+    await installAgent(selected)
+    note(io, `✓ ${agent?.displayName ?? selected} installed.`)
+  }
+  return selected
 }
 
 async function validateProjectDirectory(

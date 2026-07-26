@@ -3,6 +3,11 @@
 Doxloop supports Codex, Claude Code, and Gemini CLI. It discovers executables on
 `PATH` or accepts an explicit `--agent`.
 
+Interactive authoring always lists all three agents. Selecting one that is not
+on `PATH` installs its official npm package globally, verifies that the new
+executable is available, and then continues the run. Explicit `--agent` usage
+remains non-interactive and expects the selected CLI to already be installed.
+
 ## Invocation modes
 
 | Workflow | Codex | Claude Code | Gemini CLI |

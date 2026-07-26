@@ -72,6 +72,7 @@ class LineReader {
     | undefined
   private canceled = false
   private readonly prompt: ReturnType<typeof createInterface>
+  private readonly cancel: () => void
 
   constructor(io: PromptIo) {
     this.prompt = createInterface({ input: io.input, output: io.output })
@@ -84,7 +85,7 @@ class LineReader {
         this.queue.push(line)
       }
     })
-    const cancel = (): void => {
+    this.cancel = (): void => {
       this.canceled = true
       if (this.pending) {
         const waiting = this.pending
@@ -92,8 +93,8 @@ class LineReader {
         waiting.reject(promptCanceled())
       }
     }
-    this.prompt.on('SIGINT', cancel)
-    this.prompt.on('close', cancel)
+    this.prompt.on('SIGINT', this.cancel)
+    this.prompt.on('close', this.cancel)
   }
 
   next(io: PromptIo, query: string): Promise<string> {
@@ -107,7 +108,10 @@ class LineReader {
   }
 
   close(): void {
-    this.prompt.removeAllListeners('close')
+    // Keep readline's own `close` listeners intact. They detach its input and
+    // keypress handlers; removing all listeners here leaves an old interface
+    // echoing every subsequent prompt, so typed characters appear repeatedly.
+    this.prompt.removeListener('close', this.cancel)
     this.prompt.close()
   }
 }

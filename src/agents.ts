@@ -22,6 +22,28 @@ import type { AgentName } from './types.js'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
+export const AGENT_CATALOG = [
+  {
+    name: 'codex',
+    displayName: 'Codex',
+    packageName: '@openai/codex',
+  },
+  {
+    name: 'claude',
+    displayName: 'Claude Code',
+    packageName: '@anthropic-ai/claude-code',
+  },
+  {
+    name: 'gemini',
+    displayName: 'Gemini',
+    packageName: '@google/gemini-cli',
+  },
+] as const satisfies ReadonlyArray<{
+  name: AgentName
+  displayName: string
+  packageName: string
+}>
+
 export function parseAgent(value: string | undefined): AgentName | undefined {
   if (value === undefined) return undefined
   if (value === 'codex' || value === 'claude' || value === 'gemini') return value
@@ -140,18 +162,78 @@ export async function detectAgents(): Promise<
   Array<{ name: AgentName; executable: string }>
 > {
   const found: Array<{ name: AgentName; executable: string }> = []
-  for (const name of ['codex', 'claude', 'gemini'] as const) {
-    const executable = await findExecutable(name)
-    if (executable) found.push({ name, executable })
+  for (const agent of AGENT_CATALOG) {
+    const executable = await findExecutable(agent.name)
+    if (executable) found.push({ name: agent.name, executable })
   }
   return found
+}
+
+export async function installAgent(name: AgentName): Promise<{
+  name: AgentName
+  executable: string
+}> {
+  const agent = AGENT_CATALOG.find((candidate) => candidate.name === name)
+  if (!agent) throw new DoxloopError(`Unsupported agent: ${name}`)
+
+  const npm = await findExecutable('npm')
+  if (!npm) {
+    throw new DoxloopError(
+      `Cannot install ${agent.displayName} because npm is not available on PATH. Install npm, then run \`npm install --global ${agent.packageName}\`.`,
+      2,
+    )
+  }
+
+  const exitCode = await new Promise<number>((resolveInstall, rejectInstall) => {
+    const child = spawn(npm, ['install', '--global', agent.packageName], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.once('error', (error) => {
+      rejectInstall(
+        new DoxloopError(
+          `Could not start npm to install ${agent.displayName}: ${error.message}`,
+          2,
+        ),
+      )
+    })
+    child.once('exit', (code, signal) => {
+      if (signal) {
+        rejectInstall(
+          new DoxloopError(
+            `${agent.displayName} installation was stopped by ${signal}.`,
+            2,
+          ),
+        )
+      } else {
+        resolveInstall(code ?? 1)
+      }
+    })
+  })
+  if (exitCode !== 0) {
+    throw new DoxloopError(
+      `Could not install ${agent.displayName} (npm exited with code ${exitCode}). Retry with \`npm install --global ${agent.packageName}\`.`,
+      2,
+    )
+  }
+
+  const executable = await findExecutable(name)
+  if (!executable) {
+    throw new DoxloopError(
+      `${agent.displayName} was installed, but \`${name}\` is not available on PATH. Open a new terminal and run Doxloop again.`,
+      2,
+    )
+  }
+  return { name, executable }
 }
 
 export async function chooseAgent(preferred?: AgentName): Promise<{
   name: AgentName
   executable: string
 }> {
-  const candidates: AgentName[] = preferred ? [preferred] : ['codex', 'claude', 'gemini']
+  const candidates: AgentName[] = preferred
+    ? [preferred]
+    : AGENT_CATALOG.map((agent) => agent.name)
   for (const name of candidates) {
     const executable = await findExecutable(name)
     if (executable) return { name, executable }

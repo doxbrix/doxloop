@@ -5,6 +5,14 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.1.5 - 2026-07-26
+
+### Changed
+
+- Interactive authoring now always lists Codex, Claude Code, and Gemini. When
+  the selected agent is missing, Doxloop installs its official npm package
+  globally before starting the run.
+
 ## 0.1.4 - 2026-07-26
 
 ### Added

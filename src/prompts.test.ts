@@ -80,6 +80,23 @@ describe('text prompt', () => {
     })
     expect(value).toBe('')
   })
+
+  test('cleans up terminal input handlers before the next prompt', async () => {
+    const io = fakeIo([], true)
+    Object.assign(io.input, { setRawMode: () => undefined })
+
+    setImmediate(() => io.input.write('first\n'))
+    await expect(promptText({ message: 'First?', io })).resolves.toBe('first')
+    const renderedBeforeSecondPrompt = io.rendered().length
+    const listenersAfterFirstPrompt = io.input.listenerCount('data')
+
+    setImmediate(() => io.input.write('second\n'))
+    await expect(promptText({ message: 'Second?', io })).resolves.toBe('second')
+
+    const secondPromptOutput = io.rendered().slice(renderedBeforeSecondPrompt)
+    expect(secondPromptOutput.match(/second/g)).toHaveLength(1)
+    expect(io.input.listenerCount('data')).toBe(listenersAfterFirstPrompt)
+  })
 })
 
 describe('confirm prompt', () => {

@@ -73,10 +73,11 @@ cd ../my-product-docs
 doxloop create
 ```
 
-`create` asks what readers need and which installed agent to use, shows an
-authoring summary, and starts the agent only after confirmation. Press Enter
-at the documentation request to let the agent recommend a complete,
-evidence-backed plan.
+`create` asks what readers need and which agent to use, shows all supported
+choices, and automatically installs Codex, Claude Code, or Gemini with npm when
+you select a missing agent. It shows an authoring summary and starts the agent
+only after confirmation. Press Enter at the documentation request to let the
+agent recommend a complete, evidence-backed plan.
 
 ### 4. Preview and validate
 
@@ -118,8 +119,8 @@ doxloop create
 
 At the `create` prompt, request developer documentation with a quickstart,
 class and function reference, and a simple example for every function. Choose
-Claude Code when Doxloop asks which installed agent to use. That choice can be
-remembered for later updates.
+Claude Code when Doxloop asks which agent to use. If it is missing, Doxloop
+installs it before the run. That choice can be remembered for later updates.
 
 **Generated documentation:** <https://apps-lodash-docs.sites.doxbrix.com/>
 
