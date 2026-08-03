@@ -138,6 +138,53 @@ async function specFileFingerprint(path: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * Source-relative paths touched by a change, parsed from the same Git output
+ * that produced the human-readable lists. Rename and copy entries contribute
+ * both the old and the new path so either one can match documented evidence.
+ */
+export function changedSourcePaths(change: SourceChange): string[] {
+  if (change.kind !== 'changed' && change.kind !== 'no-baseline' && change.kind !== 'baseline-lost') {
+    return []
+  }
+  const paths = new Set<string>()
+  if (change.kind === 'changed') {
+    for (const line of change.changedFiles) {
+      for (const path of parseNameStatus(line)) paths.add(path)
+    }
+  }
+  for (const line of change.uncommittedFiles) {
+    for (const path of parsePorcelain(line)) paths.add(path)
+  }
+  return [...paths]
+}
+
+/** `M<tab>src/auth.ts` or `R100<tab>old.ts<tab>new.ts` */
+function parseNameStatus(line: string): string[] {
+  const fields = line.split('\t')
+  return fields.slice(1).map(unquotePath).filter(Boolean)
+}
+
+/** `M src/auth.ts`, `?? new.ts`, or `R  old.ts -> new.ts`, already trimmed. */
+function parsePorcelain(line: string): string[] {
+  const match = /^\S+\s+(.*)$/.exec(line)
+  if (!match?.[1]) return []
+  return match[1]
+    .split(' -> ')
+    .map((part) => unquotePath(part))
+    .filter(Boolean)
+}
+
+function unquotePath(value: string): string {
+  const path = value.trim()
+  if (!path.startsWith('"') || !path.endsWith('"')) return path
+  try {
+    return String(JSON.parse(path))
+  } catch {
+    return path.slice(1, -1)
+  }
+}
+
 export function formatSourceChanges(changes: SourceChange[]): string {
   if (changes.length === 0) return ''
   const sections = changes.map((change) => {
@@ -169,6 +216,11 @@ export function formatSourceChanges(changes: SourceChange[]): string {
           change.uncommittedFiles,
         )
       case 'changed':
+        if (change.remote) {
+          return change.changedFiles.length > 0
+            ? `${heading}: the remote repository changed (${short(change.baseline)} -> ${short(change.head)}).\nChanged files reported by ${change.remote.provider}:\n${fileList(change.changedFiles)}\nThe current commit was downloaded into this isolated read-only evidence snapshot; inspect files there directly.`
+            : `${heading}: the remote repository changed (${short(change.baseline)} -> ${short(change.head)}). Inspect the isolated evidence snapshot directly.`
+        }
         return withUncommitted(
           change.changedFiles.length > 0
             ? `${heading}: changed since the last documentation sync (${short(change.baseline)} -> ${short(change.head)}).\nCommitted changes:\n${fileList(change.changedFiles)}\nInspect details with \`git -C ${change.path} diff ${short(change.baseline)}..HEAD -- <file>\`.`

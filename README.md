@@ -23,6 +23,7 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#real-examples">Real examples</a> ·
   <a href="#use-doxloop-in-vs-code-codex-or-claude">Editor and agent apps</a> ·
+  <a href="#automatic-documentation-sync">Automatic sync</a> ·
   <a href="#everyday-workflow">Commands</a> ·
   <a href="#guides">Guides</a>
 </p>
@@ -203,14 +204,25 @@ doxloop create --print \
 | ✍️ **Generator-native output** | Creates the right Markdown, MDX, configuration, components, and theme for the selected generator. |
 | ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, and generator conventions. |
 | 🔄 **Focused updates** | Tracks the source revision and directs the agent to documentation affected by product changes. |
+| 🚨 **Drift detection** | `doxloop check` names the pages a source change made stale, without starting an agent or using a model. |
+| ⚙️ **Automatic sync** | Polls source-provider APIs on a local schedule, generates isolated validated proposals, then applies only what a user accepts. |
+| 🖥️ **Local control center** | Runs project setup, sources, authoring, monitoring, review, validation, preview, and publishing from one loopback-only UI. |
 | 🔐 **Local-first control** | Keeps authoring, validation, and preview local; publishing is always a separate command. |
 
 ## Everyday workflow
 
 | Goal | Command |
 | --- | --- |
+| Open the complete local UI | `doxloop ui` |
 | Create a docs project | `doxloop init` |
 | Generate documentation | `doxloop create` |
+| See which pages the product outgrew | `doxloop check` |
+| Configure automatic documentation sync | `doxloop sync setup` |
+| Verify automatic sync is ready | `doxloop sync status` |
+| Run one synchronization cycle | `doxloop sync now` |
+| List every generated review run | `doxloop sync history` |
+| Compare current and proposed pages side by side | `doxloop sync review --open` |
+| Disable automatic sync cleanly | `doxloop sync off` |
 | Update docs after code changes | `doxloop update` |
 | View or change project settings | `doxloop settings` |
 | Run a read-only quality review | `doxloop review` |
@@ -221,6 +233,36 @@ doxloop create --print \
 | Deploy using saved settings | `doxloop deploy` |
 
 Run `doxloop <command> --help` for every option.
+
+### Use the local control center
+
+Run this from a Doxloop project—or from the parent directory where you want to
+create one:
+
+```bash
+doxloop ui
+```
+
+The command opens a loopback-only server on `http://127.0.0.1:4317`. Use
+`--no-open` to start it without opening a browser, `--port` to choose another
+local port, or `--page` to deep-link to `sources`, `authoring`, `sync`,
+`proposals`, `quality`, `preview`, `publish`, or `settings`.
+
+The control center provides the same safeguards as the CLI: product evidence is
+read-only, authoring jobs are cancellable, proposals remain isolated until
+accepted, deployment is a separate confirmed action, and credentials are never
+sent to the browser. It covers:
+
+- new-project setup and generator selection;
+- local directories, OpenAPI specifications, and tested GitHub remotes;
+- create, update, and review runs with agent, model, reasoning, and screenshot controls;
+- source-monitoring schedules, scope, budgets, live status, and manual runs;
+- rendered and source proposal diffs with hunk, page, and whole-proposal acceptance;
+- validation, environment diagnostics, preview, account sign-in, dry runs, and deployment; and
+- documentation standards, design references, application capture settings, agents, skills, and generator packages.
+
+`doxloop sync review --open` remains a convenient deep link: it opens the same
+server directly on the Proposals page.
 
 ### Change project settings
 
@@ -268,6 +310,179 @@ doxloop update \
 
 You can describe the audience, desired outcomes, required pages, tone,
 priorities, or exclusions in plain language.
+
+## Keep documentation current
+
+Documentation goes stale because nothing reports it. `doxloop check` answers
+that question in milliseconds:
+
+```bash
+doxloop check
+```
+
+```text
+Documentation drift: 2 pages stale
+
+  guides/authentication.md
+    stale because  src/auth.ts changed (9f2c1ab)
+    last verified  2026-06-14
+
+  reference/payments.md
+    stale because  src/routes/pay.ts changed (9f2c1ab)
+
+  18 other tracked pages current
+
+Fix with: doxloop update
+```
+
+It names individual pages because each authoring run records the sources behind
+every page in `.doxloop/evidence-map.json`. No agent starts, no model is used,
+and no credentials are needed, so `check` is safe to run on every commit or in
+continuous integration. It exits `1` when pages are stale.
+
+Tune what counts as a documentation-relevant change in `.doxloop/project.json`:
+
+```json
+"sync": {
+  "watch": ["src/**", "openapi.yaml"],
+  "ignore": ["**/*.test.ts", "pnpm-lock.yaml"]
+}
+```
+
+Lock files and snapshots are ignored by default. Test files are not: the
+authoring workflow reads tests as evidence of supported behavior, so a changed
+test can legitimately change documentation.
+
+## Automatic documentation sync
+
+Automatic sync polls the source repository through a read-only provider API,
+then uses the coding agent already signed in on your machine when documentation
+needs a proposal. It never installs source-repository hooks, needs a model API
+key, writes to the source repository, or publishes documentation.
+
+The complete lifecycle is six commands:
+
+| Command | Purpose |
+| --- | --- |
+| `doxloop sync setup` | Ask three questions, save the policy, and install a local scheduled API check. |
+| `doxloop sync status` | Verify the remote source, scheduler health, agent sign-in, evidence map, last run, and current drift. |
+| `doxloop sync now` | Check immediately and generate an isolated proposal when documentation is stale. Current documentation is a no-op. |
+| `doxloop sync history` | List every run with its trigger, status, file count, and accepted-change count. |
+| `doxloop sync review --open` | Open the unified local control center directly on Proposals, with rendered and source comparisons. |
+| `doxloop sync off` | Remove the schedule while keeping the saved settings for later reuse. |
+
+### Set it up
+
+First add a read-only `remote` to each directory source in
+`.doxloop/project.json`; see the [project format](docs/project-format.md).
+Private GitHub repositories use the environment variable named by `tokenEnv`
+(default `GITHUB_TOKEN`). The token is read at runtime and never saved by
+Doxloop.
+
+```bash
+doxloop sync setup
+```
+
+Three questions — which product branch to follow, when to look for drift, and
+what to do when pages are stale — then Doxloop shows a summary before changing
+anything.
+
+For scripts or repeatable setup, provide all three answers directly:
+
+```bash
+doxloop sync setup \
+  --branch main \
+  --on every@15m \
+  --mode propose
+```
+
+Choose what happens when drift is found:
+
+| Mode | Behavior when documentation is stale |
+| --- | --- |
+| `check` | Report the affected pages. No agent, model, credentials, documentation writes, or commits. |
+| `propose` | Run the signed-in coding agent in an isolated workspace and create a validated review run. |
+| `auto` | Automatically generate the same isolated review run whenever a configured trigger finds drift. |
+
+Neither authoring mode changes the real documentation before approval. The
+documentation directory does not need to be a Git repository.
+
+Choose when the policy runs:
+
+| Trigger | Installed behavior |
+| --- | --- |
+| `every@Nm` | Poll the provider API every N minutes, for example `every@15m`. |
+| `every@Nh` | Poll the provider API every N hours, for example `every@2h`. |
+| `daily@HH:MM` | A local OS job using launchd, systemd/cron, or Windows Task Scheduler. |
+| `manual` | No automatic trigger; run `doxloop sync now` yourself. |
+
+Scheduled checks compare the documented commit with the provider's branch head.
+When it changed, Doxloop asks the provider for the changed-file list and
+downloads that exact commit into `.doxloop/cache` as isolated evidence. It never
+clones, fetches, commits, pushes, or changes hooks in the user's source checkout.
+
+Scheduled authoring uses the coding agent already signed in on the local
+machine. On macOS, setup smoke-tests a new LaunchAgent in the real scheduler
+context before reporting success, including whether the background process can
+find the agent. Other platforms verify that their native schedule was installed.
+
+### Verify it before depending on it
+
+```bash
+doxloop sync status
+```
+
+Status checks more than whether files exist. It verifies each configured remote,
+the native scheduler registration, the followed source branch, agent
+authentication when needed, evidence-map coverage, the last sync log entry, and
+live drift. On macOS it also reports the LaunchAgent's running state and last
+exit result, so a failed or never-verified schedule is not presented as ready.
+
+### Run one cycle or turn it off
+
+```bash
+doxloop sync now
+doxloop sync history
+doxloop sync review --open
+doxloop sync off
+```
+
+Every cycle checks first. If the documentation is current, it records a quiet
+no-op and does not start an agent. If it is stale, the agent edits a staged copy
+and the actual documentation remains unchanged.
+
+The Proposals page keeps the full review in one workspace:
+
+1. The run list shows what is waiting, why it was drafted, and its decision status.
+2. Page tabs switch between every documentation and supporting-file change.
+3. Rendered comparison supports side-by-side or stacked layouts and can fold
+   unchanged content; source comparison shows line-level context and per-hunk acceptance.
+4. Actions accept one hunk, one page, or the whole proposal, or reject the proposal.
+
+The main UI sections have stable URLs for direct links. Proposal view controls
+switch the comparison between side by side and stacked, hide everything except
+the changes, or open the **source diff** — the line-by-line change with
+surrounding context, differing words emphasized, and an Accept button on each
+individual change.
+
+Acceptance works at three levels: one highlighted change in the source diff,
+every change on one page, or the complete proposal. Supporting files such as the
+evidence map are written automatically once every page has been accepted.
+
+Every accepted selection is checked against the original file fingerprint and
+validated before it is written. A local edit made while review is pending causes
+a visible conflict instead of an overwrite. Partial acceptance applies only the
+selected hunks and keeps the run pending; the synchronization baseline advances
+only after the complete proposal is accepted. Rejected proposals never change
+the documentation.
+
+Authoring also skips when the optional daily run budget is exhausted. Advanced guardrails such as
+`sync.budget.maxRunsPerDay` and `sync.budget.maxMinutes` can be set in
+`.doxloop/project.json`; setup manages the common branch, mode, and trigger
+settings.
+
+`sync off` removes the registered schedule but retains the rest of the sync
+policy and remote configuration so setup can be run again.
 
 ## Preview, test, and publish
 

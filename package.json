@@ -42,10 +42,10 @@
   },
   "scripts": {
     "build": "pnpm run build:core && pnpm run build:generators",
-    "build:core": "rm -rf dist && tsc -p tsconfig.json && node scripts/prepare-dist.mjs",
+    "build:core": "rm -rf dist && tsc -p tsconfig.json && vite build --config vite.ui.config.ts && node scripts/prepare-dist.mjs",
     "build:generators": "pnpm --filter './packages/*' run build",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit && pnpm --filter './packages/*' run typecheck",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.ui.json && pnpm --filter './packages/*' run typecheck",
     "pretest": "pnpm run build",
     "test": "vitest run",
     "eval:agents": "pnpm run build && node scripts/run-authoring-evals.mjs",
@@ -75,8 +75,11 @@
     "@doxbrix/doxloop-generator-vitepress": "workspace:*",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.15.3",
+    "@preact/preset-vite": "^2.10.2",
+    "preact": "^10.27.2",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
+    "vite": "^7.3.1",
     "vitest": "^3.1.2"
   },
   "engines": {

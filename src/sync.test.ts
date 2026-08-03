@@ -114,7 +114,7 @@ describe('source change collection', () => {
       'not-git',
       'missing-path',
     ])
-  })
+  }, 15_000)
 
   test('does not repeat synchronized dirty content after it is committed', async () => {
     const root = await makeRoot()

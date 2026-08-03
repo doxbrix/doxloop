@@ -469,3 +469,105 @@ example
     )
   })
 })
+
+describe('evidence map validation', () => {
+  async function withEvidenceMap(pages: Record<string, unknown>): Promise<string> {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-validation-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'docs-project'),
+      sources: [{ name: 'product', path: '../product' }],
+    })
+    await writeFile(
+      join(root, '.doxloop', 'evidence-map.json'),
+      `${JSON.stringify({ schemaVersion: 1, pages }, null, 2)}\n`,
+    )
+    return root
+  }
+
+  test('reports nothing for a project without an evidence map', async () => {
+    const root = await fixture()
+
+    const codes = (await validateProject(root)).issues.map((issue) => issue.code)
+
+    expect(codes.filter((code) => code.startsWith('evidence'))).toEqual([])
+  })
+
+  test('accepts a map that covers every page', async () => {
+    const root = await withEvidenceMap({
+      'docs/index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+      'docs/quickstart.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+    })
+
+    const codes = (await validateProject(root)).issues.map((issue) => issue.code)
+
+    expect(codes.filter((code) => code.startsWith('evidence'))).toEqual([])
+  })
+
+  test('warns about a page the map does not cover', async () => {
+    const root = await withEvidenceMap({
+      'docs/index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+    })
+
+    const result = await validateProject(root)
+
+    const missing = result.issues.find(
+      (issue) => issue.code === 'evidence-map-missing-page',
+    )
+    expect(missing?.severity).toBe('warning')
+    expect(missing?.file).toBe('docs/quickstart.mdx')
+  })
+
+  test('warns about an entry for a page that no longer exists', async () => {
+    const root = await withEvidenceMap({
+      'docs/index.mdx': { sources: [{ source: 'product' }] },
+      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
+      'docs/removed.mdx': { sources: [{ source: 'product' }] },
+    })
+
+    const result = await validateProject(root)
+
+    expect(
+      result.issues.find((issue) => issue.code === 'evidence-map-orphan')?.message,
+    ).toContain('docs/removed.mdx')
+  })
+
+  test('warns about an entry bound to an unconfigured source', async () => {
+    const root = await withEvidenceMap({
+      'docs/index.mdx': { sources: [{ source: 'legacy' }] },
+      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
+    })
+
+    const result = await validateProject(root)
+
+    expect(
+      result.issues.find((issue) => issue.code === 'evidence-map-unknown-source')
+        ?.message,
+    ).toContain('"legacy"')
+  })
+
+  test('surfaces a page the agent could not verify', async () => {
+    const root = await withEvidenceMap({
+      'docs/index.mdx': { sources: [{ source: 'product' }], confidence: 'needs-human' },
+      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
+    })
+
+    const result = await validateProject(root)
+
+    const unverified = result.issues.find((issue) => issue.code === 'evidence-unverified')
+    expect(unverified?.severity).toBe('warning')
+    expect(unverified?.file).toBe('docs/index.mdx')
+  })
+
+  test('never fails validation for evidence-map coverage alone', async () => {
+    const root = await withEvidenceMap({
+      'docs/removed.mdx': { sources: [{ source: 'legacy' }] },
+    })
+
+    const result = await validateProject(root)
+
+    for (const issue of result.issues.filter((issue) => issue.code.startsWith('evidence'))) {
+      expect(issue.severity).toBe('warning')
+    }
+  })
+})

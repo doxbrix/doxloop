@@ -15,7 +15,13 @@ Read this reference before creating or moving documentation pages.
   "sources": [
     {
       "name": "product",
-      "path": "../product"
+      "path": "../product",
+      "remote": {
+        "provider": "github",
+        "repository": "example/product",
+        "branch": "main",
+        "tokenEnv": "GITHUB_TOKEN"
+      }
     },
     {
       "name": "api",
@@ -92,6 +98,9 @@ Read this reference before creating or moving documentation pages.
   behavior and does not affect design-reference capture.
 - Keep source paths local. Never copy them into documentation or deployment
   content.
+- A directory source may include a read-only `remote` used by scheduled sync.
+  Preserve its provider, repository, branch, token environment-variable name,
+  and API base URL. Never store a token or write to that repository.
 - Treat `documentation` as the persisted reader and editorial brief. Older
   projects may omit it and use Doxloop defaults.
 - Use `standardsProfile` to version the curated information-architecture,
@@ -102,6 +111,53 @@ Read this reference before creating or moving documentation pages.
 - On update and review, preserve the brief unless the user explicitly changes
   it. Report a contradiction between the brief and current product evidence
   instead of silently rewriting the brief.
+
+## Evidence map
+
+`.doxloop/evidence-map.json` records which configured source produced each page.
+Doxloop uses it to tell readers and maintainers exactly which pages a later
+source change affects, without starting an agent. Write it whenever you create
+or change pages:
+
+```json
+{
+  "schemaVersion": 1,
+  "pages": {
+    "docs/guides/authentication.md": {
+      "sources": [
+        { "source": "product", "paths": ["src/auth.ts", "src/session.ts"] },
+        { "source": "api", "operations": ["POST /oauth/token"] }
+      ],
+      "confidence": "verified",
+      "claims": ["Access tokens expire after 900 seconds"]
+    }
+  }
+}
+```
+
+- Key every entry by the page path relative to the project root, including its
+  extension, exactly as `doxloop test` reports it.
+- `source` must name a configured source in `sources`.
+- `paths` are source-relative files, directories, or globs you actually read as
+  evidence for that page. A directory matches everything below it. Record the
+  narrowest paths that support the page: listing a whole source makes every
+  future change look relevant.
+- Shared routers, application entry points, and integration-test files are not
+  automatically evidence for every endpoint or workflow they exercise. Record
+  one only for pages whose reader-facing claims depend on its relevant branch
+  or assertion. If one path appears on more than half of all pages, audit every
+  occurrence and retain only direct claim support. This prevents a localized
+  product change from conservatively marking the whole documentation set stale.
+- Omit `paths` only for a page that genuinely depends on the whole source, such
+  as a release overview.
+- `operations` name documented API operations for an OpenAPI source.
+- `confidence` is `verified` when you read the source and confirmed the claims,
+  `inferred` when you reasoned from indirect evidence, or `needs-human` when a
+  claim could not be verified and a person must confirm it.
+- `claims` optionally lists the reader-facing facts most worth re-checking when
+  the source changes.
+- Preserve entries for pages you did not touch, and remove entries for pages you
+  deleted or renamed.
 
 ## Select the format
 

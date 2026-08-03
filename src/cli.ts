@@ -13,12 +13,25 @@ import {
 import { installSkill, parseAgent, skillStatus } from './agents.js'
 import { loadUserConfig, login, logout, whoami } from './auth.js'
 import {
+  parseClaudeEffort,
   parseReasoning,
   resolveScreenshotIntent,
   runAuthor,
 } from './author.js'
 import { capture } from './capture.js'
+import {
+  applySyncConfig,
+  computeConfiguredDrift,
+  disableSync,
+  formatSyncStatus,
+  parseSyncMode,
+  parseTriggerList,
+  replaySyncSetupCommand,
+  runSyncNow,
+  runSyncSetupWizard,
+} from './autosync.js'
 import { deploy } from './deploy.js'
+import { formatDrift } from './drift.js'
 import { formatDoctorReport, runDoctor } from './doctor.js'
 import { DoxloopError, UsageError } from './errors.js'
 import {
@@ -59,13 +72,21 @@ import {
 } from './project.js'
 import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
 import { startPreview } from './preview.js'
+import { startUiServer } from './ui-server.js'
+import { formatSyncRunHistory, listSyncRuns } from './sync-runs.js'
 import {
   effectiveDeployment,
   formatProjectSettings,
   runSettingsWizard,
 } from './settings.js'
 import { collectSourceChanges, formatSourceChanges } from './sync.js'
-import type { GeneratorName, ParsedArgs, SourceChange } from './types.js'
+import type {
+  GeneratorName,
+  ParsedArgs,
+  SourceChange,
+  SyncConfig,
+  SyncRunTrigger,
+} from './types.js'
 import { formatValidation, validateProject } from './validation.js'
 import { VERSION } from './version.js'
 
@@ -131,6 +152,24 @@ async function main(): Promise<number> {
           : `${formatValidation(result)}\n`,
       )
       return result.errors > 0 ? 1 : 0
+    }
+    case 'check':
+      return checkCommand(
+        cwd,
+        outputFormat(flag(args, 'format')),
+        booleanFlag(args, 'quiet'),
+      )
+    case 'sync':
+      return syncCommand(args, cwd)
+    case 'ui': {
+      const page = flag(args, 'page')
+      await startUiServer({
+        cwd,
+        port: numberFlag(args, 'port', 4317),
+        open: !booleanFlag(args, 'no-open'),
+        ...(page ? { page } : {}),
+      })
+      return 0
     }
     case 'status':
       return statusCommand(cwd, outputFormat(flag(args, 'format')))
@@ -531,14 +570,17 @@ async function authorCommand(
   if (mode !== 'review') await addDesignReferences(root, designReferences)
   const model = flag(args, 'model')
   const reasoning = parseReasoning(flag(args, 'reasoning'))
+  const effort = parseClaudeEffort(flag(args, 'effort'))
   const screenshots = screenshotIntent(args)
   const result = await runAuthor({
     root,
     mode,
+    nonInteractive: !interactive,
     ...(changeSummary !== undefined ? { changeSummary } : {}),
     ...(selectedAgent ? { agent: selectedAgent } : {}),
     ...(model ? { model } : {}),
     ...(reasoning ? { reasoning } : {}),
+    ...(effort ? { effort } : {}),
     screenshots,
     print: booleanFlag(args, 'print'),
     ...(request || (mode === 'review' && designReferences.length > 0)
@@ -622,6 +664,105 @@ async function generatorCommand(args: ParsedArgs, cwd: string): Promise<number> 
   return 0
 }
 
+async function syncCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const action = args.positionals[0] ?? 'status'
+  if (!['setup', 'status', 'now', 'review', 'history', 'off'].includes(action)) {
+    throw new UsageError('Usage: doxloop sync <setup|status|now|review|history|off>')
+  }
+  if (args.positionals.length > 1) {
+    throw new UsageError('The sync command accepts one action.')
+  }
+  const root = await findProjectRoot(cwd)
+  const project = await loadProject(root)
+
+  if (action === 'history') {
+    process.stdout.write(`${formatSyncRunHistory(await listSyncRuns(root))}\n`)
+    return 0
+  }
+  if (action === 'review') {
+    await startUiServer({
+      cwd: root,
+      host: flag(args, 'host') ?? '127.0.0.1',
+      port: numberFlag(args, 'port', 4317),
+      open: booleanFlag(args, 'open'),
+      page: 'proposals',
+    })
+    return 0
+  }
+
+  if (action === 'status') {
+    process.stdout.write(`${await formatSyncStatus(root, project)}\n`)
+    return 0
+  }
+  if (action === 'now') {
+    const trigger = flag(args, 'trigger')
+    return runSyncNow({
+      root,
+      project,
+      quiet: booleanFlag(args, 'quiet'),
+      ...(trigger ? { trigger: parseSyncRunTrigger(trigger) } : {}),
+    })
+  }
+  if (action === 'off') {
+    const lines = await disableSync(root, project)
+    process.stdout.write(`\n${lines.join('\n')}\n\nAutomatic sync: OFF\n`)
+    return 0
+  }
+
+  const modeFlag = flag(args, 'mode')
+  const onFlag = flag(args, 'on')
+  const branchFlag = flag(args, 'branch')
+  let sync: SyncConfig | undefined
+  if (isInteractive(args) && modeFlag === undefined && onFlag === undefined) {
+    sync = await runSyncSetupWizard({ root, project, io: promptIo() })
+    if (!sync) {
+      process.stdout.write('Setup canceled. Nothing was changed.\n')
+      return 0
+    }
+  } else {
+    if (modeFlag === undefined && onFlag === undefined) {
+      throw new UsageError(
+        'Guided setup requires an interactive terminal. For automation, use `doxloop sync setup --mode <check|propose|auto> --on <every@Nm|every@Nh|daily@HH:MM|manual>`.',
+      )
+    }
+    sync = {
+      ...project.sync,
+      ...(modeFlag ? { mode: parseSyncMode(modeFlag) } : {}),
+      ...(branchFlag ? { branch: branchFlag } : {}),
+      ...(onFlag ? { on: parseTriggerList(onFlag) } : {}),
+    }
+  }
+
+  const applied = await applySyncConfig(root, project, sync)
+  process.stdout.write(`\n${applied.join('\n')}\n`)
+  process.stdout.write(
+    `\nRerun this setup non-interactively:\n  ${replaySyncSetupCommand(sync)}\n`,
+  )
+  process.stdout.write(
+    '\nNext:\n  doxloop sync status         confirm everything is working\n  doxloop check               see the current drift\n  doxloop sync review --open  review generated proposals\n',
+  )
+  return 0
+}
+
+async function checkCommand(
+  cwd: string,
+  format: string,
+  quiet: boolean,
+): Promise<number> {
+  const root = await findProjectRoot(cwd)
+  const project = await loadProject(root)
+  const result = await computeConfiguredDrift(root, project)
+  // Quiet mode keeps scheduled checks silent unless there is something to act on.
+  if (!quiet || result.status !== 'current') {
+    process.stdout.write(
+      format === 'json'
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `${formatDrift(result)}\n`,
+    )
+  }
+  return result.status === 'current' ? 0 : 1
+}
+
 async function statusCommand(cwd: string, format?: string): Promise<number> {
   const root = await findProjectRoot(cwd)
   const project = await loadProject(root)
@@ -663,11 +804,14 @@ function validateCommandArguments(args: ParsedArgs): void {
     agent: ['agent'],
     generator: [],
     doctor: ['source', 'output', 'agent'],
-    create: ['agent', 'model', 'reasoning', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
-    update: ['agent', 'model', 'reasoning', 'reference', 'print', 'screenshots', 'no-screenshots'],
-    review: ['agent', 'model', 'reasoning', 'reference', 'print'],
+    create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
+    update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
+    review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
     capture: [],
     test: ['format'],
+    check: ['format', 'quiet'],
+    sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open'],
+    ui: ['port', 'page', 'no-open'],
     status: ['format'],
     settings: [],
     preview: ['host', 'port', 'open'],
@@ -684,9 +828,16 @@ function validateCommandArguments(args: ParsedArgs): void {
   if (commandFlags === undefined) return
   assertAllowedFlags(args, new Set(commandFlags))
   if (
-    !['init', 'agent', 'generator', 'create', 'update', 'review', 'capture'].includes(
-      args.command,
-    ) &&
+    ![
+      'init',
+      'agent',
+      'generator',
+      'create',
+      'update',
+      'review',
+      'capture',
+      'sync',
+    ].includes(args.command) &&
     args.positionals.length > 0
   ) {
     throw new UsageError(`The ${args.command} command does not accept arguments.`)
@@ -777,6 +928,16 @@ function outputFormat(value: string | undefined): 'text' | 'json' {
   throw new UsageError('--format must be text or json')
 }
 
+function parseSyncRunTrigger(value: string): SyncRunTrigger {
+  if (
+    value === 'manual' ||
+    value === 'schedule'
+  ) {
+    return value
+  }
+  throw new UsageError('--trigger is reserved for the Doxloop scheduler.')
+}
+
 function help(command?: string): string {
   if (command === 'init') {
     return `Usage: doxloop init [directory] [options]
@@ -862,6 +1023,7 @@ Options:
 ${createOptions}  --agent <name>           codex, claude, or gemini
   --model <name>           Model passed to the selected agent CLI
   --reasoning <level>      Codex reasoning effort: minimal, low, medium, high, or xhigh
+  --effort <level>         Claude effort: low, medium, high, xhigh, or max
   --reference <url>        Use a documentation design reference; may be repeated
 ${screenshotOptions}  --print                  Print the prepared prompt instead of starting an agent
   --cwd <directory>        Run from this project directory
@@ -889,6 +1051,60 @@ Options:
   --host <host>            Listening host (default: 127.0.0.1)
   --port <port>            Listening port (default: 4321)
   --open                   Open the preview in a browser
+  --cwd <directory>        Run from this project directory
+`
+  }
+  if (command === 'sync') {
+    return `Usage: doxloop sync <setup|status|now|review|history|off> [options]
+
+Keep documentation current automatically.
+
+Detection, proposal generation, review, and application are separate. Generated
+changes stay in an isolated workspace until the user accepts them. Git is not
+required for the documentation directory.
+
+Actions:
+  setup                    Answer a few questions, then install the triggers
+  status                   Verify the triggers, agent sign-in, and current drift
+  now                      Generate one isolated proposal when pages are stale
+  review                   Open the local run history and visual change review
+  history                  List every proposal and its decision status
+  off                      Remove the schedule, keeping settings
+
+Options:
+  --mode <name>            check (report only), propose, or auto
+  --on <frequency>         every@Nm, every@Nh, daily@HH:MM, or manual
+  --branch <name>          Product branch documentation follows
+  --quiet                  Print nothing when documentation is current
+  --host <host>            Review server host (default: 127.0.0.1)
+  --port <port>            Review server port (default: 4317)
+  --open                   Open the visual review in a browser
+  --cwd <directory>        Run from this project directory
+
+Examples:
+  doxloop sync setup
+  doxloop sync setup --mode propose --on every@15m --branch main
+  doxloop sync status
+  doxloop sync history
+  doxloop sync review --open
+`
+  }
+  if (command === 'check') {
+    return `Usage: doxloop check [options]
+
+Report which documentation pages no longer match the configured sources.
+
+No authoring agent is started and no model is used: the answer comes from the
+provider API, the recorded sync baseline, and the evidence map written by the
+last authoring run. Safe to run on a schedule or in continuous integration.
+
+Exit status:
+  0   documentation is current
+  1   pages are stale, or drift could not be determined
+
+Options:
+  --format <text|json>     Output format (default: text)
+  --quiet                  Print nothing when documentation is current
   --cwd <directory>        Run from this project directory
 `
   }
@@ -938,6 +1154,25 @@ Options:
   --api-url <url>          HTTPS API base URL; HTTP is allowed only for localhost
 `
   }
+  if (command === 'ui') {
+    return `Usage: doxloop ui [options]
+
+Open the local Doxloop project control center. Outside a Doxloop project, the UI
+starts with the new-project setup wizard. Project files and credentials stay on
+this computer.
+
+Options:
+  --page <name>            Open home, sources, authoring, sync, proposals, quality, preview, publish, or settings
+  --port <port>            Local UI port (default: 4317)
+  --no-open                Start the server without opening a browser
+  --cwd <directory>        Run from this directory
+
+Examples:
+  doxloop ui
+  doxloop ui --page sync
+  doxloop ui --no-open --port 4400
+`
+  }
   if (command === 'deploy') {
     return `Usage: doxloop deploy [options]
 
@@ -968,6 +1203,13 @@ Author:
   agent      Set up project-local agent skills
   generator  Install and inspect generator packages
   capture    Capture rendered design-reference evidence
+
+Maintain:
+  check      Report documentation stale since the last source change
+  sync       Set up and run automatic documentation maintenance
+
+Visual:
+  ui         Open the local Doxloop project control center
 
 Verify:
   doctor     Check runtime, source, agent, generator, skills, and documentation

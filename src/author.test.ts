@@ -5,10 +5,13 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   agentArguments,
   authorPrompt,
+  ClaudeStreamLogFormatter,
+  parseClaudeEffort,
   parseReasoning,
   prepareAgentPrompt,
   resolveScreenshotIntent,
   runAuthor,
+  sourceAccessDirectories,
 } from './author.js'
 import { pathExists } from './fs.js'
 import { scaffoldProject } from './project.js'
@@ -199,6 +202,41 @@ describe('author prompts', () => {
     expect(prompt).toContain('start from the listed commits and files')
   })
 
+  test('pins agent validation to the CLI version that started the run', () => {
+    const command = '"/usr/local/bin/node" "/workspace/doxloop/dist/cli.js"'
+    const prompt = authorPrompt(
+      'update',
+      [{ name: 'product', path: '../product' }],
+      undefined,
+      'doxbrix',
+      undefined,
+      [],
+      undefined,
+      'auto',
+      undefined,
+      command,
+    )
+
+    expect(prompt).toContain(`use \`${command}\` instead of a \`doxloop\` executable from PATH`)
+    expect(prompt).toContain(`Run \`${command} test\` before finishing`)
+  })
+
+  test('requires an evidence map from every authoring run', () => {
+    for (const mode of ['create', 'update'] as const) {
+      const prompt = authorPrompt(mode, [{ name: 'product', path: '../product' }])
+
+      expect(prompt).toContain('.doxloop/evidence-map.json')
+      expect(prompt).toContain('which pages a later source change affects')
+    }
+  })
+
+  test('reads but never writes the evidence map during review', () => {
+    const prompt = authorPrompt('review', [{ name: 'product', path: '../product' }])
+
+    expect(prompt).toContain('Use `.doxloop/evidence-map.json` when it exists')
+    expect(prompt).not.toContain('record which configured sources')
+  })
+
   test('uses update for requested documentation transformations', () => {
     const prompt = authorPrompt(
       'update',
@@ -297,6 +335,23 @@ describe('agent invocation', () => {
     ])
   })
 
+  test('resolves external configured sources for agent filesystem access', () => {
+    const root = join(tmpdir(), 'doxloop-source-access', 'docs')
+
+    expect(
+      sourceAccessDirectories(root, [
+        { name: 'product', path: '../product' },
+        { name: 'api', path: '../spec/openapi.yaml', kind: 'openapi' },
+        { name: 'duplicate', path: '../product' },
+        { name: 'local-api', path: './openapi.yaml', kind: 'openapi' },
+        { name: 'remote-api', path: 'https://example.com/openapi.yaml', kind: 'openapi' },
+      ]),
+    ).toEqual([
+      join(tmpdir(), 'doxloop-source-access', 'product'),
+      join(tmpdir(), 'doxloop-source-access', 'spec'),
+    ])
+  })
+
   test('forwards reasoning effort as a Codex config override', () => {
     expect(
       agentArguments('codex', 'p', { model: 'gpt-5.6-terra', reasoning: 'high' }),
@@ -307,6 +362,19 @@ describe('agent invocation', () => {
     expect(parseReasoning('high')).toBe('high')
     expect(parseReasoning(undefined)).toBeUndefined()
     expect(() => parseReasoning('extreme')).toThrow(/--reasoning must be one of/)
+  })
+
+  test('forwards and validates Claude effort', () => {
+    expect(parseClaudeEffort('max')).toBe('max')
+    expect(parseClaudeEffort(undefined)).toBeUndefined()
+    expect(() => parseClaudeEffort('minimal')).toThrow(/--effort must be one of/)
+    expect(agentArguments('claude', 'p', { model: 'sonnet', effort: 'high' })).toEqual([
+      '--model',
+      'sonnet',
+      '--effort',
+      'high',
+      'p',
+    ])
   })
 
   test('uses enforced read-only or plan invocations for review', () => {
@@ -324,6 +392,10 @@ describe('agent invocation', () => {
       'plan',
       '--max-turns',
       '30',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
       'p',
     ])
     expect(agentArguments('gemini', 'p', { mode: 'review' })).toEqual([
@@ -331,6 +403,188 @@ describe('agent invocation', () => {
       'plan',
       '--prompt',
       'p',
+    ])
+  })
+})
+
+describe('unattended authoring', () => {
+  test('runs each agent without a terminal while allowing documentation writes', () => {
+    expect(agentArguments('codex', 'P', { mode: 'update', nonInteractive: true })).toEqual([
+      'exec',
+      '--sandbox',
+      'workspace-write',
+      '--skip-git-repo-check',
+      'P',
+    ])
+    expect(agentArguments('claude', 'P', { mode: 'update', nonInteractive: true })).toEqual([
+      '--print',
+      '--permission-mode',
+      'acceptEdits',
+      '--max-turns',
+      '60',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      'P',
+    ])
+    expect(agentArguments('gemini', 'P', { mode: 'update', nonInteractive: true })).toEqual([
+      '--approval-mode',
+      'auto_edit',
+      '--prompt',
+      'P',
+    ])
+  })
+
+  test('keeps review read-only even when a scheduler asks for it', () => {
+    expect(agentArguments('codex', 'P', { mode: 'review', nonInteractive: true })).toContain(
+      'read-only',
+    )
+    expect(
+      agentArguments('claude', 'P', { mode: 'review', nonInteractive: true }),
+    ).toContain('plan')
+  })
+
+  test('grants Claude read access only to configured external source directories', () => {
+    const unattended = agentArguments('claude', 'P', {
+      mode: 'update',
+      nonInteractive: true,
+      sourceDirectories: ['/workspace/product', '/workspace/specs'],
+    })
+    expect(unattended.slice(0, 4)).toEqual([
+      '--add-dir',
+      '/workspace/product',
+      '/workspace/specs',
+      '--settings',
+    ])
+    expect(JSON.parse(unattended[4]!)).toEqual({
+      permissions: {
+        deny: [
+          'Edit(//workspace/product/**)',
+          'Edit(//workspace/specs/**)',
+        ],
+      },
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        allowUnsandboxedCommands: false,
+        filesystem: {
+          denyWrite: ['/workspace/product', '/workspace/specs'],
+        },
+      },
+    })
+    expect(unattended.slice(5)).toEqual([
+      '--print',
+      '--permission-mode',
+      'acceptEdits',
+      '--max-turns',
+      '60',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      'P',
+    ])
+
+    const interactive = agentArguments('claude', 'P', {
+      mode: 'create',
+      sourceDirectories: ['/workspace/product'],
+    })
+    expect(interactive.slice(0, 3)).toEqual([
+      '--add-dir',
+      '/workspace/product',
+      '--settings',
+    ])
+    expect(interactive.slice(4)).toEqual(['--', 'P'])
+  })
+
+  test('still forwards the model and reasoning options', () => {
+    expect(
+      agentArguments('codex', 'P', {
+        mode: 'update',
+        nonInteractive: true,
+        model: 'gpt-5',
+        reasoning: 'high',
+      }),
+    ).toEqual([
+      'exec',
+      '-m',
+      'gpt-5',
+      '-c',
+      'model_reasoning_effort=high',
+      '--sandbox',
+      'workspace-write',
+      '--skip-git-repo-check',
+      'P',
+    ])
+  })
+
+  test('leaves interactive authoring unchanged', () => {
+    expect(agentArguments('claude', 'P', { mode: 'update' })).toEqual(['P'])
+    expect(agentArguments('gemini', 'P', { mode: 'create' })).toEqual(['-i', 'P'])
+  })
+})
+
+describe('Claude activity streaming', () => {
+  test('turns partial JSONL events into readable tool and progress lines', () => {
+    const formatter = new ClaudeStreamLogFormatter()
+    const events = [
+      { type: 'system', subtype: 'init', model: 'claude-sonnet-5' },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'tool-1', name: 'Read', input: {} },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{"file_path":"docs/index.mdx"}' },
+        },
+      },
+      { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'contents' }] },
+      },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Documentation created.' } },
+      },
+      { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        num_turns: 2,
+        duration_ms: 65_000,
+        result: 'Documentation created.',
+      },
+    ].map((event) => JSON.stringify(event)).join('\n')
+
+    const midpoint = Math.floor(events.length / 2)
+    const lines = [
+      ...formatter.push(events.slice(0, midpoint)),
+      ...formatter.push(`${events.slice(midpoint)}\n`),
+      ...formatter.finish(),
+    ]
+
+    expect(lines).toEqual([
+      'Claude session started · claude-sonnet-5',
+      '→ Reading docs/index.mdx',
+      '✓ Reading docs/index.mdx',
+      'Documentation created.',
+      'Claude finished · 2 turns · 1m 5s',
     ])
   })
 })

@@ -455,3 +455,108 @@ describe('project scaffolding', () => {
     await expect(loadProject(root)).rejects.toThrow('unsupported format')
   })
 })
+
+describe('sync configuration', () => {
+  async function scaffold(): Promise<{ root: string; projectPath: string }> {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'sample-docs'),
+      sources: [],
+    })
+    return { root, projectPath: join(root, '.doxloop', 'project.json') }
+  }
+
+  async function writeSync(projectPath: string, sync: unknown): Promise<void> {
+    const project = JSON.parse(await readFile(projectPath, 'utf8')) as Record<
+      string,
+      unknown
+    >
+    await writeFile(projectPath, `${JSON.stringify({ ...project, sync }, null, 2)}\n`)
+  }
+
+  test('scaffolds a disabled sync configuration with lock files ignored', async () => {
+    const { root } = await scaffold()
+
+    const sync = (await loadProject(root)).sync
+    expect(sync.mode).toBe('check')
+    expect(sync.on).toEqual([])
+    expect(sync.watch).toEqual([])
+    expect(sync.ignore).toContain('pnpm-lock.yaml')
+    expect(sync.ignore).not.toContain('**/*.test.ts')
+  })
+
+  test('fills defaults for a partial sync block', async () => {
+    const { root, projectPath } = await scaffold()
+    await writeSync(projectPath, { mode: 'propose', on: ['every@15m'] })
+
+    const sync = (await loadProject(root)).sync
+    expect(sync.mode).toBe('propose')
+    expect(sync.on).toEqual(['every@15m'])
+    expect(sync.ignore).toContain('pnpm-lock.yaml')
+  })
+
+  test('accepts watch, ignore, branch, and budget values', async () => {
+    const { root, projectPath } = await scaffold()
+    await writeSync(projectPath, {
+      mode: 'auto',
+      branch: 'main',
+      on: ['every@1h'],
+      watch: ['src/**'],
+      ignore: ['**/*.test.ts'],
+      budget: { maxRunsPerDay: 8, maxMinutes: 15 },
+    })
+
+    expect((await loadProject(root)).sync).toEqual({
+      mode: 'auto',
+      branch: 'main',
+      on: ['every@1h'],
+      watch: ['src/**'],
+      ignore: ['**/*.test.ts'],
+      budget: { maxRunsPerDay: 8, maxMinutes: 15 },
+    })
+  })
+
+  test.each([
+    ['an unknown mode', { mode: 'yolo' }],
+    ['an unknown trigger', { on: ['hourly'] }],
+    ['a malformed daily time', { on: ['daily@9:00'] }],
+    ['an out-of-range daily time', { on: ['daily@24:00'] }],
+    ['an empty branch', { branch: '  ' }],
+    ['a non-string watch pattern', { watch: [3] }],
+    ['a zero run budget', { budget: { maxRunsPerDay: 0 } }],
+    ['a non-object sync block', ['propose']],
+  ])('rejects %s', async (_label, sync) => {
+    const { root, projectPath } = await scaffold()
+    await writeSync(projectPath, sync)
+
+    await expect(loadProject(root)).rejects.toThrow('unsupported format')
+  })
+
+  test('saves a sync configuration without disturbing other settings', async () => {
+    const { root, projectPath } = await scaffold()
+
+    await saveProjectSettings(root, {
+      sync: {
+        mode: 'propose',
+        branch: 'main',
+        on: ['every@15m'],
+        watch: ['src/**'],
+        ignore: ['pnpm-lock.yaml'],
+      },
+    })
+
+    const saved = JSON.parse(await readFile(projectPath, 'utf8')) as Record<
+      string,
+      unknown
+    >
+    expect(saved.sync).toEqual({
+      mode: 'propose',
+      branch: 'main',
+      on: ['every@15m'],
+      watch: ['src/**'],
+      ignore: ['pnpm-lock.yaml'],
+    })
+    expect(saved.title).toBe('Sample Docs')
+  })
+})

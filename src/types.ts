@@ -14,10 +14,22 @@ export type GeneratorName =
 
 export type SourceKind = 'directory' | 'openapi'
 
+export interface RemoteSource {
+  provider: 'github'
+  /** GitHub repository in owner/name form. */
+  repository: string
+  branch: string
+  /** Environment variable containing a token. Tokens are never stored in project files. */
+  tokenEnv?: string
+  /** Primarily for GitHub Enterprise Server. */
+  apiBaseUrl?: string
+}
+
 export interface SourceBinding {
   name: string
   path: string
   kind?: SourceKind
+  remote?: RemoteSource
 }
 
 export interface DesignReference {
@@ -71,6 +83,29 @@ export interface DocumentationBrief {
   accessibilityTarget: string
 }
 
+/**
+ * `check` reports drift and never starts an agent. Authoring modes generate an
+ * isolated proposal; neither changes the real documentation before approval.
+ */
+export type SyncMode = 'check' | 'propose' | 'auto'
+
+/** Remote polling runs either at a fixed interval or once per day. */
+export type SyncTrigger = `every@${number}m` | `every@${number}h` | `daily@${string}`
+
+export interface SyncBudget {
+  maxRunsPerDay?: number
+  maxMinutes?: number
+}
+
+export interface SyncConfig {
+  mode: SyncMode
+  branch?: string
+  on: SyncTrigger[]
+  watch: string[]
+  ignore: string[]
+  budget?: SyncBudget
+}
+
 export interface DoxloopProject {
   schemaVersion: 1
   title: string
@@ -83,6 +118,7 @@ export interface DoxloopProject {
   application?: ApplicationConfig
   deployment?: DeploymentConfig
   documentation: DocumentationBrief
+  sync: SyncConfig
 }
 
 export type DoxbrixNavNode =
@@ -123,6 +159,71 @@ export interface SyncState {
   sources: Record<string, SourceSyncRecord>
 }
 
+export type SyncRunStatus =
+  | 'generating'
+  | 'awaiting-review'
+  | 'partially-applied'
+  | 'applied'
+  | 'rejected'
+  | 'failed'
+  | 'conflicted'
+
+export type SyncRunTrigger =
+  | 'manual'
+  | 'schedule'
+
+export type SyncChangeKind = 'added' | 'modified' | 'deleted'
+export type SyncChangeCategory = 'page' | 'navigation' | 'configuration' | 'evidence' | 'asset'
+
+export interface SyncChangeHunk {
+  id: string
+  oldStart: number
+  oldLines: string[]
+  newStart: number
+  newLines: string[]
+  acceptedAt?: string
+  rejectedAt?: string
+}
+
+export interface SyncFileChange {
+  id: string
+  path: string
+  title: string
+  kind: SyncChangeKind
+  category: SyncChangeCategory
+  binary: boolean
+  beforeHash?: string
+  afterHash?: string
+  beforeEndsWithNewline?: boolean
+  afterEndsWithNewline?: boolean
+  hunks: SyncChangeHunk[]
+}
+
+export interface SyncRunValidation {
+  pages: number
+  errors: number
+  warnings: number
+}
+
+/** A generated documentation proposal. The real documentation changes only after review. */
+export interface SyncRun {
+  schemaVersion: 1
+  id: string
+  status: SyncRunStatus
+  mode: Exclude<SyncMode, 'check'>
+  trigger: SyncRunTrigger
+  createdAt: string
+  completedAt?: string
+  appliedAt?: string
+  rejectedAt?: string
+  summary: string
+  sourceSummary: string
+  stalePages: string[]
+  changes: SyncFileChange[]
+  validation?: SyncRunValidation
+  error?: string
+}
+
 export type SourceChange = Omit<SourceBinding, 'kind'> &
   (
     | { kind: 'missing-path' }
@@ -140,6 +241,77 @@ export type SourceChange = Omit<SourceBinding, 'kind'> &
         uncommittedFiles: string[]
       }
   )
+
+/**
+ * How well the authoring agent could ground a page in configured evidence.
+ * `needs-human` is surfaced by validation rather than silently accepted.
+ */
+export type EvidenceConfidence = 'verified' | 'inferred' | 'needs-human'
+
+export interface PageEvidenceSource {
+  /** Name of a configured source binding. */
+  source: string
+  /** Source-relative paths or globs the page was written from. */
+  paths?: string[]
+  /** OpenAPI operations the page documents, such as `POST /oauth/token`. */
+  operations?: string[]
+}
+
+export interface PageEvidence {
+  sources: PageEvidenceSource[]
+  /** Source name to the commit or content hash the page was last checked against. */
+  verifiedAt?: Record<string, string>
+  confidence?: EvidenceConfidence
+  /** Reader-facing factual claims the page makes, for targeted re-verification. */
+  claims?: string[]
+}
+
+export interface EvidenceMap {
+  schemaVersion: 1
+  /** Project-relative page paths, matching the paths reported by validation. */
+  pages: Record<string, PageEvidence>
+}
+
+export interface StaleReason {
+  source: string
+  paths: string[]
+  baseline?: string
+  head?: string
+}
+
+export interface StalePage {
+  page: string
+  reasons: StaleReason[]
+  verifiedAt?: string
+}
+
+export interface DriftSourceSummary {
+  name: string
+  path: string
+  kind: SourceChange['kind']
+  /** Changed paths that survived the watch and ignore filters. */
+  changedPaths: string[]
+  /** How many changed paths the filters dropped. */
+  filteredPaths: number
+  baseline?: string
+  head?: string
+}
+
+/**
+ * `current` means nothing reader-visible changed. `stale` names the affected
+ * pages. `unknown` means something changed but page-level attribution is not
+ * possible yet, usually because no evidence map or baseline exists.
+ */
+export type DriftStatus = 'current' | 'stale' | 'unknown'
+
+export interface DriftResult {
+  status: DriftStatus
+  pages: StalePage[]
+  trackedPages: number
+  sources: DriftSourceSummary[]
+  evidenceMap: 'present' | 'missing'
+  notes: string[]
+}
 
 export type IssueSeverity = 'error' | 'warning'
 

@@ -1,0 +1,239 @@
+<div id="doxloop-label-redesign">
+  <style>
+    #doxloop-label-redesign {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: light-dark(#172033, #edf2fa);
+    }
+    #doxloop-label-redesign * { box-sizing: border-box; }
+    #doxloop-label-redesign .dl-shell {
+      display: grid;
+      grid-template-columns: 175px minmax(0, 1fr);
+      min-height: 500px;
+      overflow: hidden;
+      border: 1px solid light-dark(#dce3ee, #30394a);
+      border-radius: 14px;
+      background: light-dark(#f7f9fc, #111722);
+      box-shadow: 0 18px 45px light-dark(rgb(21 35 58 / 12%), rgb(0 0 0 / 28%));
+    }
+    #doxloop-label-redesign .dl-side {
+      padding: 17px 12px;
+      border-right: 1px solid light-dark(#e0e6ef, #293241);
+      background: light-dark(#ffffff, #151c28);
+    }
+    #doxloop-label-redesign .dl-brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 8px 17px;
+      font-weight: 500;
+    }
+    #doxloop-label-redesign .dl-brand span {
+      display: grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border-radius: 8px;
+      color: #ffffff;
+      background: #5b55e7;
+    }
+    #doxloop-label-redesign .dl-nav { display: grid; gap: 4px; }
+    #doxloop-label-redesign .dl-nav div {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      color: light-dark(#657087, #9eabc0);
+    }
+    #doxloop-label-redesign .dl-nav .active {
+      color: light-dark(#29245f, #eeecff);
+      background: light-dark(#eeedff, #2a2852);
+    }
+    #doxloop-label-redesign .dl-main { min-width: 0; }
+    #doxloop-label-redesign .dl-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 20px;
+      border-bottom: 1px solid light-dark(#e0e6ef, #293241);
+      background: light-dark(#ffffff, #151c28);
+    }
+    #doxloop-label-redesign .dl-bar strong { font-weight: 500; }
+    #doxloop-label-redesign .dl-toggle {
+      display: flex;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 9px;
+      background: light-dark(#edf1f7, #252e3d);
+    }
+    #doxloop-label-redesign .dl-toggle button,
+    #doxloop-label-redesign .dl-primary,
+    #doxloop-label-redesign .dl-secondary {
+      font: inherit;
+      cursor: pointer;
+    }
+    #doxloop-label-redesign .dl-toggle button {
+      padding: 7px 10px;
+      border: 0;
+      border-radius: 7px;
+      color: light-dark(#657087, #aeb8c9);
+      background: transparent;
+    }
+    #doxloop-label-redesign .dl-toggle button[aria-pressed="true"] {
+      color: light-dark(#192033, #f3f6fb);
+      background: light-dark(#ffffff, #3a4557);
+      box-shadow: 0 1px 2px light-dark(rgb(20 32 55 / 12%), rgb(0 0 0 / 24%));
+    }
+    #doxloop-label-redesign .dl-content {
+      max-width: 700px;
+      margin: 0 auto;
+      padding: 28px 24px 32px;
+    }
+    #doxloop-label-redesign h2,
+    #doxloop-label-redesign h3,
+    #doxloop-label-redesign p { margin: 0; }
+    #doxloop-label-redesign .dl-intro { margin-bottom: 18px; }
+    #doxloop-label-redesign .dl-intro p,
+    #doxloop-label-redesign .dl-run p,
+    #doxloop-label-redesign .dl-field-label span { color: light-dark(#68758a, #a7b2c4); }
+    #doxloop-label-redesign .dl-intro p { margin-top: 6px; }
+    #doxloop-label-redesign .dl-notice {
+      display: flex;
+      gap: 11px;
+      margin-bottom: 15px;
+      padding: 13px 14px;
+      border: 1px solid light-dark(#cfc9ff, #4b4883);
+      border-radius: 10px;
+      background: light-dark(#f0efff, #252343);
+    }
+    #doxloop-label-redesign .dl-notice p { margin-top: 3px; color: light-dark(#56527c, #c8c5ee); }
+    #doxloop-label-redesign .dl-run {
+      padding: 18px;
+      border: 1px solid light-dark(#dfe5ee, #30394a);
+      border-radius: 12px;
+      background: light-dark(#ffffff, #171f2c);
+    }
+    #doxloop-label-redesign .dl-run p { margin-top: 4px; }
+    #doxloop-label-redesign .dl-field-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 16px;
+      margin-bottom: 7px;
+    }
+    #doxloop-label-redesign textarea {
+      width: 100%;
+      min-height: 76px;
+      resize: vertical;
+      padding: 10px 11px;
+      border: 1px solid light-dark(#cfd7e3, #3b4657);
+      border-radius: 8px;
+      font: inherit;
+      color: light-dark(#172033, #edf2fa);
+      background: light-dark(#ffffff, #202937);
+    }
+    #doxloop-label-redesign .dl-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    #doxloop-label-redesign .dl-primary,
+    #doxloop-label-redesign .dl-secondary {
+      padding: 9px 12px;
+      border-radius: 8px;
+    }
+    #doxloop-label-redesign .dl-primary {
+      border: 1px solid #5b55e7;
+      color: #ffffff;
+      background: #5b55e7;
+    }
+    #doxloop-label-redesign .dl-secondary {
+      border: 1px solid light-dark(#d4dae5, #3d485a);
+      color: light-dark(#263043, #e6ebf4);
+      background: light-dark(#ffffff, #202937);
+    }
+    #doxloop-label-redesign .old-copy { display: none; }
+    #doxloop-label-redesign.old .new-copy { display: none; }
+    #doxloop-label-redesign.old .old-copy { display: inline; }
+    #doxloop-label-redesign.old div.old-copy { display: block; }
+    @media (max-width: 560px) {
+      #doxloop-label-redesign .dl-shell { grid-template-columns: 1fr; }
+      #doxloop-label-redesign .dl-side { display: none; }
+      #doxloop-label-redesign .dl-bar { align-items: flex-start; flex-direction: column; }
+      #doxloop-label-redesign .dl-content { padding: 20px 15px 26px; }
+      #doxloop-label-redesign .dl-field-label { flex-direction: column; gap: 2px; }
+    }
+  </style>
+
+  <div class="dl-shell">
+    <aside class="dl-side" aria-label="Doxloop navigation">
+      <div class="dl-brand"><span><i data-lucide="repeat-2" aria-hidden="true"></i></span>Doxloop</div>
+      <div class="dl-nav">
+        <div><i data-lucide="home" aria-hidden="true"></i>Home</div>
+        <div><i data-lucide="database" aria-hidden="true"></i>Sources</div>
+        <div class="active"><i data-lucide="file-pen-line" aria-hidden="true"></i><span class="new-copy">Documentation</span><span class="old-copy">Authoring</span></div>
+        <div><i data-lucide="activity" aria-hidden="true"></i>Monitoring</div>
+        <div><i data-lucide="file-check-2" aria-hidden="true"></i>Proposals</div>
+        <div><i data-lucide="eye" aria-hidden="true"></i>Preview</div>
+      </div>
+    </aside>
+
+    <main class="dl-main">
+      <div class="dl-bar">
+        <strong>Acme developer docs</strong>
+        <div class="dl-toggle" aria-label="Compare labels">
+          <button type="button" data-copy="new" aria-pressed="true">Plain language</button>
+          <button type="button" data-copy="old" aria-pressed="false">Current terms</button>
+        </div>
+      </div>
+
+      <div class="dl-content">
+        <div class="dl-intro new-copy"><h2>Update documentation</h2><p>Keep your existing pages accurate using your connected sources.</p></div>
+        <div class="dl-intro old-copy"><h2>Authoring</h2><p>Describe the outcome you want. Every change is grounded in your evidence.</p></div>
+
+        <div class="dl-notice new-copy">
+          <i data-lucide="circle-plus" aria-hidden="true"></i>
+          <div><strong>New source “payments-api” is ready</strong><p>Update your docs to include information from this source. Unrelated pages will stay unchanged.</p></div>
+        </div>
+        <div class="dl-notice old-copy">
+          <i data-lucide="circle-plus" aria-hidden="true"></i>
+          <div><strong>Evidence source added</strong><p>Start an authoring run to synchronize configured evidence.</p></div>
+        </div>
+
+        <section class="dl-run">
+          <div class="new-copy"><h3>Update from source changes</h3><p>Doxloop will check all connected sources and update only affected pages.</p></div>
+          <div class="old-copy"><h3>New authoring run</h3><p>The agent can only edit the documentation project.</p></div>
+
+          <label class="dl-field-label" for="dl-request">
+            <strong class="new-copy">Anything specific to update?</strong>
+            <strong class="old-copy">What should the agent do?</strong>
+            <span class="new-copy">Optional</span>
+            <span class="old-copy">Describe the user outcome</span>
+          </label>
+          <textarea id="dl-request" placeholder="For example: Add the new payments API to the integration guide"></textarea>
+
+          <div class="dl-actions">
+            <button type="button" class="dl-secondary"><span class="new-copy">Check docs only</span><span class="old-copy">Start review</span></button>
+            <button type="button" class="dl-primary"><span class="new-copy">Update documentation</span><span class="old-copy">Start authoring</span></button>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.getElementById('doxloop-label-redesign');
+      const buttons = root.querySelectorAll('[data-copy]');
+      buttons.forEach((button) => {
+        button.addEventListener('click', () => {
+          root.classList.toggle('old', button.dataset.copy === 'old');
+          buttons.forEach((candidate) => candidate.setAttribute('aria-pressed', String(candidate === button)));
+        });
+      });
+    })();
+  </script>
+</div>

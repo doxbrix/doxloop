@@ -5,6 +5,79 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+### Added
+
+- `doxloop ui` opens a loopback-only project control center covering setup,
+  product evidence and GitHub connection tests, agent authoring, source
+  monitoring, proposal review, quality diagnostics, preview, publishing, and
+  complete project settings. Long-running work reports live output and can be
+  cancelled. `doxloop sync review --open` now deep-links to its Proposals page.
+- The unified proposal workspace compares rendered pages side by side or
+  stacked, folds unchanged content, exposes the source diff, and accepts one
+  hunk, one page, or a complete proposal. It uses a session cookie, validates
+  the Host and Origin headers, and never binds to a non-loopback interface.
+- `doxloop check` reports which documentation pages no longer match the
+  configured sources. It starts no agent and uses no model: the answer comes
+  from Git history, the recorded sync baseline, and the evidence map. It exits
+  `1` when pages are stale, so it can gate a pull request without credentials.
+- `.doxloop/evidence-map.json` records which configured source and which
+  source-relative paths produced each page. Authoring runs write it, and
+  `doxloop check` uses it to name the affected pages instead of reporting that
+  "a source changed".
+- A `sync` block in `.doxloop/project.json` configures automatic maintenance:
+  `mode`, the product `branch` to follow, the triggers to run `on`, `watch` and
+  `ignore` path patterns, and a run `budget`. Lock files and snapshots are
+  ignored by default; test files are not, because the authoring workflow treats
+  tests as evidence of supported behavior.
+- `doxloop sync <setup|status|now|review|history|off>` sets up automatic maintenance. `setup`
+  asks three questions and installs the triggers; `status` verifies the hook,
+  schedule, agent sign-in, evidence map, and current drift before anyone
+  depends on it; `now` generates one isolated proposal; `history` lists all
+  runs; `review --open` opens the review center; `off` removes triggers and
+  keeps the settings. The wizard prints the equivalent non-interactive command.
+- `doxloop sync review --open` opens the unified control center on its Proposals
+  page. Each page shows the current version beside the proposed version, both
+  rendered the way the published site renders them, with changed words
+  highlighted in place and untouched sections optionally folded away. View
+  controls switch between side by side and stacked or open the line-by-line
+  source diff with surrounding context and per-change Accept buttons. Acceptance
+  works at three levels: one change, one page, or the whole proposal, and
+  supporting files such as the evidence map are written automatically once every
+  page has been accepted.
+- Review-first synchronization works with ordinary local documentation folders
+  and does not require Git. Authoring happens in `.doxloop/runs/<id>/workspace`;
+  real files remain unchanged until acceptance. Accepted selections are checked
+  for intervening local edits, applied atomically, and validated. Partial
+  acceptance applies only selected line hunks, while the source baseline moves
+  forward only when the full proposal is accepted.
+- Git triggers are installed as marked blocks, so existing hooks are preserved,
+  a second documentation project can share the same file, and Doxloop never
+  blocks the Git operation. Pull and push triggers are mode-aware. `push`
+  installs a real `pre-push`
+  trigger; propose and auto hooks run a complete sync cycle while check hooks
+  remain credential-free. Authoring triggers generate a pending review without
+  editing or committing the actual documentation.
+- macOS schedules launch through the system shell so user-managed Node binaries
+  can run under launchd. Setup smoke-tests the job, and status reports scheduler
+  registration, running state, and the native last-exit result instead of
+  treating plist presence as proof of health.
+- Evidence-map validation warns when one source path is attached to more than
+  half the documentation pages, and authoring guidance requires an audit of
+  shared routers, entry points, and integration tests to reduce false-positive
+  stale-page reports.
+- A local scheduled run (`daily@HH:MM`) is registered with the platform's own
+  scheduler — launchd, a systemd timer, cron, or Task Scheduler — so unattended
+  runs use the agent CLI already signed in on that machine. Doxloop still never
+  accepts or stores a model API key.
+- Unattended authoring: `create` and `update` can run without a terminal, with
+  writes confined by the agent's own sandbox and a wall-clock budget. Validation
+  must still pass before the sync baseline advances, and automation never
+  deploys.
+- Validation warns when a page is missing from the evidence map, when the map
+  references a deleted page or an unconfigured source, and when a page is
+  recorded as needing human verification. These are warnings and appear only
+  once a project has an evidence map.
+
 ## 0.1.5 - 2026-07-26
 
 ### Changed

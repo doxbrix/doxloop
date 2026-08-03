@@ -41,6 +41,8 @@ import type {
   DoxbrixSiteConfig,
   GeneratorName,
   SourceBinding,
+  SyncConfig,
+  SyncTrigger,
 } from './types.js'
 
 export const PROJECT_FILE = join('.doxloop', 'project.json')
@@ -55,6 +57,28 @@ export function defaultDocumentationBrief(): DocumentationBrief {
     exclusions: [],
     accessibilityTarget: 'WCAG 2.2 AA',
   }
+}
+
+/**
+ * Lock files and snapshots never change reader-visible behavior. Test files are
+ * deliberately absent: the authoring workflow treats tests as evidence of
+ * supported behavior, so a changed test can legitimately change documentation.
+ */
+const DEFAULT_SYNC_IGNORE = [
+  'Cargo.lock',
+  'Gemfile.lock',
+  'composer.lock',
+  'go.sum',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'poetry.lock',
+  'yarn.lock',
+  '**/__snapshots__/**',
+  '*.snap',
+]
+
+export function defaultSyncConfig(): SyncConfig {
+  return { mode: 'check', on: [], watch: [], ignore: [...DEFAULT_SYNC_IGNORE] }
 }
 
 export async function findProjectRoot(start: string): Promise<string> {
@@ -97,7 +121,8 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     (project.defaultAgent !== undefined &&
       !['codex', 'claude', 'gemini'].includes(project.defaultAgent)) ||
     (project.documentation !== undefined &&
-      !isDocumentationBrief(project.documentation))
+      !isDocumentationBrief(project.documentation)) ||
+    (project.sync !== undefined && !isSyncConfig(project.sync))
   ) {
     throw new DoxloopError(`${PROJECT_FILE} has an unsupported format.`)
   }
@@ -116,6 +141,7 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     ...(project.application ? { application: project.application } : {}),
     ...(project.deployment ? { deployment: project.deployment } : {}),
     documentation: project.documentation ?? defaultDocumentationBrief(),
+    sync: { ...defaultSyncConfig(), ...(project.sync ?? {}) },
   }
 }
 
@@ -138,13 +164,14 @@ export async function saveProjectSettings(
       | 'designReferences'
       | 'application'
       | 'deployment'
-      | 'documentation']?: DoxloopProject[Key] | undefined
+      | 'documentation'
+      | 'sync']?: DoxloopProject[Key] | undefined
   },
 ): Promise<void> {
   const path = join(root, PROJECT_FILE)
   const raw = await readJson<Record<string, unknown>>(path)
   const next: Record<string, unknown> = { ...raw, ...changes }
-  for (const key of ['defaultAgent', 'application', 'deployment'] as const) {
+  for (const key of ['defaultAgent', 'application', 'deployment', 'sync'] as const) {
     if (key in changes && changes[key] === undefined) delete next[key]
   }
   await writeJson(path, next)
@@ -450,6 +477,7 @@ export async function scaffoldProject(options: {
     sources: options.sources,
     designReferences: options.designReferences ?? [],
     documentation: defaultDocumentationBrief(),
+    sync: defaultSyncConfig(),
   }
   await writeJson(join(root, PROJECT_FILE), project)
   if (adapter) {
@@ -468,7 +496,9 @@ export async function scaffoldProject(options: {
   }
   await mergeGitignore(root, [
     '.doxloop/cache/',
+    '.doxloop/runs/',
     '.doxloop/last-run.json',
+    '.doxloop/sync.log',
     ...(adapter?.project.gitignore ?? []),
   ])
   return root
@@ -481,11 +511,25 @@ export async function loadPages(root: string, project: DoxloopProject): Promise<
     'Documentation content directory',
   )
   await access(contentRoot)
-  const extensions =
-    project.generator === 'doxbrix'
-      ? ['.md', '.mdx']
-      : (await loadGeneratorAdapter(root, project)).project.pageExtensions
-  return listFiles(contentRoot, new Set(extensions))
+  return listFiles(contentRoot, await pageExtensions(root, project))
+}
+
+/**
+ * File extensions the configured generator treats as readable pages. Everything
+ * else inside the content directory is site data, not documentation.
+ */
+export async function pageExtensions(
+  root: string,
+  project: DoxloopProject,
+): Promise<Set<string>> {
+  if (project.generator === 'doxbrix') return new Set(['.md', '.mdx'])
+  try {
+    return new Set((await loadGeneratorAdapter(root, project)).project.pageExtensions)
+  } catch {
+    // A generator package that cannot be loaded should not turn every data file
+    // into a reviewable page.
+    return new Set(['.md', '.mdx'])
+  }
 }
 
 function isSafeRelativeDirectory(value: string): boolean {
@@ -743,9 +787,37 @@ function isSourceBindings(value: unknown): value is SourceBinding[] {
         typeof (source as Partial<SourceBinding>).path === 'string' &&
         ((source as Partial<SourceBinding>).kind === undefined ||
           (source as Partial<SourceBinding>).kind === 'directory' ||
-          (source as Partial<SourceBinding>).kind === 'openapi'),
+          (source as Partial<SourceBinding>).kind === 'openapi') &&
+        isRemoteSource((source as Partial<SourceBinding>).remote),
     )
   )
+}
+
+function isRemoteSource(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const remote = value as Record<string, unknown>
+  if (remote.provider !== 'github') return false
+  if (
+    typeof remote.repository !== 'string' ||
+    !/^[^/\s]+\/[^/\s]+$/.test(remote.repository) ||
+    typeof remote.branch !== 'string' ||
+    remote.branch.trim() === ''
+  ) return false
+  if (
+    remote.tokenEnv !== undefined &&
+    (typeof remote.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(remote.tokenEnv))
+  ) return false
+  if (remote.apiBaseUrl !== undefined) {
+    if (typeof remote.apiBaseUrl !== 'string') return false
+    try {
+      const url = new URL(remote.apiBaseUrl)
+      if (url.protocol !== 'https:' || url.username || url.password) return false
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 function isDesignReferences(value: unknown): value is DesignReference[] {
@@ -870,6 +942,70 @@ function isApplicationBaseUrl(value: unknown): value is string {
   } catch {
     return false
   }
+}
+
+export function parseSyncTrigger(raw: string): SyncTrigger {
+  const value = raw.trim().toLowerCase()
+  const interval = /^every@(\d+)([mh])$/.exec(value)
+  if (interval) {
+    const amount = Number(interval[1])
+    if (
+      (interval[2] === 'm' && amount >= 1 && amount <= 59) ||
+      (interval[2] === 'h' && amount >= 1 && amount <= 24)
+    ) return value as SyncTrigger
+  }
+  const daily = /^daily@(\d{2}):(\d{2})$/.exec(value)
+  if (daily) {
+    const hour = Number(daily[1])
+    const minute = Number(daily[2])
+    if (hour <= 23 && minute <= 59) return value as SyncTrigger
+  }
+  throw new DoxloopError(
+    `Invalid sync trigger "${raw}". Use every@Nm, every@Nh, or daily@HH:MM, for example every@15m.`,
+    2,
+  )
+}
+
+function isSyncTrigger(value: unknown): value is SyncTrigger {
+  if (typeof value !== 'string') return false
+  try {
+    parseSyncTrigger(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function isSyncConfig(value: unknown): value is SyncConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const sync = value as Partial<SyncConfig>
+  if (sync.mode !== undefined && !['check', 'propose', 'auto'].includes(sync.mode)) {
+    return false
+  }
+  if (
+    sync.branch !== undefined &&
+    (typeof sync.branch !== 'string' || sync.branch.trim() === '')
+  ) {
+    return false
+  }
+  if (sync.on !== undefined && (!Array.isArray(sync.on) || !sync.on.every(isSyncTrigger))) {
+    return false
+  }
+  const patternList = (candidate: unknown): boolean =>
+    candidate === undefined ||
+    (Array.isArray(candidate) &&
+      candidate.every((item) => typeof item === 'string' && item.trim() !== ''))
+  if (!patternList(sync.watch) || !patternList(sync.ignore)) return false
+  if (sync.budget === undefined) return true
+  if (!sync.budget || typeof sync.budget !== 'object' || Array.isArray(sync.budget)) {
+    return false
+  }
+  const limit = (candidate: unknown, max: number): boolean =>
+    candidate === undefined ||
+    (Number.isInteger(candidate) && (candidate as number) >= 1 && (candidate as number) <= max)
+  return (
+    limit(sync.budget.maxRunsPerDay, 1000) && limit(sync.budget.maxMinutes, 24 * 60)
+  )
 }
 
 function isDocumentationBrief(value: unknown): value is DocumentationBrief {

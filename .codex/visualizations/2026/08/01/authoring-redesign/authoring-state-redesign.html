@@ -1,0 +1,406 @@
+<div id="doxloop-authoring-redesign">
+  <style>
+    #doxloop-authoring-redesign {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: light-dark(#172033, #edf2fa);
+    }
+    #doxloop-authoring-redesign * { box-sizing: border-box; }
+    #doxloop-authoring-redesign .dl-window {
+      display: grid;
+      grid-template-columns: 184px minmax(0, 1fr);
+      min-height: 610px;
+      overflow: hidden;
+      border: 1px solid light-dark(#dce3ee, #30394a);
+      border-radius: 14px;
+      background: light-dark(#f7f9fc, #111722);
+      box-shadow: 0 18px 45px light-dark(rgb(21 35 58 / 12%), rgb(0 0 0 / 28%));
+    }
+    #doxloop-authoring-redesign .dl-sidebar {
+      padding: 18px 12px;
+      border-right: 1px solid light-dark(#e0e6ef, #293241);
+      background: light-dark(#ffffff, #151c28);
+    }
+    #doxloop-authoring-redesign .dl-brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 8px 18px;
+      font-weight: 500;
+    }
+    #doxloop-authoring-redesign .dl-brand-mark {
+      display: grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border-radius: 8px;
+      color: #ffffff;
+      background: #5b55e7;
+    }
+    #doxloop-authoring-redesign .dl-nav {
+      display: grid;
+      gap: 4px;
+    }
+    #doxloop-authoring-redesign .dl-nav-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      color: light-dark(#657087, #9eabc0);
+    }
+    #doxloop-authoring-redesign .dl-nav-item.active {
+      color: light-dark(#29245f, #eeecff);
+      background: light-dark(#eeedff, #2a2852);
+    }
+    #doxloop-authoring-redesign .dl-main { min-width: 0; }
+    #doxloop-authoring-redesign .dl-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 15px 22px;
+      border-bottom: 1px solid light-dark(#e0e6ef, #293241);
+      background: light-dark(#ffffff, #151c28);
+    }
+    #doxloop-authoring-redesign .dl-project { font-weight: 500; }
+    #doxloop-authoring-redesign .dl-state-switch {
+      display: flex;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 9px;
+      background: light-dark(#edf1f7, #252e3d);
+    }
+    #doxloop-authoring-redesign .dl-state-switch button,
+    #doxloop-authoring-redesign .dl-action,
+    #doxloop-authoring-redesign .dl-link-button,
+    #doxloop-authoring-redesign .dl-modal-actions button {
+      font: inherit;
+      cursor: pointer;
+    }
+    #doxloop-authoring-redesign .dl-state-switch button {
+      padding: 7px 10px;
+      border: 0;
+      border-radius: 7px;
+      color: light-dark(#657087, #aeb8c9);
+      background: transparent;
+    }
+    #doxloop-authoring-redesign .dl-state-switch button[aria-pressed="true"] {
+      color: light-dark(#192033, #f3f6fb);
+      background: light-dark(#ffffff, #3a4557);
+      box-shadow: 0 1px 2px light-dark(rgb(20 32 55 / 12%), rgb(0 0 0 / 24%));
+    }
+    #doxloop-authoring-redesign .dl-content {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 28px 28px 34px;
+    }
+    #doxloop-authoring-redesign .dl-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+    #doxloop-authoring-redesign h2,
+    #doxloop-authoring-redesign h3,
+    #doxloop-authoring-redesign p { margin: 0; }
+    #doxloop-authoring-redesign .dl-heading p,
+    #doxloop-authoring-redesign .dl-panel p,
+    #doxloop-authoring-redesign .dl-task p,
+    #doxloop-authoring-redesign .dl-source-row span {
+      color: light-dark(#68758a, #a7b2c4);
+    }
+    #doxloop-authoring-redesign .dl-heading p { margin-top: 6px; }
+    #doxloop-authoring-redesign .dl-badge {
+      flex: none;
+      padding: 5px 9px;
+      border-radius: 999px;
+      color: light-dark(#294c36, #bbf0c9);
+      background: light-dark(#dff4e5, #193b28);
+    }
+    #doxloop-authoring-redesign .dl-notice {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+      padding: 14px 15px;
+      border: 1px solid light-dark(#cfc9ff, #4b4883);
+      border-radius: 10px;
+      background: light-dark(#f0efff, #252343);
+    }
+    #doxloop-authoring-redesign .dl-notice strong { display: block; margin-bottom: 3px; }
+    #doxloop-authoring-redesign .dl-notice p { color: light-dark(#56527c, #c8c5ee); }
+    #doxloop-authoring-redesign .dl-panel {
+      padding: 18px;
+      border: 1px solid light-dark(#dfe5ee, #30394a);
+      border-radius: 12px;
+      background: light-dark(#ffffff, #171f2c);
+    }
+    #doxloop-authoring-redesign .dl-panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 15px;
+    }
+    #doxloop-authoring-redesign .dl-panel-head p { margin-top: 4px; }
+    #doxloop-authoring-redesign .dl-sources {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    #doxloop-authoring-redesign .dl-source-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 11px;
+      border-radius: 9px;
+      background: light-dark(#f5f7fa, #202937);
+    }
+    #doxloop-authoring-redesign .dl-source-row i { color: light-dark(#5550d6, #a9a5ff); }
+    #doxloop-authoring-redesign .dl-source-row strong,
+    #doxloop-authoring-redesign .dl-source-row span { display: block; }
+    #doxloop-authoring-redesign .dl-task-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    #doxloop-authoring-redesign .dl-task {
+      display: flex;
+      min-height: 112px;
+      flex-direction: column;
+      align-items: flex-start;
+      padding: 14px;
+      border: 1px solid light-dark(#dfe5ee, #30394a);
+      border-radius: 10px;
+      background: light-dark(#ffffff, #171f2c);
+    }
+    #doxloop-authoring-redesign .dl-task.primary {
+      border-color: light-dark(#aaa5ff, #6660bf);
+      background: light-dark(#f7f6ff, #24223f);
+    }
+    #doxloop-authoring-redesign .dl-task-icon {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 10px;
+      place-items: center;
+      border-radius: 8px;
+      color: light-dark(#4d48c4, #c4c1ff);
+      background: light-dark(#e9e7ff, #373365);
+    }
+    #doxloop-authoring-redesign .dl-task p { margin-top: 3px; }
+    #doxloop-authoring-redesign .dl-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin-top: 14px;
+      padding: 9px 13px;
+      border: 1px solid light-dark(#d4dae5, #3d485a);
+      border-radius: 8px;
+      color: light-dark(#263043, #e6ebf4);
+      background: light-dark(#ffffff, #202937);
+    }
+    #doxloop-authoring-redesign .dl-action.primary {
+      border-color: #5b55e7;
+      color: #ffffff;
+      background: #5b55e7;
+    }
+    #doxloop-authoring-redesign .dl-advanced {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-top: 14px;
+      padding: 14px 3px 0;
+      border-top: 1px solid light-dark(#e4e9f0, #30394a);
+    }
+    #doxloop-authoring-redesign .dl-advanced p { color: light-dark(#68758a, #a7b2c4); }
+    #doxloop-authoring-redesign .dl-link-button {
+      flex: none;
+      padding: 7px 9px;
+      border: 0;
+      color: light-dark(#a33434, #ffb9b9);
+      background: transparent;
+    }
+    #doxloop-authoring-redesign .dl-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgb(7 12 21 / 58%);
+    }
+    #doxloop-authoring-redesign .dl-window-wrap { position: relative; }
+    #doxloop-authoring-redesign .dl-modal-backdrop.open { display: flex; }
+    #doxloop-authoring-redesign .dl-modal {
+      width: min(430px, 100%);
+      padding: 20px;
+      border: 1px solid light-dark(#d8dee8, #3d4757);
+      border-radius: 12px;
+      color: light-dark(#172033, #edf2fa);
+      background: light-dark(#ffffff, #171f2c);
+      box-shadow: 0 24px 65px rgb(0 0 0 / 30%);
+    }
+    #doxloop-authoring-redesign .dl-modal p { margin-top: 7px; color: light-dark(#68758a, #a7b2c4); }
+    #doxloop-authoring-redesign .dl-modal-warning {
+      margin-top: 14px;
+      padding: 11px;
+      border-radius: 8px;
+      color: light-dark(#7c3131, #ffc1c1);
+      background: light-dark(#fff0f0, #3d2025);
+    }
+    #doxloop-authoring-redesign .dl-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    #doxloop-authoring-redesign .dl-modal-actions button {
+      padding: 8px 11px;
+      border: 1px solid light-dark(#d4dae5, #3d485a);
+      border-radius: 8px;
+      color: light-dark(#263043, #e6ebf4);
+      background: light-dark(#ffffff, #202937);
+    }
+    #doxloop-authoring-redesign .dl-modal-actions .danger {
+      border-color: light-dark(#bf4444, #a64a4a);
+      color: #ffffff;
+      background: light-dark(#b73c3c, #a43b3b);
+    }
+    #doxloop-authoring-redesign .fresh-only { display: none; }
+    #doxloop-authoring-redesign.fresh .existing-only { display: none; }
+    #doxloop-authoring-redesign.fresh .fresh-only { display: block; }
+    #doxloop-authoring-redesign.fresh .dl-sources.fresh-only { display: grid; }
+    @media (max-width: 620px) {
+      #doxloop-authoring-redesign .dl-window { grid-template-columns: 1fr; }
+      #doxloop-authoring-redesign .dl-sidebar { display: none; }
+      #doxloop-authoring-redesign .dl-topbar,
+      #doxloop-authoring-redesign .dl-heading { align-items: flex-start; flex-direction: column; }
+      #doxloop-authoring-redesign .dl-content { padding: 20px 16px 26px; }
+      #doxloop-authoring-redesign .dl-sources,
+      #doxloop-authoring-redesign .dl-task-grid { grid-template-columns: 1fr; }
+      #doxloop-authoring-redesign .dl-advanced { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+
+  <div class="dl-window-wrap">
+    <div class="dl-window">
+      <aside class="dl-sidebar" aria-label="Doxloop navigation">
+        <div class="dl-brand"><span class="dl-brand-mark"><i data-lucide="repeat-2" aria-hidden="true"></i></span>Doxloop</div>
+        <nav class="dl-nav">
+          <span class="dl-nav-item"><i data-lucide="home" aria-hidden="true"></i>Home</span>
+          <span class="dl-nav-item"><i data-lucide="database" aria-hidden="true"></i>Sources</span>
+          <span class="dl-nav-item active"><i data-lucide="sparkles" aria-hidden="true"></i>Authoring</span>
+          <span class="dl-nav-item"><i data-lucide="activity" aria-hidden="true"></i>Monitoring</span>
+          <span class="dl-nav-item"><i data-lucide="file-check-2" aria-hidden="true"></i>Proposals</span>
+          <span class="dl-nav-item"><i data-lucide="eye" aria-hidden="true"></i>Preview</span>
+        </nav>
+      </aside>
+
+      <main class="dl-main">
+        <div class="dl-topbar">
+          <span class="dl-project">Acme developer docs</span>
+          <div class="dl-state-switch" aria-label="Preview workspace state">
+            <button type="button" data-state="existing" aria-pressed="true">Existing docs</button>
+            <button type="button" data-state="fresh" aria-pressed="false">New workspace</button>
+          </div>
+        </div>
+
+        <div class="dl-content">
+          <div class="dl-heading existing-only">
+            <div><h2>Maintain documentation</h2><p>Update existing pages safely using your configured evidence.</p></div>
+            <span class="dl-badge">Documentation exists</span>
+          </div>
+          <div class="dl-heading fresh-only">
+            <div><h2>Create documentation</h2><p>Generate the first complete documentation set from trusted evidence.</p></div>
+            <span class="dl-badge">First run</span>
+          </div>
+
+          <div class="dl-notice existing-only">
+            <i data-lucide="circle-plus" aria-hidden="true"></i>
+            <div><strong>New source “payments-api” was added</strong><p>Run a source update to integrate it. Existing unrelated pages, navigation, and styling will be preserved.</p></div>
+          </div>
+
+          <section class="dl-panel" aria-label="Authoring action">
+            <div class="dl-panel-head existing-only">
+              <div><h3>What would you like to do?</h3><p>Doxloop chooses the safe authoring mode from the workspace state.</p></div>
+            </div>
+            <div class="dl-panel-head fresh-only">
+              <div><h3>Ready for the first authoring run</h3><p>Doxloop will discover the product and propose a complete structure before editing.</p></div>
+            </div>
+
+            <div class="dl-sources">
+              <div class="dl-source-row"><i data-lucide="folder-git-2" aria-hidden="true"></i><div><strong>product-code</strong><span>Git source · unchanged</span></div></div>
+              <div class="dl-source-row"><i data-lucide="braces" aria-hidden="true"></i><div><strong>payments-api</strong><span>OpenAPI · new source</span></div></div>
+            </div>
+
+            <div class="dl-task-grid existing-only">
+              <div class="dl-task primary">
+                <span class="dl-task-icon"><i data-lucide="refresh-cw" aria-hidden="true"></i></span>
+                <strong>Sync source changes</strong>
+                <p>Inspect all sources and update only affected documentation.</p>
+                <button type="button" class="dl-action primary">Update documentation <i data-lucide="arrow-right" aria-hidden="true"></i></button>
+              </div>
+              <div class="dl-task">
+                <span class="dl-task-icon"><i data-lucide="pencil-line" aria-hidden="true"></i></span>
+                <strong>Make a scoped change</strong>
+                <p>Describe a specific page, workflow, or content outcome.</p>
+                <button type="button" class="dl-action">Describe change</button>
+              </div>
+            </div>
+
+            <div class="fresh-only">
+              <button type="button" class="dl-action primary">Create documentation <i data-lucide="arrow-right" aria-hidden="true"></i></button>
+            </div>
+
+            <div class="dl-advanced existing-only">
+              <div><strong>Need to start over?</strong><p>Full regeneration may restructure or replace existing pages.</p></div>
+              <button type="button" class="dl-link-button" id="dl-open-regenerate">Regenerate all docs…</button>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="dl-modal-backdrop" id="dl-regenerate-modal" role="dialog" aria-modal="true" aria-labelledby="dl-modal-title">
+      <div class="dl-modal">
+        <h3 id="dl-modal-title">Regenerate the complete documentation?</h3>
+        <p>This starts broad discovery again and may rewrite navigation, theme, page structure, and existing content.</p>
+        <div class="dl-modal-warning"><strong>Recommended:</strong> use Update unless you intentionally want a complete redesign.</div>
+        <div class="dl-modal-actions">
+          <button type="button" id="dl-cancel-regenerate">Cancel</button>
+          <button type="button" class="danger">Regenerate everything</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.getElementById('doxloop-authoring-redesign');
+      const stateButtons = root.querySelectorAll('[data-state]');
+      const modal = root.querySelector('#dl-regenerate-modal');
+      const openButton = root.querySelector('#dl-open-regenerate');
+      const cancelButton = root.querySelector('#dl-cancel-regenerate');
+
+      stateButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const fresh = button.dataset.state === 'fresh';
+          root.classList.toggle('fresh', fresh);
+          stateButtons.forEach((candidate) => candidate.setAttribute('aria-pressed', String(candidate === button)));
+          modal.classList.remove('open');
+        });
+      });
+
+      openButton.addEventListener('click', () => modal.classList.add('open'));
+      cancelButton.addEventListener('click', () => modal.classList.remove('open'));
+      modal.addEventListener('click', (event) => {
+        if (event.target === modal) modal.classList.remove('open');
+      });
+    })();
+  </script>
+</div>

@@ -259,7 +259,11 @@ the next manifest row. Treat the screenshot completeness gate as blocking.
    correct their claims; do not let an unrelated change summary redefine the
    requested scope. When no baseline exists, inspect the configured sources
    directly.
-2. Find pages that describe affected reader-visible behavior.
+2. Find pages that describe affected reader-visible behavior. Read
+   `.doxloop/evidence-map.json` first when it exists: it records which sources
+   and paths produced each page, so it names the candidate pages directly.
+   Verify those candidates against the source rather than trusting the map, and
+   still check for pages the map does not cover.
 3. Reuse the existing expert profile when it remains valid. Read
    [references/template-routing.md](references/template-routing.md), the
    applicable domain/type references, and
@@ -367,14 +371,27 @@ For editing tasks:
 
 1. Run `doxloop test`.
 2. Fix errors caused by the work.
-3. Review the Git diff for accidental source or secret inclusion.
-4. Compare the result with the agreed coverage plan.
-5. Read [references/quality.md](references/quality.md), clear every hard gate,
+3. Record the evidence map. For every page you created or changed, write the
+   configured sources and the source-relative paths or API operations you used
+   as evidence to `.doxloop/evidence-map.json`, following
+   [references/project-format.md](references/project-format.md). Keep entries
+   for untouched pages, and remove entries for pages you deleted or renamed.
+   This is what lets `doxloop check` name the affected pages when the product
+   changes later, so a page written without it will not be maintained. Do not
+   attach an omnibus router, integration test, or shared entry-point file to
+   every page merely because it passes through several workflows. Record such
+   a shared file only where a claim on that page depends on the changed region
+   or assertion and no narrower public-interface evidence supports it. Before
+   finishing, review any one path referenced by more than half of the pages and
+   remove incidental page associations.
+4. Review the Git diff for accidental source or secret inclusion.
+5. Compare the result with the agreed coverage plan.
+6. Read [references/quality.md](references/quality.md), clear every hard gate,
    and score the finished agreed scope.
-6. For screenshot-enabled guides, reconcile the final procedure with the
+7. For screenshot-enabled guides, reconcile the final procedure with the
    capture manifest and inspect the rendered step/image sequence at desktop and
    narrow widths.
-7. Summarize changed pages and brief fields, evidence used, validation results,
+8. Summarize changed pages and brief fields, evidence used, validation results,
    the quality score, remaining recommendations, and unverified assumptions.
 
 Never run `doxloop deploy`, publish packages, push commits, or send source code

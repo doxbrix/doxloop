@@ -1,5 +1,6 @@
 import { access, readFile } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
+import { EVIDENCE_MAP_FILE, readEvidenceMap } from './evidence.js'
 import { pathExists, resolveContainedDirectory } from './fs.js'
 import type { GeneratorAdapter } from './generator-api.js'
 import { loadGeneratorAdapter } from './generators.js'
@@ -14,6 +15,7 @@ import {
 } from './project.js'
 import type {
   DoxbrixNavNode,
+  SourceBinding,
   ValidationIssue,
   ValidationResult,
 } from './types.js'
@@ -84,9 +86,103 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     }
   }
 
+  issues.push(
+    ...(await validateEvidenceMap(
+      root,
+      files.map((path) => relativePath(root, path)),
+      project.sources,
+    )),
+  )
+
   const errors = issues.filter((issue) => issue.severity === 'error').length
   const warnings = issues.length - errors
   return { issues, pages, errors, warnings }
+}
+
+/**
+ * Coverage checks for `.doxloop/evidence-map.json`. These are warnings and run
+ * only once a project has a map, so projects that predate it are unaffected
+ * and a partially recorded map never blocks validation.
+ */
+async function validateEvidenceMap(
+  root: string,
+  pageFiles: string[],
+  sources: SourceBinding[],
+): Promise<ValidationIssue[]> {
+  const map = await readEvidenceMap(root)
+  if (!map) return []
+  const issues: ValidationIssue[] = []
+  const pages = new Set(pageFiles)
+  const sourceNames = new Set(sources.map((source) => source.name))
+  const pathCoverage = new Map<string, Set<string>>()
+
+  for (const [page, evidence] of Object.entries(map.pages)) {
+    if (!pages.has(page)) {
+      issues.push(
+        warning(
+          'evidence-map-orphan',
+          `The evidence map records "${page}", which is not a documentation page. Remove the entry when a page is deleted or renamed.`,
+          EVIDENCE_MAP_FILE,
+        ),
+      )
+      continue
+    }
+    for (const entry of evidence.sources) {
+      if (!sourceNames.has(entry.source)) {
+        issues.push(
+          warning(
+            'evidence-map-unknown-source',
+            `The evidence map binds "${page}" to source "${entry.source}", which is not configured.`,
+            EVIDENCE_MAP_FILE,
+          ),
+        )
+      }
+      for (const path of entry.paths ?? []) {
+        const key = `${entry.source}:${path}`
+        const covered = pathCoverage.get(key) ?? new Set<string>()
+        covered.add(page)
+        pathCoverage.set(key, covered)
+      }
+    }
+    if (evidence.confidence === 'needs-human') {
+      issues.push(
+        warning(
+          'evidence-unverified',
+          'A claim on this page could not be verified from configured evidence and needs human confirmation.',
+          page,
+        ),
+      )
+    }
+  }
+
+  if (pageFiles.length >= 4) {
+    for (const [key, covered] of pathCoverage) {
+      if (covered.size <= pageFiles.length / 2) continue
+      const separator = key.indexOf(':')
+      const source = key.slice(0, separator)
+      const path = key.slice(separator + 1)
+      issues.push(
+        warning(
+          'evidence-map-broad-path',
+          `Source path "${path}" from "${source}" is attached to ${covered.size} of ${pageFiles.length} pages. Verify that each page directly depends on it; broad evidence makes localized changes mark most documentation stale.`,
+          EVIDENCE_MAP_FILE,
+        ),
+      )
+    }
+  }
+
+  for (const page of pageFiles) {
+    if (!map.pages[page]) {
+      issues.push(
+        warning(
+          'evidence-map-missing-page',
+          'This page has no evidence-map entry, so `doxloop check` cannot report when its sources change.',
+          page,
+        ),
+      )
+    }
+  }
+  return issues
 }
 
 function validateDoxbrixNavigation(
