@@ -6,6 +6,7 @@ import { chooseAgent, installSkill } from './agents.js'
 import { DoxloopError, UsageError } from './errors.js'
 import { generatorSkillName } from './generators.js'
 import { isSpecUrl, loadProject, sourceKind } from './project.js'
+import { monitorRemoteSources } from './remote-monitor.js'
 import { collectSourceChanges, formatSourceChanges, recordSyncState } from './sync.js'
 import { formatValidation, validateProject } from './validation.js'
 import type {
@@ -31,7 +32,7 @@ export function resolveScreenshotIntent(
   return 'auto'
 }
 
-const REASONING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
+const REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number]
 const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number]
@@ -66,11 +67,17 @@ export async function runAuthor(options: {
   nonInteractive?: boolean
   timeoutMinutes?: number
 }): Promise<number> {
-  const project = await loadProject(options.root)
+  let project = await loadProject(options.root)
+  let remoteChanges: Awaited<ReturnType<typeof monitorRemoteSources>>['changes'] | undefined
+  if (project.sources.some((source) => source.remote)) {
+    const monitored = await monitorRemoteSources(options.root, project)
+    project = monitored.project
+    remoteChanges = monitored.changes
+  }
   const changeSummary =
     options.mode === 'update'
       ? (options.changeSummary ??
-        formatSourceChanges(await collectSourceChanges(options.root, project.sources)))
+        formatSourceChanges(remoteChanges ?? await collectSourceChanges(options.root, project.sources)))
       : undefined
   const prompt = authorPrompt(
     options.mode,
@@ -272,7 +279,10 @@ export function agentArguments(
     args.push(name === 'claude' ? '--model' : '-m', options.model)
   }
   if (options.reasoning && name === 'codex') {
-    args.push('-c', `model_reasoning_effort=${options.reasoning}`)
+    const reasoning = options.reasoning === 'minimal' && options.model?.startsWith('gpt-5.6-luna')
+      ? 'none'
+      : options.reasoning
+    args.push('-c', `model_reasoning_effort=${reasoning}`)
   }
   if (options.effort && name === 'claude') args.push('--effort', options.effort)
   if (options.mode === 'review') {
@@ -658,6 +668,8 @@ export function authorPrompt(
           .map((source) =>
             (source.kind ?? 'directory') === 'openapi'
               ? `- ${source.name}: OpenAPI specification at ${source.path} — read it as authoritative API evidence for endpoints, parameters, schemas, and examples.`
+              : source.remote
+                ? `- ${source.name}: read-only Git repository ${source.remote.repository}, branch ${source.remote.branch}${source.remote.subdirectory ? `, scoped to ${source.remote.subdirectory}` : ''}, materialized at ${source.path}`
               : `- ${source.name}: ${source.path}`,
           )
           .join('\n')}`
@@ -682,7 +694,7 @@ export function authorPrompt(
   const screenshotText = screenshotPrompt(mode, screenshots, application)
   const tasks: Record<AuthorMode, string> = {
     create:
-      'Begin with read-only product discovery. Classify the product, identify its public capabilities and likely readers, map the documentation types supported by source evidence, infer the most relevant expert domain template and documentation-type playbooks, and apply audience as flavor within that combination. Compose a professional semantic navigation plan from the common site frame, selected type blocks, domain overlays, and audience ordering; include both top-navigation and left-navigation outlines, remove unsupported or duplicate destinations, and implement the result through the generator-native navigation system. Capture evidence-backed theme tokens, fonts, and public brand assets. Do not force the user to choose or know a template. When the expertise profile is clear, state it and continue; ask only when competing profiles would materially change the reader, scope, or outcomes. Before editing, present your findings, captured brand identity, prioritized documentation plan, and navigation outline. If material choices remain unresolved, ask for them once in one consolidated message and wait for one response; otherwise state reasonable assumptions and continue without asking. Do not ask follow-up questions unless a contradiction blocks accurate work. Save the confirmed or inferred reader and editorial decisions under `documentation` in `.doxloop/project.json`, preserving all other settings; do not persist template identifiers as requirements. Then create or improve a comprehensive documentation set for the agreed scope, apply the confirmed identity through the generator-native theme, complete factual, task, editorial, and accessibility passes, and clear every professional quality gate. Do not optimize for the minimum number of pages.',
+      'Begin with read-only product discovery. Classify the product, identify its public capabilities and likely readers, map the documentation types supported by source evidence, infer the most relevant expert domain template and documentation-type playbooks, and apply audience as flavor within that combination. Compose a professional semantic navigation plan from the common site frame, selected type blocks, domain overlays, and audience ordering; include both top-navigation and left-navigation outlines, remove unsupported or duplicate destinations, and implement the result through the generator-native navigation system. Capture evidence-backed theme tokens, fonts, and public brand assets. Do not force the user to choose or know a template. When the expertise profile is clear, state it and continue; ask only when competing profiles would materially change the reader, scope, or outcomes. Before editing, present your findings, captured brand identity, prioritized documentation plan, and navigation outline as a concise progress update. That update is not a stopping point: unless an essential material choice genuinely requires a user response, continue immediately in this same run from discovery through file edits and validation. A discovery summary, coverage plan, or navigation outline by itself is an incomplete create run and must never be the final response. If material choices remain unresolved, ask for them once in one consolidated message and wait for one response; otherwise state reasonable assumptions and continue without asking. Do not ask follow-up questions unless a contradiction blocks accurate work. Save the confirmed or inferred reader and editorial decisions under `documentation` in `.doxloop/project.json`, preserving all other settings; do not persist template identifiers as requirements. Then create or improve a comprehensive documentation set for the agreed scope, apply the confirmed identity through the generator-native theme, complete factual, task, editorial, and accessibility passes, and clear every professional quality gate. Replace every generated starter page and remove every `doxloop:starter-page` marker before finishing. Do not optimize for the minimum number of pages.',
     update:
       'Classify the request as source synchronization, a scoped content change, or transformation of existing documentation. For source synchronization, inspect product changes and update all documentation affected by reader-visible behavior, including native documentation theme configuration when product theme tokens or public brand assets changed. When this prompt includes a source-change summary, start from the listed commits and files and inspect their diffs instead of re-reading the whole source. For a requested transformation, inspect existing pages first, infer the relevant domain/type expertise and audience flavor, preserve or correct claims from configured evidence, and do not let an unrelated change summary redefine the requested scope. When pages move, a reader journey is added, or information architecture changes, compose the common frame, type blocks, domain overlays, and audience ordering into one semantic navigation plan and translate it through the generator-native navigation system. Follow the persisted documentation brief, verify changed facts and examples, complete editorial and accessibility passes, and clear every professional quality gate. Identify related coverage gaps and recommend additions, but leave unrelated pages and brief decisions unchanged unless the user approves broader work.',
     review:

@@ -1022,7 +1022,7 @@ Start an authoring agent with the project-local skill.
 Options:
 ${createOptions}  --agent <name>           codex, claude, or gemini
   --model <name>           Model passed to the selected agent CLI
-  --reasoning <level>      Codex reasoning effort: minimal, low, medium, high, or xhigh
+  --reasoning <level>      Codex reasoning effort (supported levels depend on the model)
   --effort <level>         Claude effort: low, medium, high, xhigh, or max
   --reference <url>        Use a documentation design reference; may be repeated
 ${screenshotOptions}  --print                  Print the prepared prompt instead of starting an agent
@@ -1073,7 +1073,7 @@ Actions:
 
 Options:
   --mode <name>            check (report only), propose, or auto
-  --on <frequency>         every@Nm, every@Nh, daily@HH:MM, or manual
+  --on <frequency>         daily, weekdays, weekly, monthly, interval, or manual syntax
   --branch <name>          Product branch documentation follows
   --quiet                  Print nothing when documentation is current
   --host <host>            Review server host (default: 127.0.0.1)

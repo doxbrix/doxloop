@@ -48,6 +48,20 @@ describe('scheduleFrequency', () => {
       kind: 'daily',
       time: { hour: 9, minute: 30 },
     })
+    expect(scheduleFrequency(['weekdays@08:15'])).toEqual({
+      kind: 'weekdays',
+      time: { hour: 8, minute: 15 },
+    })
+    expect(scheduleFrequency(['weekly@wed@10:45'])).toEqual({
+      kind: 'weekly',
+      weekday: 3,
+      time: { hour: 10, minute: 45 },
+    })
+    expect(scheduleFrequency(['monthly@15@07:00'])).toEqual({
+      kind: 'monthly',
+      day: 15,
+      time: { hour: 7, minute: 0 },
+    })
   })
 })
 
@@ -131,6 +145,27 @@ describe('job definitions', () => {
     })
     expect(plist).toContain('<key>StartInterval</key>\n  <integer>900</integer>')
     expect(plist).not.toContain('StartCalendarInterval')
+  })
+
+  test('renders weekday, weekly, and monthly calendar schedules', () => {
+    const weekdays = renderLaunchAgent({
+      label: 'doxloop-acme-docs-1234abcd', root,
+      frequency: { kind: 'weekdays', time },
+    })
+    expect(weekdays).toContain('<array>')
+    expect(weekdays).toContain('<key>Weekday</key>')
+    expect(weekdays).toContain('<integer>5</integer>')
+
+    const weekly = renderSystemdTimer({
+      root, frequency: { kind: 'weekly', weekday: 1, time },
+    })
+    expect(weekly).toContain('OnCalendar=Mon *-*-* 09:00:00')
+
+    const monthly = cronLine({
+      label: 'doxloop-acme-docs-1234abcd', root,
+      frequency: { kind: 'monthly', day: 15, time },
+    })
+    expect(monthly.startsWith('0 9 15 * * ')).toBe(true)
   })
 })
 

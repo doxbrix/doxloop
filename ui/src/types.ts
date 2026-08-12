@@ -1,7 +1,8 @@
 export interface SourceRemote {
-  provider: 'github'
+  provider: 'git' | 'github'
   repository: string
   branch: string
+  subdirectory?: string
   tokenEnv?: string
   apiBaseUrl?: string
 }

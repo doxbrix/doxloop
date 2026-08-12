@@ -1,4 +1,7 @@
-import type { ComponentChildren, JSX } from 'preact'
+import { createPortal } from 'preact/compat'
+import { toChildArray } from 'preact'
+import type { ComponentChildren, JSX, VNode } from 'preact'
+import { useEffect, useId, useRef, useState } from 'preact/hooks'
 import { Icon } from './icons'
 
 /**
@@ -103,10 +106,81 @@ export function Input(props: JSX.InputHTMLAttributes<HTMLInputElement>) {
 }
 
 export function Select({ icon, ...props }: JSX.SelectHTMLAttributes<HTMLSelectElement> & { icon?: string }) {
-  return <span class={`select-wrap ${icon ? 'with-icon' : ''}`}>
+  const { children, class: className, disabled, name, onChange, value } = props
+  const root = useRef<HTMLSpanElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const listboxId = useId()
+  const [open, setOpen] = useState(false)
+  const [highlighted, setHighlighted] = useState(0)
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 0 })
+  const options = toChildArray(children).flatMap((child) => {
+    if (!child || typeof child !== 'object' || (child as VNode).type !== 'option') return []
+    const option = child as VNode<JSX.OptionHTMLAttributes<HTMLOptionElement>>
+    const label = toChildArray(option.props.children).join('')
+    return [{ value: String(option.props.value ?? label), label, disabled: Boolean(option.props.disabled) }]
+  })
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === String(value ?? '')))
+  const selected = options[selectedIndex]
+  const openMenu = () => {
+    if (disabled || !root.current) return
+    const rect = root.current.getBoundingClientRect()
+    const menuHeight = Math.min(248, options.length * 39 + 10)
+    const spaceBelow = innerHeight - rect.bottom - 8
+    const above = spaceBelow < Math.min(180, menuHeight) && rect.top > spaceBelow
+    setPosition({ left: rect.left, top: above ? Math.max(8, rect.top - menuHeight - 4) : rect.bottom + 4, width: rect.width })
+    setHighlighted(selectedIndex)
+    setOpen(true)
+  }
+  const choose = (nextValue: string, optionDisabled = false) => {
+    if (optionDisabled) return
+    onChange?.({ currentTarget: { value: nextValue }, target: { value: nextValue } } as unknown as JSX.TargetedEvent<HTMLSelectElement, Event>)
+    setOpen(false)
+    root.current?.querySelector('button')?.focus()
+  }
+  const move = (direction: 1 | -1) => {
+    if (!options.length) return
+    let next = highlighted
+    do next = (next + direction + options.length) % options.length
+    while (options[next]?.disabled && next !== highlighted)
+    setHighlighted(next)
+  }
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) openMenu()
+      else move(event.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (event.key === 'Home' && open) { event.preventDefault(); setHighlighted(0); return }
+    if (event.key === 'End' && open) { event.preventDefault(); setHighlighted(Math.max(0, options.length - 1)); return }
+    if ((event.key === 'Enter' || event.key === ' ') && open) { event.preventDefault(); const option = options[highlighted]; if (option) choose(option.value, option.disabled); return }
+    if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false) }
+  }
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (!root.current?.contains(target) && !menu.current?.contains(target)) setOpen(false)
+    }
+    const close = () => setOpen(false)
+    addEventListener('mousedown', closeOutside)
+    addEventListener('resize', close)
+    addEventListener('scroll', close, true)
+    return () => {
+      removeEventListener('mousedown', closeOutside)
+      removeEventListener('resize', close)
+      removeEventListener('scroll', close, true)
+    }
+  }, [open])
+  return <span ref={root} class={`select-wrap custom-select ${icon ? 'with-icon' : ''}`}>
     {icon && <Icon name={icon} size={15} class="lead-icon" />}
-    <select {...props} class={`input ${props.class ?? ''}`} />
-    <Icon name="chevronDown" size={14} />
+    <button type="button" class={`input custom-select-trigger ${className ?? ''}`} disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listboxId : undefined} aria-activedescendant={open ? `${listboxId}-${highlighted}` : undefined} onClick={() => open ? setOpen(false) : openMenu()} onKeyDown={onKeyDown}>
+      <span>{selected?.label || 'Select an option'}</span><Icon name="chevronDown" size={14} />
+    </button>
+    {name && <input type="hidden" name={name} value={String(value ?? '')} />}
+    {open && typeof document !== 'undefined' && createPortal(<div ref={menu} id={listboxId} class="custom-select-menu" role="listbox" style={`left:${position.left}px;top:${position.top}px;width:${position.width}px`}>
+      {options.map((option, index) => <button key={`${option.value}-${index}`} type="button" id={`${listboxId}-${index}`} role="option" aria-selected={index === selectedIndex} class={`${index === selectedIndex ? 'selected' : ''} ${index === highlighted ? 'highlighted' : ''}`} disabled={option.disabled} onMouseEnter={() => setHighlighted(index)} onClick={() => choose(option.value, option.disabled)}><span>{option.label}</span>{index === selectedIndex && <Icon name="check" size={14} />}</button>)}
+    </div>, document.body)}
   </span>
 }
 

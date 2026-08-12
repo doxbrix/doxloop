@@ -170,14 +170,21 @@ states that could not be verified in the discovery summary.
 
 Before editing any documentation:
 
-1. Present a concise discovery summary. Include the inferred expert domain/type
-   combination and how the confirmed or likely audience changes its emphasis.
+1. Present a concise discovery summary as a progress update, not as the final
+   response. Include the inferred expert domain/type combination and how the
+   confirmed or likely audience changes its emphasis.
 2. Propose a documentation set grouped as **must have**, **next**, and **later**.
 3. Explain why each proposed page is relevant to the source and reader.
 4. When a material decision remains unresolved, ask once for confirmation and
    combine at most three essential decisions in that single message.
 5. Wait for that one response, then continue without follow-up questions unless
    the response introduces a contradiction that blocks accurate work.
+
+The discovery summary, proposed documentation set, coverage plan, and
+navigation outline are intermediate work. They are never a completed create
+run. When no essential material decision requires a response, continue in the
+same run directly into configuration updates, documentation edits, navigation,
+quality passes, and validation. Do not end the run after stating the plan.
 
 Do not ask a question merely because this is a create task. If the request,
 persisted brief, and source evidence already define the audience, outcomes,
@@ -232,6 +239,10 @@ scope:
 Prefer useful detail over brevity. Do not stop after replacing the starter
 landing page and quickstart when the source supports additional must-have
 documentation.
+
+Before finishing, replace every generated starter page and remove every
+`doxloop:starter-page` marker. A final response is allowed only after files have
+been edited and the required validation command has passed.
 
 Complete four passes before finishing:
 

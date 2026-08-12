@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathExists, readJson } from './fs.js'
 import { isSpecUrl, sourceKind } from './project.js'
+import { remoteHead } from './remote-source.js'
 import type { SourceBinding, SourceChange, SyncState } from './types.js'
 
 const SPEC_BASELINE = 'openapi-spec'
@@ -40,6 +41,13 @@ export async function recordSyncState(
           recordedAt: new Date().toISOString(),
           contentFingerprint: fingerprint,
         }
+      }
+      continue
+    }
+    if (source.remote) {
+      state.sources[source.name] = {
+        commit: await remoteHead(source.remote),
+        recordedAt: new Date().toISOString(),
       }
       continue
     }

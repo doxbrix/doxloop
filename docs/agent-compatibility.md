@@ -20,8 +20,9 @@ Review is deliberately non-interactive so it can remain read-only. Create may
 pause once for consolidated reader or scope decisions.
 
 Doxloop forwards `--model` using each CLI's native model option. The
-`--reasoning` option is Codex-only and accepts `minimal`, `low`, `medium`,
-`high`, or `xhigh`.
+`--reasoning` option is Codex-only; supported levels depend on the selected
+model. Doxloop's UI limits the reasoning picker to that model's supported
+values.
 
 ## Project skills
 

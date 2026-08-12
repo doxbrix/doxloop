@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ChildProcess } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
   access,
@@ -169,7 +170,10 @@ export async function detectAgents(): Promise<
   return found
 }
 
-export async function installAgent(name: AgentName): Promise<{
+export async function installAgent(name: AgentName, options: {
+  onOutput?: (output: string) => void
+  onChild?: (child: ChildProcess) => void
+} = {}): Promise<{
   name: AgentName
   executable: string
 }> {
@@ -186,9 +190,14 @@ export async function installAgent(name: AgentName): Promise<{
 
   const exitCode = await new Promise<number>((resolveInstall, rejectInstall) => {
     const child = spawn(npm, ['install', '--global', agent.packageName], {
-      stdio: 'inherit',
+      stdio: options.onOutput ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       env: process.env,
     })
+    options.onChild?.(child)
+    if (options.onOutput) {
+      child.stdout?.on('data', (chunk: Buffer | string) => options.onOutput?.(chunk.toString()))
+      child.stderr?.on('data', (chunk: Buffer | string) => options.onOutput?.(chunk.toString()))
+    }
     child.once('error', (error) => {
       rejectInstall(
         new DoxloopError(

@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { access, appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
+import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
 import { applySyncConfig, computeConfiguredDrift, disableSync, formatSyncStatus, parseSyncMode, parseTriggerList } from './autosync.js'
 import { authenticatedRequest, loadUserConfig, logout } from './auth.js'
 import { DoxloopError } from './errors.js'
@@ -25,6 +25,16 @@ import {
 import { effectiveDeployment } from './settings.js'
 import { testRemoteSource } from './remote-monitor.js'
 import {
+  listRemoteBranches,
+  listRemoteDirectories,
+  materializeRemoteSource,
+  parseGitRepository,
+  portableSourcePath,
+  rememberRemoteCredential,
+  remoteCredentialEnvironment,
+  remoteHead,
+} from './remote-source.js'
+import {
   acceptSyncChanges,
   listSyncRuns,
   readSyncRun,
@@ -42,6 +52,7 @@ import type {
   DeploymentConfig,
   DocumentationBrief,
   DoxloopProject,
+  RemoteSource,
   SourceBinding,
   SyncConfig,
 } from './types.js'
@@ -84,7 +95,6 @@ const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url))
 const DOXBRIX_CSS = resolve(PACKAGE_ROOT, 'assets', 'doxbrix-preview.css')
 const MAX_BODY_BYTES = 1_000_000
-const MAX_JOB_LINES = 800
 const MAX_PERSISTED_JOBS = 50
 const UI_JOBS_FILE = join('.doxloop', 'ui-jobs.json')
 const UI_JOB_LOG_DIRECTORY = join('.doxloop', 'ui-job-logs')
@@ -104,7 +114,6 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     job.status = 'failed'
     job.finishedAt = new Date().toISOString()
     job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved; start the documentation update again.')
-    if (job.lines.length > MAX_JOB_LINES) job.lines.splice(0, job.lines.length - MAX_JOB_LINES)
     recoveredJobs = true
   }
   const runtime: UiRuntime = {
@@ -205,6 +214,37 @@ async function handleApi(
     sendJson(response, 200, await buildUiState(runtime))
     return
   }
+  if (request.method === 'POST' && url.pathname === '/api/setup/browse-directory') {
+    sendJson(response, 200, { path: await chooseLocalDirectory() ?? null })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/validate') {
+    sendJson(response, 200, await validateSetupPaths(runtime, await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/git/test') {
+    const body = recordBody(await readJsonBody(request))
+    const repository = parseGitRepository(stringValue(body.repository))
+    configureGitAccess(body, repository)
+    const seed = {
+      provider: 'git' as const,
+      repository,
+      branch: optionalString(body.branch) ?? 'main',
+    }
+    const branches = await listRemoteBranches(seed)
+    if (branches.length === 0) throw new DoxloopError('The repository has no readable branches.')
+    const requested = optionalString(body.branch)
+    const selected = branches.find((branch) => branch.name === requested)
+      ?? branches[0]!
+    sendJson(response, 200, { repository, branch: selected.name, head: selected.head, branches: branches.map((branch) => branch.name) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/git/folders') {
+    const body = recordBody(await readJsonBody(request))
+    const remote = remoteSourceFromSetupBody(body)
+    sendJson(response, 200, { directories: await listRemoteDirectories(remote) })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/jobs') {
     sendJson(response, 200, [...runtime.jobs.values()].map(publicJob).reverse())
     return
@@ -234,7 +274,6 @@ async function handleApi(
       job.status = 'cancelled'
       job.finishedAt = new Date().toISOString()
       job.lines.push('The run was cancelled from the Doxloop UI.')
-      if (job.lines.length > MAX_JOB_LINES) job.lines.splice(0, job.lines.length - MAX_JOB_LINES)
       queueUiJobLog(runtime, job.id, '\nThe run was cancelled from the Doxloop UI.\n')
       job.child?.kill('SIGTERM')
       delete job.child
@@ -277,7 +316,7 @@ async function handleApi(
   if (sourceTest && request.method === 'POST') {
     const project = await loadProject(requireProject(runtime))
     const source = project.sources.find((item) => item.name === decodeURIComponent(sourceTest[1]!))
-    if (!source?.remote) throw new DoxloopError('Save a remote GitHub connection before testing it.')
+    if (!source?.remote) throw new DoxloopError('Save a remote Git connection before testing it.')
     sendJson(response, 200, await testRemoteSource(source.remote))
     return
   }
@@ -371,15 +410,20 @@ async function handleApi(
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/preview/start') {
+    const body = recordBody(await readJsonBody(request))
+    const open = body.open === true
     if (runtime.previewJobId) {
       const existing = runtime.jobs.get(runtime.previewJobId)
       if (existing?.status === 'running') {
+        if (open) openBrowser('http://127.0.0.1:4321')
         sendJson(response, 200, publicJob(existing))
         return
       }
     }
     const root = requireProject(runtime)
-    const job = startCliJob(runtime, 'preview', ['preview', '--host', '127.0.0.1', '--port', '4321', '--cwd', root], root)
+    const args = ['preview', '--host', '127.0.0.1', '--port', '4321', '--cwd', root]
+    if (open) args.push('--open')
+    const job = startCliJob(runtime, 'preview', args, root)
     runtime.previewJobId = job.id
     sendJson(response, 202, publicJob(job))
     return
@@ -398,7 +442,13 @@ async function handleApi(
   if (request.method === 'POST' && url.pathname === '/api/agent/install') {
     const agent = parseAgent(optionalString(recordBody(await readJsonBody(request)).agent))
     if (!agent) throw new DoxloopError('Choose Codex, Claude Code, or Gemini.')
-    sendJson(response, 200, await installAgent(agent))
+    const installed = (await detectAgents()).find((item) => item.name === agent)
+    if (installed) {
+      sendJson(response, 200, { ...installed, alreadyInstalled: true })
+      return
+    }
+    const existing = [...runtime.jobs.values()].find((job) => job.type === 'agent:install' && job.agent === agent && job.status === 'running')
+    sendJson(response, 202, publicJob(existing ?? startAgentInstallJob(runtime, agent)))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/agent/skills') {
@@ -421,7 +471,8 @@ async function handleApi(
     const body = recordBody(await readJsonBody(request))
     const args = ['login']
     appendOption(args, 'api-url', optionalString(body.apiUrl))
-    sendJson(response, 202, publicJob(startCliJob(runtime, 'login', args, runtime.root ?? runtime.cwd)))
+    const existing = [...runtime.jobs.values()].find((job) => job.type === 'login' && job.status === 'running')
+    sendJson(response, 202, publicJob(existing ?? startCliJob(runtime, 'login', args, runtime.root ?? runtime.cwd)))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
@@ -447,9 +498,11 @@ async function handleApi(
 async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>> {
   const root = runtime.root
   if (!root) {
+    const agents = await agentState(undefined, undefined)
     return {
       projectFound: false,
       cwd: runtime.cwd,
+      agents,
       generators: await installedGeneratorEntries(runtime.cwd),
       jobs: [...runtime.jobs.values()].map(publicJob).reverse(),
     }
@@ -490,13 +543,13 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
   }
 }
 
-async function agentState(root: string, preferred: AgentName | undefined): Promise<unknown[]> {
+async function agentState(root: string | undefined, preferred: AgentName | undefined): Promise<unknown[]> {
   const detected = await detectAgents()
   return Promise.all(detected.map(async (agent) => ({
     ...agent,
     preferred: agent.name === preferred,
     authentication: await agentAuthenticationStatus(agent),
-    skills: await skillStatus(root, agent.name),
+    skills: root ? await skillStatus(root, agent.name) : [],
   })))
 }
 
@@ -523,20 +576,46 @@ async function accountState(project: DoxloopProject): Promise<Record<string, unk
 async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<void> {
   if (runtime.root) throw new DoxloopError('A Doxloop project is already open.')
   const body = recordBody(raw)
-  const directory = stringValue(body.directory)
   const title = optionalString(body.title)
   const generator = parseGenerator(optionalString(body.generator)) ?? 'doxbrix'
-  const root = resolve(runtime.cwd, directory)
+  const root = resolveUiDocumentationDirectory(runtime.cwd, stringValue(body.directory))
+  await assertUiProjectDirectoryAvailable(root)
   await assertNewProjectDirectory(root)
   const sourceKind = optionalString(body.sourceKind)
+  const sourceLocation = optionalString(body.sourceLocation) ?? 'local'
   const sourcePath = optionalString(body.sourcePath)
   const sources: SourceBinding[] = []
-  if (sourceKind === 'directory' && sourcePath) {
-    const absolute = resolve(runtime.cwd, sourcePath)
-    sources.push({ name: optionalString(body.sourceName) ?? 'product', path: portableRelative(root, absolute) })
-  } else if (sourceKind === 'openapi' && sourcePath) {
-    const parsed = parseSpec(`${optionalString(body.sourceName) ?? 'api'}=${sourcePath}`)
-    sources.push(isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(runtime.cwd, parsed.path)) })
+  const sourceBodies = Array.isArray(body.sources)
+    ? body.sources.map(recordBody)
+    : [{ ...body, sourceKind, sourceLocation, sourcePath }]
+  const usedNames = new Set<string>()
+  for (const sourceBody of sourceBodies) {
+    const itemKind = optionalString(sourceBody.sourceKind)
+    const itemLocation = optionalString(sourceBody.sourceLocation) ?? 'local'
+    const itemPath = optionalString(sourceBody.sourcePath)
+    const specificationContent = optionalString(sourceBody.specContent)
+    const baseName = sourceIdentifier(optionalString(sourceBody.name) ?? optionalString(sourceBody.sourceName) ?? (itemKind === 'openapi' ? 'api' : 'product'))
+    let name = baseName
+    let suffix = 2
+    while (usedNames.has(name)) name = `${baseName}-${suffix++}`
+    usedNames.add(name)
+    if (itemKind === 'directory' && itemLocation === 'git') {
+      const remote = remoteSourceFromSetupBody(sourceBody)
+      const prepared = await materializeRemoteSource(root, { name, remote })
+      sources.push({ name, path: portableSourcePath(root, prepared.path), remote })
+    } else if (itemKind === 'directory' && itemPath) {
+      sources.push({ name, path: portableRelative(root, resolve(runtime.cwd, itemPath)) })
+    } else if (itemKind === 'openapi' && specificationContent) {
+      const extension = specificationContent.trimStart().startsWith('{') ? 'json' : 'yaml'
+      const inlineDirectory = resolve(root, '..', '.doxloop-sources', sourceIdentifier(root.split(sep).pop() ?? 'project'), 'openapi')
+      const inlinePath = join(inlineDirectory, `${name}.${extension}`)
+      await mkdir(inlineDirectory, { recursive: true })
+      await writeFile(inlinePath, `${specificationContent.trim()}\n`, 'utf8')
+      sources.push({ name, path: portableRelative(root, inlinePath), kind: 'openapi' })
+    } else if (itemKind === 'openapi' && itemPath) {
+      const parsed = parseSpec(`${name}=${itemPath}`)
+      sources.push(isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(runtime.cwd, parsed.path)) })
+    }
   }
   await validateProjectSourceBoundaries(root, sources)
   if (generator !== 'doxbrix') {
@@ -548,6 +627,104 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   await installSkill({ root, ...(agent ? { agent } : {}) })
   if (agent) await saveProjectSettings(root, { defaultAgent: agent })
   runtime.root = root
+}
+
+async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Record<string, unknown>> {
+  const body = recordBody(raw)
+  const directory = optionalString(body.directory)
+  let root: string | undefined
+  let directoryError: string | undefined
+  if (!directory) {
+    directoryError = 'Enter a documentation directory.'
+  } else {
+    try {
+      root = resolveUiDocumentationDirectory(runtime.cwd, directory)
+      await assertUiProjectDirectoryAvailable(root)
+    } catch (error) {
+      directoryError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  const sourceKind = optionalString(body.sourceKind)
+  const sourceLocation = optionalString(body.sourceLocation) ?? 'local'
+  const sourcePath = optionalString(body.sourcePath)
+  let resolvedSourcePath: string | undefined
+  let sourcePathError: string | undefined
+  if (sourceKind && sourceKind !== 'none') {
+    if (sourceKind === 'directory' && sourceLocation === 'git') {
+      try {
+        await remoteHead(remoteSourceFromSetupBody(body))
+      } catch (error) {
+        sourcePathError = error instanceof Error ? error.message : String(error)
+      }
+    } else if (!sourcePath) {
+      sourcePathError = sourceKind === 'directory' ? 'Choose a product source directory.' : 'Enter an OpenAPI file path or URL.'
+    } else if (root) {
+      try {
+        if (sourceKind === 'directory') {
+          resolvedSourcePath = resolve(runtime.cwd, sourcePath)
+          await validateProjectSourceBoundaries(root, [{ name: 'product', path: portableRelative(root, resolvedSourcePath) }])
+        } else if (sourceKind === 'openapi') {
+          const parsed = parseSpec(`api=${sourcePath}`)
+          resolvedSourcePath = isSpecUrl(parsed.path) ? parsed.path : resolve(runtime.cwd, parsed.path)
+          const binding = isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolvedSourcePath) }
+          await validateProjectSourceBoundaries(root, [binding])
+        } else {
+          sourcePathError = 'Choose a supported source type.'
+        }
+      } catch (error) {
+        sourcePathError = error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  return {
+    ...(root ? { directoryPath: root } : {}),
+    ...(directoryError ? { directoryError } : {}),
+    ...(resolvedSourcePath ? { sourcePath: resolvedSourcePath } : {}),
+    ...(sourcePathError ? { sourcePathError } : {}),
+  }
+}
+
+function remoteSourceFromSetupBody(body: Record<string, unknown>): RemoteSource {
+  const repository = parseGitRepository(stringValue(body.repository))
+  const branch = stringValue(body.branch)
+  const subdirectory = optionalString(body.subdirectory)
+  configureGitAccess(body, repository)
+  if (subdirectory && (subdirectory.startsWith('/') || subdirectory.split(/[\\/]/).includes('..'))) {
+    throw new DoxloopError('Repository subdirectory must be a safe relative directory.')
+  }
+  return {
+    provider: 'git',
+    repository,
+    branch,
+    ...(subdirectory ? { subdirectory } : {}),
+  }
+}
+
+function configureGitAccess(body: Record<string, unknown>, repository: string): void {
+  const method = optionalString(body.authMethod) ?? 'automatic'
+  if (method !== 'automatic' && method !== 'credentials') throw new DoxloopError('Choose a supported repository access option.')
+  const secret = method === 'credentials' ? optionalString(body.gitSecret) : undefined
+  if (method === 'credentials' && !secret) throw new DoxloopError('Enter the password or access key for this private repository.')
+  rememberRemoteCredential(repository, optionalString(body.gitUsername), secret)
+}
+
+async function assertUiProjectDirectoryAvailable(path: string): Promise<void> {
+  try {
+    await stat(path)
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return
+    throw error
+  }
+  throw new DoxloopError(`The documentation path already exists: ${path}\nChoose a different directory name.`)
+}
+
+function resolveUiDocumentationDirectory(cwd: string, name: string): string {
+  if (name === '.' || name === '..' || /[\\/]/.test(name)) {
+    throw new DoxloopError('Enter a directory name, not a filesystem path.')
+  }
+  return resolve(cwd, name)
 }
 
 async function updateProjectFromUi(root: string, raw: unknown): Promise<void> {
@@ -581,18 +758,31 @@ async function addSourceFromUi(root: string, raw: unknown): Promise<void> {
   const body = recordBody(raw)
   const project = await loadProject(root)
   const name = stringValue(body.name)
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) throw new DoxloopError('Evidence name may use letters, numbers, underscores, and hyphens.')
-  if (project.sources.some((source) => source.name === name)) throw new DoxloopError(`Evidence "${name}" already exists.`)
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) throw new DoxloopError('Source name may use letters, numbers, underscores, and hyphens.')
+  if (project.sources.some((source) => source.name === name)) throw new DoxloopError(`Source "${name}" already exists.`)
   const kind = stringValue(body.kind)
-  const location = stringValue(body.path)
+  const location = optionalString(body.path)
+  const specificationContent = optionalString(body.specContent)
   let source: SourceBinding
-  if (kind === 'openapi') {
-    const parsed = parseSpec(`${name}=${location}`)
+  if (kind === 'openapi' && specificationContent) {
+    const extension = specificationContent.trimStart().startsWith('{') ? 'json' : 'yaml'
+    const inlineDirectory = resolve(root, '..', '.doxloop-sources', sourceIdentifier(root.split(sep).pop() ?? 'project'), 'openapi')
+    const inlinePath = join(inlineDirectory, `${name}.${extension}`)
+    await mkdir(inlineDirectory, { recursive: true })
+    await writeFile(inlinePath, `${specificationContent.trim()}\n`, 'utf8')
+    source = { name, path: portableRelative(root, inlinePath), kind: 'openapi' }
+  } else if (kind === 'openapi') {
+    const parsed = parseSpec(`${name}=${location ?? ''}`)
     source = isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(root, parsed.path)) }
   } else if (kind === 'directory') {
+    if (!location) throw new DoxloopError('Choose a product source directory.')
     source = { name, path: portableRelative(root, resolve(root, location)) }
+  } else if (kind === 'git') {
+    const remote = remoteSourceFromSetupBody(body)
+    const prepared = await materializeRemoteSource(root, { name, remote })
+    source = { name, path: portableSourcePath(root, prepared.path), remote }
   } else {
-    throw new DoxloopError('Evidence kind must be directory or openapi.')
+    throw new DoxloopError('Source type must be directory, git, or openapi.')
   }
   const sources = [...project.sources, source]
   await validateProjectSourceBoundaries(root, sources)
@@ -604,7 +794,7 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
   const body = recordBody(raw)
   const project = await loadProject(root)
   const index = project.sources.findIndex((source) => source.name === name)
-  if (index < 0) throw new DoxloopError(`Evidence "${name}" does not exist.`)
+  if (index < 0) throw new DoxloopError(`Source "${name}" does not exist.`)
   let source = project.sources[index]!
   const sources = [...project.sources]
   if (body.path !== undefined || body.kind !== undefined) {
@@ -620,7 +810,7 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
         ...(source.remote ? { remote: source.remote } : {}),
       }
     } else {
-      throw new DoxloopError('Evidence kind must be directory or openapi.')
+      throw new DoxloopError('Source type must be directory or openapi.')
     }
     sources[index] = source
   }
@@ -629,18 +819,26 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
     sources[index] = withoutRemote
   } else if (body.remote !== undefined) {
     const remote = recordBody(body.remote)
-    const repository = stringValue(remote.repository)
-    if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) throw new DoxloopError('GitHub repository must use owner/name format.')
+    const provider = optionalString(remote.provider) === 'github' ? 'github' : 'git'
+    const rawRepository = stringValue(remote.repository)
+    const repository = provider === 'github' ? rawRepository : parseGitRepository(rawRepository)
+    if (provider === 'git') configureGitAccess(remote, repository)
+    if (provider === 'github' && !/^[^/\s]+\/[^/\s]+$/.test(repository)) throw new DoxloopError('GitHub repository must use owner/name format.')
     const branch = stringValue(remote.branch)
+    const nextRemote: RemoteSource = {
+      provider,
+      repository,
+      branch,
+      ...(optionalString(remote.subdirectory) ? { subdirectory: optionalString(remote.subdirectory)! } : {}),
+      ...(provider === 'github' && optionalString(remote.tokenEnv) ? { tokenEnv: optionalString(remote.tokenEnv)! } : {}),
+      ...(provider === 'github' && optionalString(remote.apiBaseUrl) ? { apiBaseUrl: optionalString(remote.apiBaseUrl)! } : {}),
+    }
+    const managed = source.path.split(/[\\/]/).includes('.doxloop-sources')
+    const prepared = managed ? await materializeRemoteSource(root, { name: source.name, remote: nextRemote }) : undefined
     sources[index] = {
       ...source,
-      remote: {
-        provider: 'github',
-        repository,
-        branch,
-        ...(optionalString(remote.tokenEnv) ? { tokenEnv: optionalString(remote.tokenEnv)! } : {}),
-        ...(optionalString(remote.apiBaseUrl) ? { apiBaseUrl: optionalString(remote.apiBaseUrl)! } : {}),
-      },
+      ...(prepared ? { path: portableSourcePath(root, prepared.path) } : {}),
+      remote: nextRemote,
     }
   }
   await validateProjectSourceBoundaries(root, sources)
@@ -649,7 +847,7 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
 
 async function removeSourceFromUi(root: string, name: string): Promise<void> {
   const project = await loadProject(root)
-  if (!project.sources.some((source) => source.name === name)) throw new DoxloopError(`Evidence "${name}" does not exist.`)
+  if (!project.sources.some((source) => source.name === name)) throw new DoxloopError(`Source "${name}" does not exist.`)
   const sources = project.sources.filter((source) => source.name !== name)
   let application = project.application
   if (project.application?.source === name) {
@@ -802,6 +1000,49 @@ async function handleProposalPreview(response: ServerResponse, url: URL, runtime
   send(response, 200, 'text/html; charset=utf-8', html, reviewHeaders())
 }
 
+function startAgentInstallJob(runtime: UiRuntime, agent: AgentName): UiJob {
+  const id = randomBytes(8).toString('hex')
+  const displayName = AGENT_CATALOG.find((item) => item.name === agent)?.displayName ?? agent
+  const job: UiJob = {
+    id,
+    type: 'agent:install',
+    agent,
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    lastOutputAt: new Date().toISOString(),
+    lines: [`Preparing to install ${displayName}…`],
+  }
+  const append = (output: string): void => {
+    const lines = output.split(/\r?\n/).filter(Boolean)
+    if (lines.length === 0) return
+    job.lines.push(...lines)
+    job.lastOutputAt = new Date().toISOString()
+    queueUiJobLog(runtime, job.id, output.endsWith('\n') ? output : `${output}\n`)
+    publishJobs(runtime)
+  }
+  runtime.jobs.set(id, job)
+  publishJobs(runtime)
+  void installAgent(agent, {
+    onChild: (child) => { job.child = child },
+    onOutput: append,
+  }).then(({ executable }) => {
+    if (job.status === 'cancelled') return
+    append(`${displayName} installed successfully at ${executable}.`)
+    job.exitCode = 0
+    job.status = 'succeeded'
+  }).catch((error: unknown) => {
+    if (job.status === 'cancelled') return
+    append(error instanceof Error ? error.message : String(error))
+    job.exitCode = 1
+    job.status = 'failed'
+  }).finally(() => {
+    if (!job.finishedAt) job.finishedAt = new Date().toISOString()
+    delete job.child
+    publishJobs(runtime)
+  })
+  return job
+}
+
 function startCliJob(
   runtime: UiRuntime,
   type: string,
@@ -820,7 +1061,7 @@ function startCliJob(
   }
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
     cwd,
-    env: process.env,
+    env: { ...process.env, ...remoteCredentialEnvironment() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   job.child = child
@@ -829,7 +1070,6 @@ function startCliJob(
     const lines = text.split(/\r?\n/).filter(Boolean)
     job.lines.push(...lines)
     job.lastOutputAt = new Date().toISOString()
-    if (job.lines.length > MAX_JOB_LINES) job.lines.splice(0, job.lines.length - MAX_JOB_LINES)
     queueUiJobLog(runtime, job.id, text)
     publishJobs(runtime)
   }
@@ -987,7 +1227,6 @@ function parsePersistedUiJob(raw: unknown): UiJob | undefined {
   ) return undefined
   const lines = job.lines
     .filter((line): line is string => typeof line === 'string')
-    .slice(-MAX_JOB_LINES)
   return {
     id: job.id,
     type: job.type,
@@ -1122,6 +1361,38 @@ function openBrowser(url: string): void {
   child.unref()
 }
 
+async function chooseLocalDirectory(): Promise<string | undefined> {
+  const picker = process.platform === 'darwin'
+    ? { command: 'osascript', args: ['-e', 'POSIX path of (choose folder with prompt "Choose product source directory")'] }
+    : process.platform === 'win32'
+      ? {
+          command: 'powershell.exe',
+          args: ['-NoProfile', '-STA', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; $picker = New-Object System.Windows.Forms.FolderBrowserDialog; $picker.Description = "Choose product source directory"; if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $picker.SelectedPath }'],
+        }
+      : { command: 'zenity', args: ['--file-selection', '--directory', '--title=Choose product source directory'] }
+
+  return new Promise<string | undefined>((resolvePicker, rejectPicker) => {
+    const child = spawn(picker.command, picker.args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let output = ''
+    let detail = ''
+    child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString('utf8') })
+    child.stderr.on('data', (chunk: Buffer) => { detail += chunk.toString('utf8') })
+    child.once('error', (error) => rejectPicker(new DoxloopError(`Could not open the directory picker: ${error.message}`)))
+    child.once('exit', (code) => {
+      if (code === 0) {
+        const selected = output.trim()
+        resolvePicker(selected ? resolve(selected) : undefined)
+        return
+      }
+      if (code === 1 || detail.toLowerCase().includes('cancel')) {
+        resolvePicker(undefined)
+        return
+      }
+      rejectPicker(new DoxloopError(`The directory picker failed${detail.trim() ? `: ${detail.trim()}` : ` with exit code ${code ?? 1}`}.`))
+    })
+  })
+}
+
 function appendOption(args: string[], name: string, value: string | undefined): void {
   if (value) args.push(`--${name}`, value)
 }
@@ -1131,6 +1402,11 @@ function recordBody(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
+function sourceIdentifier(label: string): string {
+  const identifier = label.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return identifier || 'source'
+}
+
 function stringValue(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') throw new DoxloopError('A required value is missing.')
   return value.trim()
@@ -1138,6 +1414,10 @@ function stringValue(value: unknown): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error
 }
 
 function stringArray(value: unknown): string[] {

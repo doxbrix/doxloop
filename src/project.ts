@@ -797,16 +797,26 @@ function isRemoteSource(value: unknown): boolean {
   if (value === undefined) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const remote = value as Record<string, unknown>
-  if (remote.provider !== 'github') return false
+  if (remote.provider !== 'github' && remote.provider !== 'git') return false
   if (
     typeof remote.repository !== 'string' ||
-    !/^[^/\s]+\/[^/\s]+$/.test(remote.repository) ||
+    remote.repository.trim() === '' ||
     typeof remote.branch !== 'string' ||
     remote.branch.trim() === ''
   ) return false
+  if (remote.provider === 'github' && !/^[^/\s]+\/[^/\s]+$/.test(remote.repository)) return false
+  if (remote.provider === 'git' &&
+    !/^(?:(?:https?|ssh|git|file):\/\/|[^@\s]+@[^:\s]+:)[^\r\n\0]+$/.test(remote.repository)) return false
   if (
     remote.tokenEnv !== undefined &&
     (typeof remote.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(remote.tokenEnv))
+  ) return false
+  if (
+    remote.subdirectory !== undefined &&
+    (typeof remote.subdirectory !== 'string' ||
+      remote.subdirectory.trim() === '' ||
+      remote.subdirectory.startsWith('/') ||
+      remote.subdirectory.split(/[\\/]/).includes('..'))
   ) return false
   if (remote.apiBaseUrl !== undefined) {
     if (typeof remote.apiBaseUrl !== 'string') return false
@@ -960,8 +970,20 @@ export function parseSyncTrigger(raw: string): SyncTrigger {
     const minute = Number(daily[2])
     if (hour <= 23 && minute <= 59) return value as SyncTrigger
   }
+  const weekdays = /^weekdays@(\d{2}):(\d{2})$/.exec(value)
+  if (weekdays && Number(weekdays[1]) <= 23 && Number(weekdays[2]) <= 59) {
+    return value as SyncTrigger
+  }
+  const weekly = /^weekly@(sun|mon|tue|wed|thu|fri|sat)@(\d{2}):(\d{2})$/.exec(value)
+  if (weekly && Number(weekly[2]) <= 23 && Number(weekly[3]) <= 59) {
+    return value as SyncTrigger
+  }
+  const monthly = /^monthly@(\d{1,2})@(\d{2}):(\d{2})$/.exec(value)
+  if (monthly && Number(monthly[1]) >= 1 && Number(monthly[1]) <= 28 && Number(monthly[2]) <= 23 && Number(monthly[3]) <= 59) {
+    return value as SyncTrigger
+  }
   throw new DoxloopError(
-    `Invalid sync trigger "${raw}". Use every@Nm, every@Nh, or daily@HH:MM, for example every@15m.`,
+    `Invalid sync trigger "${raw}". Use daily, weekdays, weekly, monthly, or every interval syntax.`,
     2,
   )
 }

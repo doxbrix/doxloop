@@ -56,8 +56,20 @@ export function parseTriggerList(raw: string): SyncTrigger[] {
       if (daily && Number(daily[1]) <= 23 && Number(daily[2]) <= 59) {
         return value as SyncTrigger
       }
+      const weekdays = /^weekdays@(\d{2}):(\d{2})$/.exec(value)
+      if (weekdays && Number(weekdays[1]) <= 23 && Number(weekdays[2]) <= 59) {
+        return value as SyncTrigger
+      }
+      const weekly = /^weekly@(sun|mon|tue|wed|thu|fri|sat)@(\d{2}):(\d{2})$/.exec(value)
+      if (weekly && Number(weekly[2]) <= 23 && Number(weekly[3]) <= 59) {
+        return value as SyncTrigger
+      }
+      const monthly = /^monthly@(\d{1,2})@(\d{2}):(\d{2})$/.exec(value)
+      if (monthly && Number(monthly[1]) >= 1 && Number(monthly[1]) <= 28 && Number(monthly[2]) <= 23 && Number(monthly[3]) <= 59) {
+        return value as SyncTrigger
+      }
       throw new DoxloopError(
-        `Invalid --on value "${value}". Use every@Nm, every@Nh, daily@HH:MM, or manual.`,
+        `Invalid --on value "${value}". Use daily@HH:MM, weekdays@HH:MM, weekly@day@HH:MM, monthly@day@HH:MM, every@Nm, every@Nh, or manual.`,
         2,
       )
     })

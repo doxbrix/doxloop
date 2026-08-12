@@ -15,11 +15,14 @@ export type GeneratorName =
 export type SourceKind = 'directory' | 'openapi'
 
 export interface RemoteSource {
-  provider: 'github'
-  /** GitHub repository in owner/name form. */
+  /** `github` is retained for projects created before generic Git support. */
+  provider: 'git' | 'github'
+  /** Clone URL for generic Git, or owner/name for legacy GitHub sources. */
   repository: string
   branch: string
-  /** Environment variable containing a token. Tokens are never stored in project files. */
+  /** Optional repository-relative directory used as the evidence root. */
+  subdirectory?: string
+  /** Legacy GitHub authentication option. New credentials are session-only. */
   tokenEnv?: string
   /** Primarily for GitHub Enterprise Server. */
   apiBaseUrl?: string
@@ -89,8 +92,14 @@ export interface DocumentationBrief {
  */
 export type SyncMode = 'check' | 'propose' | 'auto'
 
-/** Remote polling runs either at a fixed interval or once per day. */
-export type SyncTrigger = `every@${number}m` | `every@${number}h` | `daily@${string}`
+/** Remote polling runs at a user-friendly calendar cadence or fixed interval. */
+export type SyncTrigger =
+  | `every@${number}m`
+  | `every@${number}h`
+  | `daily@${string}`
+  | `weekdays@${string}`
+  | `weekly@${string}@${string}`
+  | `monthly@${number}@${string}`
 
 export interface SyncBudget {
   maxRunsPerDay?: number

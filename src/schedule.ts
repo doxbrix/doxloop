@@ -21,6 +21,9 @@ export interface DailyTime {
 export type ScheduleFrequency =
   | { kind: 'interval'; minutes: number }
   | { kind: 'daily'; time: DailyTime }
+  | { kind: 'weekdays'; time: DailyTime }
+  | { kind: 'weekly'; weekday: number; time: DailyTime }
+  | { kind: 'monthly'; day: number; time: DailyTime }
 
 export interface ScheduleState {
   installed: boolean
@@ -54,12 +57,31 @@ export function scheduleFrequency(
       return { kind: 'interval', minutes: interval[2] === 'h' ? amount * 60 : amount }
     }
   }
+  for (const trigger of triggers) {
+    const weekdays = /^weekdays@(\d{2}):(\d{2})$/.exec(trigger)
+    if (weekdays) return { kind: 'weekdays', time: { hour: Number(weekdays[1]), minute: Number(weekdays[2]) } }
+    const weekly = /^weekly@(sun|mon|tue|wed|thu|fri|sat)@(\d{2}):(\d{2})$/.exec(trigger)
+    if (weekly) return {
+      kind: 'weekly',
+      weekday: WEEKDAYS.findIndex((day) => day === weekly[1]),
+      time: { hour: Number(weekly[2]), minute: Number(weekly[3]) },
+    }
+    const monthly = /^monthly@(\d{1,2})@(\d{2}):(\d{2})$/.exec(trigger)
+    if (monthly) return {
+      kind: 'monthly',
+      day: Number(monthly[1]),
+      time: { hour: Number(monthly[2]), minute: Number(monthly[3]) },
+    }
+  }
   const time = dailyTime(triggers)
   return time ? { kind: 'daily', time } : undefined
 }
 
 export function formatScheduleFrequency(frequency: ScheduleFrequency): string {
   if (frequency.kind === 'daily') return `daily ${formatDailyTime(frequency.time)}`
+  if (frequency.kind === 'weekdays') return `weekdays ${formatDailyTime(frequency.time)}`
+  if (frequency.kind === 'weekly') return `weekly on ${WEEKDAY_LABELS[frequency.weekday]} at ${formatDailyTime(frequency.time)}`
+  if (frequency.kind === 'monthly') return `monthly on day ${frequency.day} at ${formatDailyTime(frequency.time)}`
   if (frequency.minutes % 60 === 0) {
     const hours = frequency.minutes / 60
     return `every ${hours} hour${hours === 1 ? '' : 's'}`
@@ -69,6 +91,52 @@ export function formatScheduleFrequency(frequency: ScheduleFrequency): string {
 
 export function formatDailyTime(time: DailyTime): string {
   return `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`
+}
+
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
+const WEEKDAY_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
+
+function launchCalendar(frequency: Exclude<ScheduleFrequency, { kind: 'interval' }>): string {
+  const item = (extra = '') => `<dict>
+    ${extra}<key>Hour</key>
+    <integer>${frequency.time.hour}</integer>
+    <key>Minute</key>
+    <integer>${frequency.time.minute}</integer>
+  </dict>`
+  if (frequency.kind === 'weekdays') {
+    return `<array>\n    ${[1, 2, 3, 4, 5].map((day) => item(`<key>Weekday</key>\n    <integer>${day}</integer>\n    `)).join('\n    ')}\n  </array>`
+  }
+  if (frequency.kind === 'weekly') return item(`<key>Weekday</key>\n    <integer>${frequency.weekday}</integer>\n    `)
+  if (frequency.kind === 'monthly') return item(`<key>Day</key>\n    <integer>${frequency.day}</integer>\n    `)
+  return item()
+}
+
+function cronExpression(frequency: ScheduleFrequency): string {
+  if (frequency.kind === 'interval') {
+    return frequency.minutes < 60 ? `*/${frequency.minutes} * * * *` : `0 */${frequency.minutes / 60} * * *`
+  }
+  const time = `${frequency.time.minute} ${frequency.time.hour}`
+  if (frequency.kind === 'weekdays') return `${time} * * 1-5`
+  if (frequency.kind === 'weekly') return `${time} * * ${frequency.weekday}`
+  if (frequency.kind === 'monthly') return `${time} ${frequency.day} * *`
+  return `${time} * * *`
+}
+
+function systemdCalendar(frequency: Exclude<ScheduleFrequency, { kind: 'interval' }>): string {
+  const time = `${formatDailyTime(frequency.time)}:00`
+  if (frequency.kind === 'weekdays') return `Mon..Fri *-*-* ${time}`
+  if (frequency.kind === 'weekly') return `${WEEKDAY_LABELS[frequency.weekday]!.slice(0, 3)} *-*-* ${time}`
+  if (frequency.kind === 'monthly') return `*-*-${String(frequency.day).padStart(2, '0')} ${time}`
+  return `*-*-* ${time}`
+}
+
+function windowsSchedule(frequency: ScheduleFrequency): { type: string; arguments: string[] } {
+  if (frequency.kind === 'interval') return { type: 'minute', arguments: ['/mo', String(frequency.minutes)] }
+  const start = ['/st', formatDailyTime(frequency.time)]
+  if (frequency.kind === 'weekdays') return { type: 'weekly', arguments: ['/d', 'MON,TUE,WED,THU,FRI', ...start] }
+  if (frequency.kind === 'weekly') return { type: 'weekly', arguments: ['/d', WEEKDAYS[frequency.weekday]!.toUpperCase(), ...start] }
+  if (frequency.kind === 'monthly') return { type: 'monthly', arguments: ['/d', String(frequency.day), ...start] }
+  return { type: 'daily', arguments: start }
 }
 
 /**
@@ -135,13 +203,8 @@ export function renderLaunchAgent(options: {
     <key>HOME</key>
     <string>${escape(homedir())}</string>
   </dict>
-  ${options.frequency.kind === 'daily' ? `<key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${options.frequency.time.hour}</integer>
-    <key>Minute</key>
-    <integer>${options.frequency.time.minute}</integer>
-  </dict>` : `<key>StartInterval</key>
+  ${options.frequency.kind !== 'interval' ? `<key>StartCalendarInterval</key>
+  ${launchCalendar(options.frequency)}` : `<key>StartInterval</key>
   <integer>${options.frequency.minutes * 60}</integer>`}
   <key>StandardOutPath</key>
   <string>${escape(log)}</string>
@@ -178,7 +241,7 @@ export function renderSystemdTimer(options: {
 Description=Doxloop documentation sync for ${options.root}
 
 [Timer]
-${options.frequency.kind === 'daily' ? `OnCalendar=*-*-* ${formatDailyTime(options.frequency.time)}:00` : `OnUnitActiveSec=${options.frequency.minutes}m`}
+${options.frequency.kind === 'interval' ? `OnUnitActiveSec=${options.frequency.minutes}m` : `OnCalendar=${systemdCalendar(options.frequency)}`}
 Persistent=true
 
 [Install]
@@ -193,11 +256,7 @@ export function cronLine(options: {
   frequency: ScheduleFrequency
 }): string {
   const log = join(options.root, SYNC_LOG_FILE)
-  const expression = options.frequency.kind === 'daily'
-    ? `${options.frequency.time.minute} ${options.frequency.time.hour} * * *`
-    : options.frequency.minutes < 60
-      ? `*/${options.frequency.minutes} * * * *`
-      : `0 */${options.frequency.minutes / 60} * * *`
+  const expression = cronExpression(options.frequency)
   return `${expression} ${process.execPath} ${cliPath()} sync now --trigger schedule --cwd ${options.root} >> ${log} 2>&1 # ${options.label}`
 }
 
@@ -220,7 +279,7 @@ export async function installSchedule(
         installed: true,
         label,
         path,
-        ...(frequency.kind === 'daily' ? { time: frequency.time } : {}),
+        ...(frequency.kind !== 'interval' ? { time: frequency.time } : {}),
         frequency,
         registered: true,
         logPath: nativeScheduleLog(label),
@@ -253,10 +312,8 @@ export async function installSchedule(
       '/tn',
       label,
       '/sc',
-      frequency.kind === 'daily' ? 'daily' : 'minute',
-      ...(frequency.kind === 'daily'
-        ? ['/st', formatDailyTime(frequency.time)]
-        : ['/mo', String(frequency.minutes)]),
+      windowsSchedule(frequency).type,
+      ...windowsSchedule(frequency).arguments,
       '/tr',
       `"${process.execPath}" "${cliPath()}" sync now --trigger schedule --cwd "${root}"`,
     ])

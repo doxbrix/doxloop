@@ -101,6 +101,9 @@ describe('option parsing', () => {
     expect(parseTriggerList('every@15m')).toEqual(['every@15m'])
     expect(parseTriggerList('manual')).toEqual([])
     expect(parseTriggerList('every@2h')).toEqual(['every@2h'])
+    expect(parseTriggerList('weekdays@09:00')).toEqual(['weekdays@09:00'])
+    expect(parseTriggerList('weekly@fri@16:30')).toEqual(['weekly@fri@16:30'])
+    expect(parseTriggerList('monthly@15@08:00')).toEqual(['monthly@15@08:00'])
   })
 
   test('rejects an unusable trigger', () => {

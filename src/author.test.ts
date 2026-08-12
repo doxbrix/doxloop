@@ -47,6 +47,9 @@ describe('author prompts', () => {
     expect(prompt).toContain('generator-native theme')
     expect(prompt).toContain('one consolidated message')
     expect(prompt).toContain('otherwise state reasonable assumptions and continue')
+    expect(prompt).toContain('continue immediately in this same run')
+    expect(prompt).toContain('by itself is an incomplete create run')
+    expect(prompt).toContain('remove every `doxloop:starter-page` marker')
     expect(prompt).toContain('comprehensive documentation set')
     expect(prompt).toContain('infer the most relevant expert domain template')
     expect(prompt).toContain('apply audience as flavor within that combination')
@@ -75,6 +78,17 @@ describe('author prompts', () => {
     )
 
     expect(prompt).toContain('Prioritize administrators and deployment.')
+  })
+
+  test('describes a managed Git source with branch and subdirectory scope', () => {
+    const prompt = authorPrompt('create', [{
+      name: 'product',
+      path: '../.doxloop-sources/project/product/abc/packages/api',
+      remote: { provider: 'github', repository: 'acme/product', branch: 'main', subdirectory: 'packages/api' },
+    }])
+    expect(prompt).toContain('read-only Git repository acme/product')
+    expect(prompt).toContain('branch main')
+    expect(prompt).toContain('scoped to packages/api')
   })
 
   test('requires application screenshots when the flag enables them', () => {
@@ -356,6 +370,11 @@ describe('agent invocation', () => {
     expect(
       agentArguments('codex', 'p', { model: 'gpt-5.6-terra', reasoning: 'high' }),
     ).toEqual(['-m', 'gpt-5.6-terra', '-c', 'model_reasoning_effort=high', 'p'])
+    expect(parseReasoning('none')).toBe('none')
+    expect(parseReasoning('max')).toBe('max')
+    expect(
+      agentArguments('codex', 'p', { model: 'gpt-5.6-luna', reasoning: 'minimal' }),
+    ).toEqual(['-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort=none', 'p'])
   })
 
   test('rejects unknown reasoning levels', () => {
