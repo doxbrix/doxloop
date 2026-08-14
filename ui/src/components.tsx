@@ -163,13 +163,18 @@ export function Select({ icon, ...props }: JSX.SelectHTMLAttributes<HTMLSelectEl
       if (!root.current?.contains(target) && !menu.current?.contains(target)) setOpen(false)
     }
     const close = () => setOpen(false)
+    const closeOnExternalScroll = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && menu.current?.contains(target)) return
+      setOpen(false)
+    }
     addEventListener('mousedown', closeOutside)
     addEventListener('resize', close)
-    addEventListener('scroll', close, true)
+    addEventListener('scroll', closeOnExternalScroll, true)
     return () => {
       removeEventListener('mousedown', closeOutside)
       removeEventListener('resize', close)
-      removeEventListener('scroll', close, true)
+      removeEventListener('scroll', closeOnExternalScroll, true)
     }
   }, [open])
   return <span ref={root} class={`select-wrap custom-select ${icon ? 'with-icon' : ''}`}>
@@ -184,12 +189,85 @@ export function Select({ icon, ...props }: JSX.SelectHTMLAttributes<HTMLSelectEl
   </span>
 }
 
-/**
- * A free-text field that carries a picker affordance: the model name must stay
- * typeable, so this is an input with a datalist wearing the select's chevron.
- */
-export function Combo({ children, ...props }: JSX.InputHTMLAttributes<HTMLInputElement> & { children?: ComponentChildren }) {
-  return <span class="select-wrap combo"><input {...props} class={`input ${props.class ?? ''}`} /><Icon name="chevronDown" size={14} />{children}</span>
+/** A searchable picker that also accepts values outside its suggestion list. */
+export function Combo({ value, options, placeholder, disabled, onValueChange }: {
+  value: string
+  options: ReadonlyArray<readonly [string, string]>
+  placeholder?: string
+  disabled?: boolean
+  onValueChange: (value: string) => void
+}) {
+  const root = useRef<HTMLSpanElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const listboxId = useId()
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [highlighted, setHighlighted] = useState(0)
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 0 })
+  const normalizedQuery = query.trim().toLowerCase()
+  const filtered = normalizedQuery
+    ? options.filter(([optionValue, label]) => `${label} ${optionValue}`.toLowerCase().includes(normalizedQuery))
+    : options
+  const openMenu = (filter = '') => {
+    if (disabled || !root.current) return
+    const rect = root.current.getBoundingClientRect()
+    const menuHeight = Math.min(248, Math.max(44, options.length * 45 + 10))
+    const spaceBelow = innerHeight - rect.bottom - 8
+    const above = spaceBelow < Math.min(180, menuHeight) && rect.top > spaceBelow
+    setPosition({ left: rect.left, top: above ? Math.max(8, rect.top - menuHeight - 4) : rect.bottom + 4, width: rect.width })
+    setQuery(filter)
+    setHighlighted(0)
+    setOpen(true)
+  }
+  const choose = (nextValue: string) => {
+    onValueChange(nextValue)
+    setQuery('')
+    setOpen(false)
+    input.current?.focus()
+  }
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) openMenu()
+      else if (filtered.length) setHighlighted((current) => (current + (event.key === 'ArrowDown' ? 1 : -1) + filtered.length) % filtered.length)
+      return
+    }
+    if (event.key === 'Enter' && open && filtered[highlighted]) {
+      event.preventDefault()
+      choose(filtered[highlighted]![0])
+      return
+    }
+    if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false) }
+  }
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (!root.current?.contains(target) && !menu.current?.contains(target)) setOpen(false)
+    }
+    const close = () => setOpen(false)
+    const closeOnExternalScroll = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && menu.current?.contains(target)) return
+      setOpen(false)
+    }
+    addEventListener('mousedown', closeOutside)
+    addEventListener('resize', close)
+    addEventListener('scroll', closeOnExternalScroll, true)
+    return () => {
+      removeEventListener('mousedown', closeOutside)
+      removeEventListener('resize', close)
+      removeEventListener('scroll', closeOnExternalScroll, true)
+    }
+  }, [open])
+  return <span ref={root} class="select-wrap editable-select">
+    <input ref={input} class="input" role="combobox" value={value} placeholder={placeholder} disabled={disabled} aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listboxId : undefined} aria-activedescendant={open && filtered[highlighted] ? `${listboxId}-${highlighted}` : undefined} onFocus={() => { if (!open) openMenu() }} onInput={(event) => { const next = event.currentTarget.value; onValueChange(next); openMenu(next) }} onKeyDown={onKeyDown} />
+    <button type="button" tabindex={-1} disabled={disabled} aria-label={open ? 'Close suggestions' : 'Show suggestions'} onMouseDown={(event) => event.preventDefault()} onClick={() => open ? setOpen(false) : openMenu()}><Icon name="chevronDown" size={14} /></button>
+    {open && typeof document !== 'undefined' && createPortal(<div ref={menu} id={listboxId} class="editable-select-menu" role="listbox" style={`left:${position.left}px;top:${position.top}px;width:${position.width}px`}>
+      {filtered.length ? filtered.map(([optionValue, label], index) => <button key={optionValue} type="button" id={`${listboxId}-${index}`} role="option" aria-selected={value === optionValue} class={`${value === optionValue ? 'selected' : ''} ${highlighted === index ? 'highlighted' : ''}`} onMouseEnter={() => setHighlighted(index)} onClick={() => choose(optionValue)}><span><strong>{label}</strong>{label !== optionValue && <small>{optionValue}</small>}</span>{value === optionValue && <Icon name="check" size={14} />}</button>) : <span class="editable-select-empty">No suggestion found. Your custom value will be used.</span>}
+    </div>, document.body)}
+  </span>
 }
 
 export function Textarea(props: JSX.TextareaHTMLAttributes<HTMLTextAreaElement>) {

@@ -2,7 +2,7 @@ import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, patch, post, remove } from './api'
 import {
-  Badge, Button, Empty, Field, Input, JobTable, KeyValues, Lines, Note, Options, PageHeader,
+  Badge, Button, Combo, Empty, Field, Input, JobTable, KeyValues, Lines, Note, Options, PageHeader,
   Panel, Segmented, Select, Stat, Table, Tabs, Textarea, Toggle, parseTerms, splitComma, termText, timeText,
 } from './components'
 import { Icon } from './icons'
@@ -128,6 +128,9 @@ export function App() {
   if (!state) return <Splash error={error} />
   if (!state.projectFound) return <ProjectSetup state={state} act={act} error={error} onOpenPreview={async () => {
     await act(() => post('/api/preview/start', { open: true }), undefined, false)
+  }} onContinue={async (next) => {
+    await reload()
+    navigate(next)
   }} />
 
   const project = state.project!
@@ -238,7 +241,7 @@ const emptySetupSource = (): SetupSource => ({
   subdirectory: '', authMethod: 'automatic', gitUsername: '', gitSecret: '', specInput: 'file', specContent: '',
 })
 
-function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; act: Action; error: string; onOpenPreview: () => Promise<void> }) {
+function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state: UiState; act: Action; error: string; onOpenPreview: () => Promise<void>; onContinue: (page: 'authoring' | 'sync' | 'publish') => Promise<void> }) {
   const [form, setForm] = useState(() => {
     const agent = state.agents?.find((item) => item.executable)?.name ?? 'codex'
     const model = defaultModelForAgent(agent)
@@ -294,6 +297,7 @@ function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; ac
   const [creationJob, setCreationJob] = useState<UiJob | null>(null)
   const [creationStreamConnected, setCreationStreamConnected] = useState(false)
   const [openingPreview, setOpeningPreview] = useState(false)
+  const [cancellingCreation, setCancellingCreation] = useState(false)
   const [requestedAgentInstall, setRequestedAgentInstall] = useState('')
   const generators = state.generators
   const availableModels = agentModels(form.agent)
@@ -582,6 +586,16 @@ function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; ac
       setSubmitting(false)
     }
   }
+  const cancelDocumentationCreation = async () => {
+    if (!creationJob || creationJob.status !== 'running') return
+    setCancellingCreation(true)
+    try {
+      const result = await act(() => post<UiJob>(`/api/jobs/${creationJob.id}/cancel`), undefined, false)
+      if (result) setCreationJob(result)
+    } finally {
+      setCancellingCreation(false)
+    }
+  }
   const createDocumentation = async () => {
     setSubmitting(true)
     setSetupError('')
@@ -710,7 +724,7 @@ function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; ac
             <footer><Button onClick={() => setSourceFlowStep('closed')}>Cancel</Button><Button tone="primary" busy={savingSource} disabled={form.sourceKind === 'directory' ? sourceType === 'git' ? !gitHead || gitFoldersLoading : !form.sourcePath.trim() : form.specInput === 'file' ? !form.specContent.trim() : !form.sourcePath.trim()} onClick={() => void addSetupSource()}>Add source</Button></footer>
           </section></div>}
         </>}
-        {step === 3 && <><SetupStepHeading visual="🪄" title="Configure your tools" detail="Choose how Doxloop should generate your documentation." />
+        {step === 3 && <div class="setup-tools-stage"><SetupStepHeading visual="🪄" title="Configure your tools" detail="Choose how Doxloop should generate your documentation." />
           <div class="setup-tools"><Field label="Documentation generator" hint="Creates and organizes your documentation."><Select value={form.generator} onChange={(event) => update('generator', event.currentTarget.value)}>{generators.map((item) => <option value={item.id}>{item.displayName}</option>)}</Select>{form.generator === 'doxbrix' && <small class="recommended-label"><Icon name="sparkle" size={12} />Recommended</small>}</Field><Field label="Coding assistant" hint="Helps understand and explain your product."><Select value={form.agent} disabled={selectedAgentInstallJob?.status === 'running'} onChange={(event) => {
             const agent = event.currentTarget.value
             const model = defaultModelForAgent(agent)
@@ -725,34 +739,30 @@ function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; ac
                 ? <AgentInstallProgress job={selectedAgentInstallJob} onRetry={() => void installSelectedAgent()} />
                 : <Button size="sm" tone="primary" busy={agentInstallPending} onClick={() => void installSelectedAgent()}>Install {agentLabel(form.agent)}</Button>}
             </div>}
-            <Field label="Select Model" hint={form.agent ? `Models available for ${agentLabel(form.agent)}.` : 'Select a coding assistant first.'}><Select value={form.model} disabled={!availableModels.length} onChange={(event) => {
-            const model = event.currentTarget.value
-            const level = preferredReasoningLevel(form.agent, model)
-            setForm((current) => ({ ...current, model, reasoning: current.agent === 'codex' ? level : '', effort: current.agent === 'claude' ? level : '' }))
-          }}>{availableModels.length ? availableModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>) : <option value="">Select coding assistant first</option>}</Select></Field><Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'} hint={supportedReasoning.length ? `Supported by ${availableModels.find((model) => model.id === form.model)?.label ?? form.model}.` : 'This model uses its default reasoning behavior.'}><Select value={form.agent === 'claude' ? form.effort : form.reasoning} disabled={!supportedReasoning.length} onChange={(event) => update(form.agent === 'claude' ? 'effort' : 'reasoning', event.currentTarget.value)}>{supportedReasoning.length ? supportedReasoning.map((value) => <option key={value} value={value}>{value}</option>) : <option value="">Default</option>}</Select></Field><div class="screenshot-option setup-screenshot-option"><span>Capture application screenshots</span><Toggle checked={form.screenshots} onChange={(screenshots) => setForm((current) => ({ ...current, screenshots }))} label="Capture screenshots during documentation creation" /></div></div>
-          {selectedAgent && <div class="setup-success-note"><span><Icon name="check" size={13} /></span><p><strong>Great choice!</strong>This setup works well for most projects and is easy to change later.</p></div>}</>}
+            <Field label="Select Model" hint={form.agent ? `Search suggested ${agentLabel(form.agent)} models or enter another model ID.` : 'Select a coding assistant first.'}><Combo value={form.model} options={availableModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => update('model', value)} /></Field><Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'} hint={supportedReasoning.length ? 'Search suggested levels or enter a custom value.' : 'Enter a supported value, or leave blank for the default.'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => update(form.agent === 'claude' ? 'effort' : 'reasoning', value)} /></Field><div class="screenshot-option setup-screenshot-option"><span>Capture application screenshots</span><Toggle checked={form.screenshots} onChange={(screenshots) => setForm((current) => ({ ...current, screenshots }))} label="Capture screenshots during documentation creation" /></div></div>
+          {selectedAgent && <div class="setup-success-note"><span><Icon name="check" size={13} /></span><p><strong>Great choice!</strong>This setup works well for most projects and is easy to change later.</p></div>}</div>}
         {step === 4 && !creationJob && <><div class="setup-review-heading"><span aria-hidden="true">🚀</span><div><h1>Review and create</h1><p>Everything looks good! Let's create your documentation.</p></div></div>
           <div class="setup-review-grid">
-            <section class="setup-review-summary" aria-label="Documentation configuration">
-              <ReviewSummaryRow icon="folder" label="Workspace name"><strong>{form.directory}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="file" label="Docs title"><strong>{form.title}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count">{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="sparkle" label="Generator"><strong>{generatorLabel(generators, form.generator)}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="api" label="Coding assistant"><strong>{form.agent ? agentLabel(form.agent) : 'Choose later'}</strong></ReviewSummaryRow>
+            <section class="setup-review-summary concise" aria-label="Documentation configuration">
+              <ReviewSummaryRow icon="file" label="Title"><strong>{form.title}</strong></ReviewSummaryRow>
+              <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count"><Icon name="check" size={12} />{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
               <ReviewSummaryRow icon="bot" label="Model"><strong>{form.model || 'Default'}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="settings" label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><strong>{form.agent === 'codex' ? form.reasoning : form.agent === 'claude' ? form.effort : 'Default'}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="preview" label="Capture screenshots" trailing={<span class={`review-toggle-state ${form.screenshots ? 'on' : ''}`}><i />{form.screenshots ? 'On' : 'Off'}</span>}><strong>{form.screenshots ? 'Enabled' : 'Disabled'}</strong></ReviewSummaryRow>
             </section>
           </div>
           <div class="setup-review-ready"><span><Icon name="check" size={20} /></span><div><strong>All set to create!</strong><small>We'll create your documentation workspace with the configuration above.</small></div></div>
           {submitting && sources.some((source) => source.sourceLocation === 'git') && <Note>Downloading read-only repository snapshots and starting documentation creation…</Note>}
           {(setupError || error) && <Note tone="bad">{error || setupError}</Note>}</>}
         {step === 4 && creationJob && <SetupCreationProgress job={creationJob} streamConnected={creationStreamConnected} />}
+        {step === 4 && creationJob?.status === 'succeeded' && <SetupNextSteps
+          openingPreview={openingPreview}
+          onPreview={() => void openDocumentationPreview()}
+          onContinue={(next) => void onContinue(next)}
+        />}
         {step === 4 && creationJob && (setupError || error) && <Note tone="bad">{error || setupError}</Note>}
         {step !== 4 && setupError && <Note tone="bad">{setupError}</Note>}
         <footer class="setup-actions setup-review-actions">
           {creationJob
-            ? <><div class="setup-creation-footer-status"><span class={creationJob.status} /><strong>{creationJob.status === 'running' ? 'Documentation creation in progress' : creationJob.status === 'succeeded' ? 'Documentation is ready' : 'Documentation creation stopped'}</strong></div><div>{creationJob.status === 'succeeded' && <Button tone="primary" icon="preview" busy={openingPreview} onClick={() => void openDocumentationPreview()}>Preview Documentation</Button>}{(creationJob.status === 'failed' || creationJob.status === 'cancelled') && <Button tone="primary" icon="refresh" busy={submitting} onClick={() => void retryDocumentationCreation()}>Try Again</Button>}</div></>
+            ? <><div class="setup-creation-footer-status"><span class={creationJob.status} /><strong>{creationJob.status === 'running' ? 'Documentation creation in progress' : creationJob.status === 'succeeded' ? 'Documentation is ready — choose a next step above' : 'Documentation creation stopped'}</strong></div><div>{creationJob.status === 'running' && <Button tone="danger" icon="stop" busy={cancellingCreation} onClick={() => void cancelDocumentationCreation()}>Stop creation</Button>}{creationJob.status === 'succeeded' && <Button icon="columns" onClick={() => void onContinue('authoring')}>Open Workspace</Button>}{(creationJob.status === 'failed' || creationJob.status === 'cancelled') && <Button tone="primary" icon="refresh" busy={submitting} onClick={() => void retryDocumentationCreation()}>Try Again</Button>}</div></>
             : <><div class="setup-review-progress"><strong>Step {step} of 4</strong><span>{[1, 2, 3, 4].map((item) => <span class={item === step ? 'current' : item < step ? 'complete' : 'pending'} key={item}><i>{item <= step && <Icon name="check" size={10} />}</i>{item < 4 && <b />}</span>)}</span></div>
               <div>{step > 1 && <Button class="setup-back-button" onClick={() => setStep((value) => value - 1)}>Back</Button>}
                 {step < 4
@@ -763,6 +773,30 @@ function ProjectSetup({ state, act, error, onOpenPreview }: { state: UiState; ac
       </div>
     </section>
   </div>
+}
+
+function SetupNextSteps({ openingPreview, onPreview, onContinue }: {
+  openingPreview: boolean
+  onPreview: () => void
+  onContinue: (page: 'authoring' | 'sync' | 'publish') => void
+}) {
+  return <section class="setup-next-steps" aria-labelledby="setup-next-steps-title">
+    <header>
+      <div><span><Icon name="sparkles" size={17} /></span><div><h2 id="setup-next-steps-title">What would you like to do next?</h2><p>Your documentation stays local until you choose to publish it.</p></div></div>
+    </header>
+    <div class="setup-next-step-grid">
+      <button type="button" class="setup-next-step featured" disabled={openingPreview} onClick={onPreview}>
+        <span class="setup-next-step-icon"><Icon name="preview" size={18} /></span><strong>{openingPreview ? 'Opening preview…' : 'Preview documentation'}</strong><Icon name="external" size={13} />
+      </button>
+      <button type="button" class="setup-next-step" onClick={() => onContinue('publish')}>
+        <span class="setup-next-step-icon publish"><Icon name="publish" size={18} /></span><strong>Publish to Doxbrix</strong><Icon name="arrowRight" size={13} />
+      </button>
+      <button type="button" class="setup-next-step" onClick={() => onContinue('sync')}>
+        <span class="setup-next-step-icon monitor"><Icon name="sync" size={18} /></span><strong>Set up monitoring</strong><Icon name="arrowRight" size={13} />
+      </button>
+      <button type="button" class="setup-next-step" onClick={() => onContinue('authoring')}><span class="setup-next-step-icon update"><Icon name="wand" size={18} /></span><strong>Update documentation</strong><Icon name="arrowRight" size={13} /></button>
+    </div>
+  </section>
 }
 
 const DOCUMENTATION_PROGRESS_MESSAGES = [
@@ -1382,12 +1416,8 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
               effort: agent === 'claude' ? level : '',
             })
           }}><option value="">Select coding assistant</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
-          <Field label="Select Model"><Select value={form.model} disabled={!availableAuthorModels.length} onChange={(event) => {
-            const model = event.currentTarget.value
-            const level = preferredReasoningLevel(form.agent, model)
-            setForm({ ...form, model, reasoning: form.agent === 'codex' ? level : '', effort: form.agent === 'claude' ? level : '' })
-          }}>{availableAuthorModels.length ? availableAuthorModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>) : <option value="">Select coding assistant first</option>}</Select></Field>
-          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><Select value={form.agent === 'claude' ? form.effort : form.reasoning} disabled={!supportedAuthorReasoning.length} onChange={(event) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: event.currentTarget.value })}>{supportedAuthorReasoning.length ? supportedAuthorReasoning.map((value) => <option key={value} value={value}>{value}</option>) : <option value="">Default</option>}</Select></Field>
+          <Field label="Select Model"><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => setForm({ ...form, model: value })} /></Field>
+          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></Field>
           <div class="screenshot-option"><span>Capture application screenshots</span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
         </div>
         <Field label="What should the agent do?" wide hint={hasCompletedRun ? 'Be specific about the user outcome, or leave empty to synchronize detected source changes.' : 'Be specific about the user outcome. Leave empty to receive a complete recommendation.'}>
