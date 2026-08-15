@@ -75,6 +75,8 @@ export type DocumentationExperienceLevel =
 
 export interface DocumentationBrief {
   primaryAudience?: string
+  audiences?: string[]
+  customInstructions?: string
   experienceLevel?: DocumentationExperienceLevel
   priorityOutcomes?: string[]
   locale: string

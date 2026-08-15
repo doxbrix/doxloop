@@ -433,6 +433,19 @@ export function doxbrixDocument(input: {
   addEventListener('resize', scheduleTocUpdate);
   const events = new EventSource('/__doxloop/events');
   events.addEventListener('reload', () => location.reload());
+  function closePreviewEvents() {
+    events.close();
+  }
+  addEventListener('pagehide', closePreviewEvents, { once: true });
+  addEventListener('beforeunload', closePreviewEvents, { once: true });
+  document.addEventListener('click', (event) => {
+    const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+    if (!link || event.defaultPrevented || link.target === '_blank' || link.hasAttribute('download')) return;
+    const target = new URL(link.href, location.href);
+    const currentWithoutHash = location.origin + location.pathname + location.search;
+    const targetWithoutHash = target.origin + target.pathname + target.search;
+    if (target.origin === location.origin && targetWithoutHash !== currentWithoutHash) closePreviewEvents();
+  }, { capture: true });
   const previewNotice = document.querySelector('[data-preview-notice]');
   const previewAssistant = document.querySelector('[data-preview-assistant]');
   let previewNoticeTimer;
@@ -818,6 +831,7 @@ export function doxbrixDocument(input: {
       const active = searchResults?.querySelector('.dxb-preview-search-result.active');
       if (active) {
         event.preventDefault();
+        closePreviewEvents();
         location.href = active.href;
       }
     }

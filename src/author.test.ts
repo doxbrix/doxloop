@@ -168,6 +168,8 @@ describe('author prompts', () => {
   test('passes the persisted documentation brief to the agent', () => {
     const prompt = authorPrompt('update', [], undefined, 'doxbrix', {
       primaryAudience: 'Platform engineers',
+      audiences: ['Platform engineers', 'Security reviewers'],
+      customInstructions: 'Include a rollback note for every deployment workflow.',
       experienceLevel: 'advanced',
       priorityOutcomes: ['Deploy safely'],
       locale: 'en-GB',
@@ -180,6 +182,8 @@ describe('author prompts', () => {
     })
 
     expect(prompt).toContain('"primaryAudience": "Platform engineers"')
+    expect(prompt).toContain('"Security reviewers"')
+    expect(prompt).toContain('Include a rollback note for every deployment workflow.')
     expect(prompt).toContain('"tenant": "workspace"')
     expect(prompt).toContain('"locale": "en-GB"')
   })

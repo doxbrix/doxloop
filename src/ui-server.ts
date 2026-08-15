@@ -13,6 +13,7 @@ import { installedGeneratorEntries, parseGenerator } from './generators.js'
 import { runDoctor } from './doctor.js'
 import {
   assertNewProjectDirectory,
+  defaultDocumentationBrief,
   findProjectRoot,
   isSpecUrl,
   loadProject,
@@ -625,7 +626,13 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   await scaffoldProject({ directory: root, ...(title ? { title } : {}), sources, generator })
   const agent = parseAgent(optionalString(body.agent))
   await installSkill({ root, ...(agent ? { agent } : {}) })
-  if (agent) await saveProjectSettings(root, { defaultAgent: agent })
+  const documentation = body.documentation === undefined
+    ? undefined
+    : documentationFromBody(body.documentation, defaultDocumentationBrief())
+  if (agent || documentation) await saveProjectSettings(root, {
+    ...(agent ? { defaultAgent: agent } : {}),
+    ...(documentation ? { documentation } : {}),
+  })
   runtime.root = root
 }
 
@@ -906,6 +913,12 @@ function documentationFromBody(raw: unknown, current: DocumentationBrief): Docum
   }
   const primaryAudience = optionalString(body.primaryAudience) ?? current.primaryAudience
   if (primaryAudience) result.primaryAudience = primaryAudience
+  const audiences = body.audiences === undefined ? current.audiences : stringArray(body.audiences)
+  if (audiences?.length) result.audiences = audiences
+  const customInstructions = body.customInstructions === undefined
+    ? current.customInstructions
+    : optionalString(body.customInstructions)
+  if (customInstructions) result.customInstructions = customInstructions
   const experienceLevel = optionalString(body.experienceLevel) ?? current.experienceLevel
   if (experienceLevel === 'beginner' || experienceLevel === 'intermediate' || experienceLevel === 'advanced' || experienceLevel === 'mixed') {
     result.experienceLevel = experienceLevel

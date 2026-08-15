@@ -1051,6 +1051,8 @@ function isDocumentationBrief(value: unknown): value is DocumentationBrief {
     )
   return (
     optionalText(brief.primaryAudience) &&
+    (brief.audiences === undefined || textList(brief.audiences)) &&
+    optionalText(brief.customInstructions) &&
     (brief.experienceLevel === undefined ||
       ['beginner', 'intermediate', 'advanced', 'mixed'].includes(
         brief.experienceLevel,

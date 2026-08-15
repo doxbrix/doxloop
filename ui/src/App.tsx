@@ -21,7 +21,7 @@ const NAV = [
   ['settings', 'Settings', ''],
 ] as const
 
-const DOXLOOP_ICON = new URL('../../assets/brand/doxloop-favicon.png', import.meta.url).href
+const DOXLOOP_LOGO = new URL('../../assets/brand/doxloop-logo-light.png', import.meta.url).href
 
 type Page = typeof NAV[number][0]
 
@@ -151,7 +151,7 @@ export function App() {
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
-      <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_ICON} alt="" /></span><strong>Doxloop</strong><button type="button" aria-label="Collapse navigation"><Icon name="chevronRight" size={14} /><Icon name="chevronRight" size={14} /></button></div>
+      <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span><button type="button" aria-label="Collapse navigation"><Icon name="chevronRight" size={14} /><Icon name="chevronRight" size={14} /></button></div>
       <Button class="sidebar-create-docs" icon="plus" onClick={() => navigate('authoring')}>Create documentation</Button>
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
         {([['home', 'columns', 'Workspaces'], ['sources', 'sources', 'Sources'], ['authoring', 'file', 'Documentation'], ['quality', 'book', 'Library'], ['settings', 'settings', 'Settings']] as const).map(([id, icon, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{label}</span></button>)}
@@ -267,6 +267,8 @@ function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state:
       reasoning: agent === 'codex' ? reasoning : '',
       effort: agent === 'claude' ? reasoning : '',
       screenshots: false,
+      audiences: [] as string[],
+      customInstructions: '',
     }
   })
   const [step, setStep] = useState(1)
@@ -307,7 +309,6 @@ function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state:
     ? state.jobs.find((job) => job.type === 'agent:install' && job.agent === form.agent && (job.status === 'running' || job.agent === requestedAgentInstall))
     : undefined
   const agentInstallPending = requestedAgentInstall === form.agent && !selectedAgentInstallJob
-  const steps = [['Name your workspace', 'Give your docs a home'], ['Connect sources', 'Combine all your content'], ['Choose tools', "Pick how we'll build your docs"], ['Review & create', 'Confirm and launch']] as const
   const openDocumentationPreview = async () => {
     if (openingPreview) return
     setOpeningPreview(true)
@@ -617,7 +618,15 @@ function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state:
         }
       }
       if (!projectCreated) {
-        const created = await act(() => post<UiState>('/api/project', { ...form, sources }), undefined, false)
+        const created = await act(() => post<UiState>('/api/project', {
+          ...form,
+          sources,
+          documentation: {
+            audiences: form.audiences,
+            primaryAudience: form.audiences.join(', '),
+            customInstructions: form.customInstructions,
+          },
+        }), undefined, false)
         if (!created) {
           setSetupError('The documentation workspace could not be created. Review the configuration and try again.')
           return
@@ -634,11 +643,11 @@ function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state:
   return <div class="setup reference-setup">
     <section class="setup-panel">
       <aside class="setup-rail">
-        <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_ICON} alt="" /></span><strong>Doxloop</strong></div>
+        <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span></div>
         <div class="setup-sidebar-heading"><strong>Create documentation</strong><small>Configure your documentation workspace</small></div>
-        <nav class="reference-sidebar-nav setup-reference-nav" aria-label="Setup navigation">{([['folder', 'Workspace', 'Name your workspace'], ['sources', 'Sources', 'Connect your content'], ['settings', 'Tools', 'Configure generation'], ['quality', 'Review', 'Review and create']] as const).map(([icon, label, detail], index) => <button type="button" key={label} disabled={Boolean(creationJob) || index + 1 > step} class={step === index + 1 ? 'active' : ''} onClick={() => setStep(index + 1)}><Icon name={icon} size={18} /><span><strong>{label}</strong><small>{detail}</small></span></button>)}</nav>
+        <nav class="reference-sidebar-nav setup-reference-nav" aria-label="Setup navigation">{([['folder', 'Workspace', 'Name your workspace'], ['sources', 'Sources', 'Connect your content'], ['settings', 'Tools', 'Configure generation'], ['users', 'Guidance', 'Audience and instructions'], ['quality', 'Review', 'Review and create']] as const).map(([icon, label, detail], index) => <button type="button" key={label} disabled={Boolean(creationJob) || index + 1 > step} class={step === index + 1 ? 'active' : ''} onClick={() => setStep(index + 1)}><Icon name={icon} size={18} /><span><strong>{label}</strong><small>{detail}</small></span></button>)}</nav>
       </aside>
-      <div class={`setup-body ${step === 1 ? 'setup-home-body' : step === 4 ? 'setup-review-body' : ''}`}>
+      <div class={`setup-body ${step === 1 ? 'setup-home-body' : step === 5 ? 'setup-review-body' : ''}`}>
         {step === 1 && <div class="setup-home-card">
           <header class="setup-home-heading"><span><Icon name="folder" size={34} /></span><div><h1>Let's name your workspace</h1><p>This will be your docs' home in Doxloop.</p></div></header>
           <div class="setup-home-fields"><section class="setup-home-field"><span class="setup-home-field-icon workspace"><Icon name="folder" size={25} /></span><Field label="Workspace name" hint="This is the folder where your docs will live."><ValidatedSetupInput value={form.directory} valid={Boolean(form.directory.trim()) && !pathErrors.directory} invalid={Boolean(pathErrors.directory)} onInput={(value) => update('directory', value)} />{pathErrors.directory && <small class="field-error">{pathErrors.directory}</small>}</Field></section><section class="setup-home-field"><span class="setup-home-field-icon title">T<small>T</small></span><Field label="What should we call your docs?" hint="This is the title people will see."><ValidatedSetupInput value={form.title} valid={Boolean(form.title.trim())} onInput={(value) => update('title', value)} /></Field></section></div>
@@ -741,37 +750,122 @@ function ProjectSetup({ state, act, error, onOpenPreview, onContinue }: { state:
             </div>}
             <Field label="Select Model" hint={form.agent ? `Search suggested ${agentLabel(form.agent)} models or enter another model ID.` : 'Select a coding assistant first.'}><Combo value={form.model} options={availableModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => update('model', value)} /></Field><Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'} hint={supportedReasoning.length ? 'Search suggested levels or enter a custom value.' : 'Enter a supported value, or leave blank for the default.'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => update(form.agent === 'claude' ? 'effort' : 'reasoning', value)} /></Field><div class="screenshot-option setup-screenshot-option"><span>Capture application screenshots</span><Toggle checked={form.screenshots} onChange={(screenshots) => setForm((current) => ({ ...current, screenshots }))} label="Capture screenshots during documentation creation" /></div></div>
           {selectedAgent && <div class="setup-success-note"><span><Icon name="check" size={13} /></span><p><strong>Great choice!</strong>This setup works well for most projects and is easy to change later.</p></div>}</div>}
-        {step === 4 && !creationJob && <><div class="setup-review-heading"><span aria-hidden="true">🚀</span><div><h1>Review and create</h1><p>Everything looks good! Let's create your documentation.</p></div></div>
+        {step === 4 && <DocumentationGuidance
+          audiences={form.audiences}
+          customInstructions={form.customInstructions}
+          onAudiencesChange={(audiences) => setForm((current) => ({ ...current, audiences }))}
+          onInstructionsChange={(customInstructions) => setForm((current) => ({ ...current, customInstructions }))}
+        />}
+        {step === 5 && !creationJob && <><div class="setup-review-heading"><span aria-hidden="true">🚀</span><div><h1>Review and create</h1><p>Everything looks good! Let's create your documentation.</p></div></div>
           <div class="setup-review-grid">
             <section class="setup-review-summary concise" aria-label="Documentation configuration">
               <ReviewSummaryRow icon="file" label="Title"><strong>{form.title}</strong></ReviewSummaryRow>
               <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count"><Icon name="check" size={12} />{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
               <ReviewSummaryRow icon="bot" label="Model"><strong>{form.model || 'Default'}</strong></ReviewSummaryRow>
+              <ReviewSummaryRow icon="users" label="Guidance"><span class="review-guidance"><strong>{form.audiences.length ? form.audiences.join(', ') : 'Agent will determine the audience'}</strong><small>{form.customInstructions.trim() || 'No custom instructions'}</small></span></ReviewSummaryRow>
             </section>
           </div>
           <div class="setup-review-ready"><span><Icon name="check" size={20} /></span><div><strong>All set to create!</strong><small>We'll create your documentation workspace with the configuration above.</small></div></div>
           {submitting && sources.some((source) => source.sourceLocation === 'git') && <Note>Downloading read-only repository snapshots and starting documentation creation…</Note>}
           {(setupError || error) && <Note tone="bad">{error || setupError}</Note>}</>}
-        {step === 4 && creationJob && <SetupCreationProgress job={creationJob} streamConnected={creationStreamConnected} />}
-        {step === 4 && creationJob?.status === 'succeeded' && <SetupNextSteps
+        {step === 5 && creationJob && <SetupCreationProgress job={creationJob} model={form.model} streamConnected={creationStreamConnected} />}
+        {step === 5 && creationJob?.status === 'succeeded' && <SetupNextSteps
           openingPreview={openingPreview}
           onPreview={() => void openDocumentationPreview()}
           onContinue={(next) => void onContinue(next)}
         />}
-        {step === 4 && creationJob && (setupError || error) && <Note tone="bad">{error || setupError}</Note>}
-        {step !== 4 && setupError && <Note tone="bad">{setupError}</Note>}
+        {step === 5 && creationJob && (setupError || error) && <Note tone="bad">{error || setupError}</Note>}
+        {step !== 5 && setupError && <Note tone="bad">{setupError}</Note>}
         <footer class="setup-actions setup-review-actions">
           {creationJob
             ? <><div class="setup-creation-footer-status"><span class={creationJob.status} /><strong>{creationJob.status === 'running' ? 'Documentation creation in progress' : creationJob.status === 'succeeded' ? 'Documentation is ready — choose a next step above' : 'Documentation creation stopped'}</strong></div><div>{creationJob.status === 'running' && <Button tone="danger" icon="stop" busy={cancellingCreation} onClick={() => void cancelDocumentationCreation()}>Stop creation</Button>}{creationJob.status === 'succeeded' && <Button icon="columns" onClick={() => void onContinue('authoring')}>Open Workspace</Button>}{(creationJob.status === 'failed' || creationJob.status === 'cancelled') && <Button tone="primary" icon="refresh" busy={submitting} onClick={() => void retryDocumentationCreation()}>Try Again</Button>}</div></>
-            : <><div class="setup-review-progress"><strong>Step {step} of 4</strong><span>{[1, 2, 3, 4].map((item) => <span class={item === step ? 'current' : item < step ? 'complete' : 'pending'} key={item}><i>{item <= step && <Icon name="check" size={10} />}</i>{item < 4 && <b />}</span>)}</span></div>
+            : <><div class="setup-review-progress"><strong>Step {step} of 5</strong><span>{[1, 2, 3, 4, 5].map((item) => <span class={item === step ? 'current' : item < step ? 'complete' : 'pending'} key={item}><i>{item <= step && <Icon name="check" size={10} />}</i>{item < 5 && <b />}</span>)}</span></div>
               <div>{step > 1 && <Button class="setup-back-button" onClick={() => setStep((value) => value - 1)}>Back</Button>}
-                {step < 4
+                {step < 5
                   ? <Button tone="primary" busy={validatingPaths} disabled={(step === 1 && (!form.directory.trim() || !form.title.trim() || Boolean(pathErrors.directory))) || (step === 2 && (sources.length === 0 || sourceFlowStep !== 'closed')) || (step === 3 && Boolean(form.agent) && !selectedAgent)} onClick={() => void continueSetup()}>Continue <Icon name="arrowRight" size={14} /></Button>
                   : <Button tone="primary" icon="sparkle" busy={submitting} onClick={() => void createDocumentation()}>Create Documentation</Button>}
               </div></>}
         </footer>
       </div>
     </section>
+  </div>
+}
+
+const AUDIENCE_SUGGESTIONS = [
+  'Developers',
+  'API consumers',
+  'Administrators',
+  'End users',
+  'Technical decision-makers',
+] as const
+
+const INSTRUCTION_SUGGESTIONS = [
+  ['Beginner-friendly', 'Explain unfamiliar concepts for readers who are new to the product.'],
+  ['Concise', 'Keep explanations concise and action-oriented.'],
+  ['Code-heavy', 'Prioritize practical code examples where the sources support them.'],
+  ['Include examples', 'Include realistic examples for important workflows.'],
+] as const
+
+function DocumentationGuidance({ audiences, customInstructions, onAudiencesChange, onInstructionsChange }: {
+  audiences: string[]
+  customInstructions: string
+  onAudiencesChange: (audiences: string[]) => void
+  onInstructionsChange: (instructions: string) => void
+}) {
+  const [audienceInput, setAudienceInput] = useState('')
+  const matchingSuggestions = AUDIENCE_SUGGESTIONS.filter((suggestion) =>
+    suggestion.toLowerCase().includes(audienceInput.trim().toLowerCase()),
+  )
+  const addAudience = (value: string) => {
+    const audience = value.trim().replace(/,$/, '').trim()
+    if (!audience || audiences.some((item) => item.toLowerCase() === audience.toLowerCase())) {
+      setAudienceInput('')
+      return
+    }
+    onAudiencesChange([...audiences, audience])
+    setAudienceInput('')
+  }
+  const toggleAudience = (audience: string) => {
+    const selected = audiences.some((item) => item.toLowerCase() === audience.toLowerCase())
+    onAudiencesChange(selected
+      ? audiences.filter((item) => item.toLowerCase() !== audience.toLowerCase())
+      : [...audiences, audience])
+  }
+  const toggleInstruction = (instruction: string) => {
+    const lines = customInstructions.split('\n').map((line) => line.trim()).filter(Boolean)
+    onInstructionsChange(lines.includes(instruction)
+      ? lines.filter((line) => line !== instruction).join('\n')
+      : [...lines, instruction].join('\n'))
+  }
+  return <div class="setup-guidance-stage">
+    <SetupStepHeading visual="✍️" title="Guide your documentation" detail="Help the agent tailor the documentation to your readers and preferences." />
+    <div class="setup-guidance-card">
+      <section class="setup-guidance-section">
+        <div class="setup-guidance-label"><span><strong>Who is this documentation for?</strong><small>Select suggestions or enter your own audience.</small></span><em>Optional</em></div>
+        <div class="audience-picker" onClick={(event) => (event.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
+          {audiences.map((audience) => <span class="audience-token" key={audience}>{audience}<button type="button" aria-label={`Remove ${audience}`} onClick={(event) => { event.stopPropagation(); toggleAudience(audience) }}><Icon name="close" size={11} /></button></span>)}
+          <input value={audienceInput} aria-label="Add an audience" placeholder={audiences.length ? 'Add another audience…' : 'Type an audience and press Enter…'} onInput={(event) => setAudienceInput(event.currentTarget.value)} onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ',') {
+              event.preventDefault()
+              addAudience(event.currentTarget.value)
+            } else if (event.key === 'Backspace' && !event.currentTarget.value && audiences.length) {
+              onAudiencesChange(audiences.slice(0, -1))
+            }
+          }} onBlur={() => addAudience(audienceInput)} />
+        </div>
+        <div class="guidance-suggestions" aria-label="Suggested audiences">
+          {matchingSuggestions.map((audience) => <button type="button" class={audiences.includes(audience) ? 'selected' : ''} aria-pressed={audiences.includes(audience)} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleAudience(audience)} key={audience}>{audiences.includes(audience) && <Icon name="check" size={11} />}{audience}</button>)}
+        </div>
+      </section>
+      <section class="setup-guidance-section">
+        <div class="setup-guidance-label"><span><strong>Instructions</strong><small>Describe how you want the agent to prepare the documentation.</small></span><em>Optional</em></div>
+        <Textarea rows={6} value={customInstructions} placeholder="For example: Use concise explanations, include TypeScript examples, and add troubleshooting sections." onInput={(event) => onInstructionsChange(event.currentTarget.value)} />
+        <div class="guidance-suggestions instruction-suggestions" aria-label="Suggested writing instructions">
+          {INSTRUCTION_SUGGESTIONS.map(([label, instruction]) => <button type="button" class={customInstructions.split('\n').map((line) => line.trim()).includes(instruction) ? 'selected' : ''} aria-pressed={customInstructions.split('\n').map((line) => line.trim()).includes(instruction)} onClick={() => toggleInstruction(instruction)} key={label}>{customInstructions.split('\n').map((line) => line.trim()).includes(instruction) && <Icon name="check" size={11} />}{label}</button>)}
+        </div>
+      </section>
+    </div>
+    <div class="setup-guidance-note"><Icon name="sparkles" size={15} /><span>These preferences are saved with the workspace and reused for future documentation updates.</span></div>
   </div>
 }
 
@@ -806,7 +900,7 @@ const DOCUMENTATION_PROGRESS_MESSAGES = [
   'Finishing the documentation and preparing your preview…',
 ]
 
-function SetupCreationProgress({ job, streamConnected }: { job: UiJob; streamConnected: boolean }) {
+function SetupCreationProgress({ job, model, streamConnected }: { job: UiJob; model: string; streamConnected: boolean }) {
   const [messageIndex, setMessageIndex] = useState(0)
   const [clock, setClock] = useState(() => Date.now())
   const log = useRef<HTMLPreElement>(null)
@@ -841,7 +935,7 @@ function SetupCreationProgress({ job, streamConnected }: { job: UiJob; streamCon
     <section class="setup-creation-status-card">
       <div class="setup-creation-status-top"><span><i class={job.status} />{running ? 'Generation in progress' : succeeded ? 'Generation complete' : 'Generation failed'}</span>{running && <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>}</div>
       <div class="setup-creation-track"><i /></div>
-      <div class="setup-creation-meta"><span><Icon name="bot" size={14} />{job.agent ? agentLabel(job.agent) : 'Coding agent'}</span><span class="setup-creation-elapsed"><Icon name="clock" size={14} />{running ? 'Working for' : 'Worked for'} <strong>{elapsed}</strong></span><span><Icon name="file" size={14} />{job.lines.length} log {job.lines.length === 1 ? 'entry' : 'entries'}</span></div>
+      <div class="setup-creation-meta"><span><Icon name="bot" size={14} />{job.agent ? agentLabel(job.agent) : 'Coding agent'}</span><span class="setup-creation-model"><Icon name="sparkles" size={14} />Model <strong>{model || 'Default'}</strong></span><span class="setup-creation-elapsed"><Icon name="clock" size={14} />{running ? 'Working for' : 'Worked for'} <strong>{elapsed}</strong></span><span><Icon name="file" size={14} />{job.lines.length} log {job.lines.length === 1 ? 'entry' : 'entries'}</span></div>
     </section>
     <section class="setup-creation-log" aria-label="Documentation creation activity">
       <header><div><span><Icon name="record" size={14} /></span><strong>Live activity</strong></div><a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a></header>
@@ -1861,7 +1955,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
   const project = state.project!
   const [section, setSection] = useState<typeof SETTINGS_SECTIONS[number][0]>('general')
   const [identity, setIdentity] = useState({ title: project.title, defaultAgent: project.defaultAgent ?? '' })
-  const [docs, setDocs] = useState({ ...project.documentation, outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
+  const [docs, setDocs] = useState({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
   const [references, setReferences] = useState(project.designReferences.map((item) => item.url).join('\n'))
   const [application, setApplication] = useState({
     baseUrl: project.application?.baseUrl ?? '',
@@ -1873,7 +1967,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
     viewportWidth: String(project.application?.screenshots?.viewport?.width ?? 1440),
     viewportHeight: String(project.application?.screenshots?.viewport?.height ?? 900),
   })
-  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, priorityOutcomes: splitComma(docs.outcomesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: parseTerms(docs.termsText) } }), 'Documentation preferences saved')
+  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: parseTerms(docs.termsText) } }), 'Documentation preferences saved')
   return <>
     <PageHeader title="Settings" description="Shape the documentation experience for this workspace." />
     <div class="settings">
@@ -1895,6 +1989,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
         {section === 'experience' && <Panel title="Audience and voice" description="These preferences guide every documentation run, so results stay consistent.">
           <div class="form-grid">
             <Field label="Primary audience"><Input value={docs.primaryAudience ?? ''} placeholder="Developers integrating our API" onInput={(event) => setDocs({ ...docs, primaryAudience: event.currentTarget.value })} /></Field>
+            <Field label="Audiences" hint="Separate multiple audiences with commas"><Input value={docs.audiencesText} placeholder="Developers, API consumers, administrators" onInput={(event) => setDocs({ ...docs, audiencesText: event.currentTarget.value })} /></Field>
             <Field label="Experience level"><Select value={docs.experienceLevel ?? 'intermediate'} onChange={(event) => setDocs({ ...docs, experienceLevel: event.currentTarget.value })}><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option></Select></Field>
             <Field label="Locale"><Input value={docs.locale} onInput={(event) => setDocs({ ...docs, locale: event.currentTarget.value })} /></Field>
             <Field label="Accessibility target"><Input value={docs.accessibilityTarget} onInput={(event) => setDocs({ ...docs, accessibilityTarget: event.currentTarget.value })} /></Field>
@@ -1904,6 +1999,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
             <Field label="Style guide"><Input value={docs.styleGuide} onInput={(event) => setDocs({ ...docs, styleGuide: event.currentTarget.value })} /></Field>
             <Field label="Preferred terminology" hint="One “term = replacement” per line"><Textarea rows={5} value={docs.termsText} onInput={(event) => setDocs({ ...docs, termsText: event.currentTarget.value })} /></Field>
             <Field label="Content exclusions" hint="One item per line"><Textarea rows={5} value={docs.exclusionsText} onInput={(event) => setDocs({ ...docs, exclusionsText: event.currentTarget.value })} /></Field>
+            <Field label="Instructions" hint="Additional guidance reused for future documentation runs" wide><Textarea rows={5} value={docs.customInstructions} placeholder="Use concise explanations and include TypeScript examples." onInput={(event) => setDocs({ ...docs, customInstructions: event.currentTarget.value })} /></Field>
           </div>
           <div class="form-actions"><Button tone="primary" onClick={() => void saveDocs()}>Save changes</Button></div>
         </Panel>}

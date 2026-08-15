@@ -181,6 +181,12 @@ describe('project scaffolding', () => {
     await saveProjectSettings(root, {
       title: 'Payments API',
       defaultAgent: 'codex',
+      documentation: {
+        ...(await loadProject(root)).documentation,
+        primaryAudience: 'API developers',
+        audiences: ['API developers', 'Platform engineers'],
+        customInstructions: 'Include TypeScript examples.',
+      },
       deployment: {
         name: 'Payments Documentation',
         slug: 'payments-docs',
@@ -192,6 +198,11 @@ describe('project scaffolding', () => {
     expect(await loadProject(root)).toMatchObject({
       title: 'Payments API',
       defaultAgent: 'codex',
+      documentation: {
+        primaryAudience: 'API developers',
+        audiences: ['API developers', 'Platform engineers'],
+        customInstructions: 'Include TypeScript examples.',
+      },
       deployment: {
         name: 'Payments Documentation',
         slug: 'payments-docs',

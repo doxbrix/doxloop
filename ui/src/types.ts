@@ -32,6 +32,8 @@ export interface Project {
   designReferences: Array<{ url: string }>
   documentation: {
     primaryAudience?: string
+    audiences?: string[]
+    customInstructions?: string
     experienceLevel?: string
     priorityOutcomes?: string[]
     locale: string
