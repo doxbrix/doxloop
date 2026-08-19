@@ -853,7 +853,7 @@ function navTree(nodes: DoxbrixNavNode[], current: string, depth = 0): string {
         return `<a class="dp-nav-item${depthClass(depth)}" href="${escapeAttr(safeNavigationHref(node.href))}">${navIcon(node.icon)}<span class="dp-nav-item-label">${escapeHtml(node.title)}</span></a>`
       }
       if (node.type === 'api') {
-        return `<div class="dp-nav-item${depthClass(depth)}">${navIcon(node.icon)}<span class="dp-nav-item-label">${escapeHtml(node.title)}</span></div>`
+        return `<a class="dp-nav-item${depthClass(depth)}" href="${escapeAttr(apiSpecHref(node.spec))}" target="_blank" rel="noreferrer">${navIcon(node.icon)}<span class="dp-nav-item-label">${escapeHtml(node.title)}</span></a>`
       }
       if (node.type === 'group') {
         const children = navTree(node.items, current, depth + 1)
@@ -1135,7 +1135,11 @@ function googleFontStylesheet(families: string[]): string {
   if (unique.length === 0) return ''
   const query = unique
     .slice(0, 3)
-    .map((family) => `family=${encodeURIComponent(family)}:wght@400;500;600;700;800`)
+    .map((family) =>
+      family.toLowerCase() === 'inter'
+        ? 'family=Inter:ital,wght@0,100..900;1,100..900'
+        : `family=${encodeURIComponent(family)}:wght@400;500;600;700;800`,
+    )
     .join('&')
   return `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?${query}&display=swap">`
 }
@@ -1168,6 +1172,21 @@ function safeNavigationHref(value: string): string {
     return trimmed
   }
   return '#'
+}
+
+function apiSpecHref(value: string): string {
+  const trimmed = value.trim()
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  if (
+    trimmed === '' ||
+    trimmed.startsWith('//') ||
+    trimmed.includes('\\') ||
+    trimmed.split(/[/?#]/).includes('..')
+  ) {
+    return '#'
+  }
+  const local = trimmed.replace(/^\.\//, '')
+  return local.startsWith('/') ? local : `/${local}`
 }
 
 function depthClass(depth: number): string {

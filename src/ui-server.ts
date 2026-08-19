@@ -13,6 +13,7 @@ import { installedGeneratorEntries, parseGenerator } from './generators.js'
 import { runDoctor } from './doctor.js'
 import {
   assertNewProjectDirectory,
+  completeDocumentationBriefForCreate,
   defaultDocumentationBrief,
   findProjectRoot,
   isSpecUrl,
@@ -383,7 +384,18 @@ async function handleApi(
       throw new DoxloopError('Authoring mode must be create, update, or review.')
     }
     const root = requireProject(runtime)
-    const project = await loadProject(root)
+    let project = await loadProject(root)
+    if (
+      mode === 'create' &&
+      (!project.documentation.primaryAudience ||
+        !project.documentation.priorityOutcomes?.length)
+    ) {
+      const documentation = completeDocumentationBriefForCreate(
+        project.documentation,
+      )
+      await saveProjectSettings(root, { documentation })
+      project = { ...project, documentation }
+    }
     const requestedAgent = parseAgent(optionalString(body.agent))
     const effectiveAgent = requestedAgent ?? project.defaultAgent
     const args = [mode]
@@ -626,12 +638,14 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   await scaffoldProject({ directory: root, ...(title ? { title } : {}), sources, generator })
   const agent = parseAgent(optionalString(body.agent))
   await installSkill({ root, ...(agent ? { agent } : {}) })
-  const documentation = body.documentation === undefined
-    ? undefined
-    : documentationFromBody(body.documentation, defaultDocumentationBrief())
-  if (agent || documentation) await saveProjectSettings(root, {
+  const documentation = completeDocumentationBriefForCreate(
+    body.documentation === undefined
+      ? defaultDocumentationBrief()
+      : documentationFromBody(body.documentation, defaultDocumentationBrief()),
+  )
+  await saveProjectSettings(root, {
     ...(agent ? { defaultAgent: agent } : {}),
-    ...(documentation ? { documentation } : {}),
+    documentation,
   })
   runtime.root = root
 }

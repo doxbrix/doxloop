@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   addDesignReferences,
+  completeDocumentationBriefForCreate,
+  defaultDocumentationBrief,
   loadProject,
   loadSiteConfig,
   parseDesignReference,
@@ -21,6 +23,29 @@ afterEach(async () => {
 })
 
 describe('project scaffolding', () => {
+  test('completes a documentation brief before a create run', () => {
+    expect(
+      completeDocumentationBriefForCreate(defaultDocumentationBrief()),
+    ).toMatchObject({
+      primaryAudience: 'Developers',
+      priorityOutcomes: ['Reach a first successful result'],
+    })
+  })
+
+  test('preserves configured create brief fields', () => {
+    expect(
+      completeDocumentationBriefForCreate({
+        ...defaultDocumentationBrief(),
+        audiences: ['API consumers', 'SDK maintainers'],
+        primaryAudience: 'API consumers',
+        priorityOutcomes: ['Integrate the API'],
+      }),
+    ).toMatchObject({
+      primaryAudience: 'API consumers',
+      priorityOutcomes: ['Integrate the API'],
+    })
+  })
+
   test('allows a project without a product source', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
     roots.push(parent)

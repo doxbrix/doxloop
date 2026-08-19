@@ -59,6 +59,17 @@ export function defaultDocumentationBrief(): DocumentationBrief {
   }
 }
 
+export function completeDocumentationBriefForCreate(
+  brief: DocumentationBrief,
+): DocumentationBrief {
+  const primaryAudience =
+    brief.primaryAudience || brief.audiences?.join(', ') || 'Developers'
+  const priorityOutcomes = brief.priorityOutcomes?.length
+    ? brief.priorityOutcomes
+    : ['Reach a first successful result']
+  return { ...brief, primaryAudience, priorityOutcomes }
+}
+
 /**
  * Lock files and snapshots never change reader-visible behavior. Test files are
  * deliberately absent: the authoring workflow treats tests as evidence of

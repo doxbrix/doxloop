@@ -233,10 +233,16 @@ describe('generator preview', () => {
     expect(html).toContain('--dxb-content-padding:4px')
     expect(html).toContain('--dxb-nav-padding:24px')
     expect(html).toContain('class="dp-nav-root-block active-branch"')
+    expect(html).toContain(
+      'family=Inter:ital,wght@0,100..900;1,100..900',
+    )
     expect(html).toContain('class="dp-nav-item active dp-nav-d1"')
     expect(html).toContain('class="dp-nav-item-icon dxb-atlas-nav-icon"')
     expect(html).toContain('🌐')
     expect(html).toContain('<img src="/assets/api.svg" alt="" width="15" height="15">')
+    expect(html).toContain(
+      'href="/openapi.yaml" target="_blank" rel="noreferrer"',
+    )
     expect(html).toContain('href="#"><span class="dp-nav-item-label">Unsafe link</span>')
     expect(html).not.toContain('javascript:')
   })
@@ -282,9 +288,18 @@ describe('generator preview', () => {
     expect(css).toContain('.dxb-atlas-nav-icon img')
     expect(css).toContain('object-fit: contain')
     expect(css).toContain('.tryit-overlay[hidden]')
-    expect(css).not.toContain(
-      "[data-shell-theme='atlas'] .dp-nav-item.active {\n  padding-left: 12px;"
+    expect(css).toContain('padding: 7px 12px 7px 0')
+    expect(css).toContain(
+      "[data-shell-theme='atlas'] .dp-nav-item:hover {",
     )
+    expect(css).toContain('width: calc(100% + 12px)')
+    expect(css).toContain('margin-left: -12px')
+    expect(css).toContain('padding-left: 12px')
+    expect(css).toContain('-webkit-font-smoothing: antialiased')
+    expect(css).toContain('font-size: 36px')
+    expect(css).toContain('font-weight: 600')
+    expect(css).toContain('font-size: 18px')
+    expect(css).toContain('letter-spacing: -0.0125rem')
     expect(css).toContain('background: var(--dp-surface-soft)')
     expect(css).toContain('color: var(--dp-page-text)')
     expect(css).toContain(
