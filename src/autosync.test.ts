@@ -168,6 +168,46 @@ describe('runSyncNow', () => {
     expect((await readSyncLog(root)).at(-1)).toContain('no reader-visible changes')
   })
 
+  test('manual workspace updates create a review proposal even when automatic sync is check-only', async () => {
+    const { root, project } = await makeFixture()
+    const path = join(root, 'docs', 'quickstart.mdx')
+    const before = await readFile(path, 'utf8')
+
+    const exitCode = await runSyncNow({
+      root,
+      project,
+      quiet: true,
+      authoring: {
+        request: 'Clarify the quickstart.',
+        agent: 'codex',
+        model: 'gpt-5.6-sol',
+        reasoning: 'high',
+        screenshots: 'disabled',
+      },
+      author: async (options) => {
+        expect(options).toMatchObject({
+          request: 'Clarify the quickstart.',
+          agent: 'codex',
+          model: 'gpt-5.6-sol',
+          reasoning: 'high',
+          screenshots: 'disabled',
+        })
+        await writeFile(
+          join(options.root, 'docs', 'quickstart.mdx'),
+          '---\ntitle: Quickstart\ndescription: Start the product with a clearer supported command.\n---\n\nRun the supported start command, then verify the service is ready.\n',
+        )
+        return 0
+      },
+    })
+
+    expect(exitCode).toBe(0)
+    expect(await readFile(path, 'utf8')).toBe(before)
+    expect((await listSyncRuns(root))[0]).toMatchObject({
+      status: 'awaiting-review',
+      trigger: 'manual',
+    })
+  }, 15_000)
+
   test('reports drift without starting an agent in check mode', async () => {
     const { root, product, project } = await makeFixture()
     await changeSource(product)

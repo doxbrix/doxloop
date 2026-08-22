@@ -16,7 +16,7 @@ import {
   scheduleState,
 } from './schedule.js'
 import { collectSourceChanges } from './sync.js'
-import { createSyncRun, listSyncRuns, pendingRunCount } from './sync-runs.js'
+import { createSyncRun, listSyncRuns, pendingRunCount, type CreateSyncRunOptions } from './sync-runs.js'
 import type {
   DoxloopProject,
   SyncConfig,
@@ -338,6 +338,8 @@ export async function runSyncNow(options: {
   trigger?: SyncRunTrigger
   /** Test seam; production callers always use the real author runner. */
   author?: typeof runAuthor
+  /** Manual authoring request and controls supplied by the workspace UI. */
+  authoring?: CreateSyncRunOptions['authoring']
 }): Promise<number> {
   const { root, project } = options
   const write = (text: string): void => {
@@ -350,14 +352,14 @@ export async function runSyncNow(options: {
     ? await computeDriftFromChanges(root, project, monitored.changes)
     : await computeDrift(root, project)
 
-  if (drift.status === 'current') {
+  if (drift.status === 'current' && !options.authoring) {
     await appendSyncLog(root, 'check: no reader-visible changes')
     write(`${formatDrift(drift)}\n`)
     return 0
   }
 
   write(`${formatDrift(drift)}\n`)
-  if (project.sync.mode === 'check') {
+  if (project.sync.mode === 'check' && !options.authoring) {
     await appendSyncLog(root, `check: ${pageCount(drift.pages.length)}, reporting only`)
     return 1
   }
@@ -380,6 +382,7 @@ export async function runSyncNow(options: {
     ...(monitored ? { nextSyncState: monitored.nextState } : {}),
     ...(options.trigger ? { trigger: options.trigger } : {}),
     ...(options.author ? { author: options.author } : {}),
+    ...(options.authoring ? { authoring: options.authoring } : {}),
   })
   if (proposal.status === 'failed') {
     await appendSyncLog(root, `proposal: ${proposal.id} failed: ${proposal.error ?? 'unknown error'}`)

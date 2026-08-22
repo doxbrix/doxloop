@@ -12,7 +12,6 @@ const NAV = [
   ['sources', 'Sources', ''],
   ['authoring', 'Update Documentation', ''],
   ['proposals', 'Review Changes', 'Automation'],
-  ['preview', 'Preview', 'Delivery'],
   ['publish', 'Publish', 'Delivery'],
   ['settings', 'Settings', ''],
 ] as const
@@ -43,13 +42,11 @@ export function WorkspaceApplication({
   state,
   loading,
   error,
-  notice,
   reload,
   act,
   onJobsUpdate,
   onError,
   onErrorDismiss,
-  onNoticeDismiss,
 }: WorkspaceApplicationProps) {
   const [page, setPage] = useState<Page>(currentPage())
   const [navOpen, setNavOpen] = useState(false)
@@ -117,6 +114,20 @@ export function WorkspaceApplication({
   const project = state.project!
   const currentLabel = NAV.find(([id]) => id === page)?.[1] ?? 'Update Documentation'
   const searchResults = NAV.filter(([, label, group]) => `${label} ${group}`.toLowerCase().includes(searchQuery.toLowerCase()))
+  const openPreview = async () => {
+    const previewWindow = window.open('', '_blank')
+    if (!state.preview?.running) {
+      const started = await act(() => post('/api/preview/start'), 'Preview started', false)
+      if (started === undefined) {
+        previewWindow?.close()
+        return
+      }
+    }
+    if (previewWindow) {
+      previewWindow.opener = null
+      previewWindow.location.href = state.preview?.url ?? 'http://127.0.0.1:4321'
+    }
+  }
 
   return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
     {searchOpen && <div class="scrim" onClick={() => setSearchOpen(false)}>
@@ -133,35 +144,34 @@ export function WorkspaceApplication({
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
-      <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span><button type="button" aria-label="Collapse navigation"><Icon name="chevronRight" size={14} /><Icon name="chevronRight" size={14} /></button></div>
+      <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span></div>
+      <span class="mode-flag sidebar-mode-flag"><i />Local mode</span>
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {([['sources', 'sources', 'Sources'], ['authoring', 'authoring', 'Update Documentation'], ['proposals', 'proposals', 'Review Changes'], ['preview', 'preview', 'Preview'], ['publish', 'publish', 'Publish']] as const).map(([id, icon, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{label}</span></button>)}
+        {([['sources', 'sources', 'Sources'], ['authoring', 'authoring', 'Update Documentation'], ['proposals', 'proposals', 'Review Changes'], ['publish', 'publish', 'Publish'], ['settings', 'settings', 'Settings']] as const).map(([id, icon, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{label}</span></button>)}
       </nav>
       <footer class="sidebar-trust-card"><Icon name="shield" size={18} /><p>Your content is read-only and never copied to our servers.</p><a href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer">Learn more <Icon name="external" size={12} /></a></footer>
     </aside>
 
     <div class="main">
-      <header class="topbar">
-        <button class="topbar-search" onClick={() => setSearchOpen(true)}><Icon name="search" size={15} /><span>{page === 'proposals' ? 'Search documentation, files, proposals…' : 'Search'}</span><kbd>⌘K</kbd></button>
-        <div class="topbar-tools">
-          <span class="mode-flag"><i />Local mode</span>
-          <button class="icon-btn" title="Settings" aria-label="Settings" onClick={() => navigate('settings')}><Icon name="settings" size={17} /></button>
+      <header class="workspace-navbar">
+        <strong>{currentLabel}</strong>
+        <div>
+          <button class="workspace-search-button" type="button" onClick={() => setSearchOpen(true)}><Icon name="search" size={16} />Search <kbd>⌘K</kbd></button>
+          <Button tone="primary" icon="external" onClick={() => void openPreview()}>{state.preview?.running ? 'Open preview' : 'Preview'}</Button>
         </div>
       </header>
       <div class="mobile-topbar">
         <button aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="columns" size={18} /></button>
         <strong>{currentLabel}</strong>
-        <button class="icon-btn" aria-label="Search" onClick={() => setSearchOpen(true)}><Icon name="search" size={17} /></button>
+        <button class="icon-btn" aria-label="Preview documentation" onClick={() => void openPreview()}><Icon name="preview" size={17} /></button>
       </div>
 
       <div class="page">
         {loading && <div class="loading-bar" />}
         {error && <Banner tone="bad" title="Action failed" detail={error} onClose={onErrorDismiss} />}
-        {notice && <Banner tone="good" title="Done" detail={notice} onClose={onNoticeDismiss} />}
         {page === 'sources' && <SourcesReference state={state} act={act} />}
         {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} />}
         {page === 'proposals' && <Proposals state={state} act={act} />}
-        {page === 'preview' && <Preview state={state} act={act} />}
         {page === 'publish' && <Publish state={state} act={act} />}
         {page === 'settings' && <Settings state={state} act={act} />}
       </div>
@@ -471,7 +481,7 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
   const [form, setForm] = useState({ request: '', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: false })
   const availableAuthorModels = agentModels(form.agent)
   const supportedAuthorReasoning = modelReasoningLevels(form.agent, form.model)
-  const [confirmRegeneration, setConfirmRegeneration] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const runs = state.jobs.filter((job) => job.type.startsWith('author:') || job.type === 'capture')
   const activeRun = runs.find((job) => job.status === 'running')
@@ -493,34 +503,14 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
       setSubmitting(false)
     }
   }
-  useEffect(() => {
-    if (!confirmRegeneration) return
-    const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConfirmRegeneration(false)
-    }
-    addEventListener('keydown', close)
-    return () => removeEventListener('keydown', close)
-  }, [confirmRegeneration])
   return <div class="authoring-page">
-    {confirmRegeneration && <div class="scrim" onClick={() => setConfirmRegeneration(false)}>
-      <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="regenerate-title" onClick={(event) => event.stopPropagation()}>
-        <span class="confirm-icon"><Icon name="alert" size={20} /></span>
-        <div class="confirm-copy">
-          <h2 id="regenerate-title">Regenerate the complete documentation?</h2>
-          <p>This starts broad product discovery again and may rewrite navigation, theme, page structure, and existing content.</p>
-          <Note tone="bad">Use Update unless you intentionally want a complete documentation redesign.</Note>
-        </div>
-        <div class="confirm-actions">
-          <Button onClick={() => setConfirmRegeneration(false)}>Cancel</Button>
-          <Button tone="danger" onClick={() => { setConfirmRegeneration(false); void startRun('create') }}>Regenerate all docs</Button>
-        </div>
-      </section>
-    </div>}
-    <PageHeader
-      icon="authoring"
-      title="Update Documentation"
-      description="Describe the outcome you want. Doxloop uses your connected sources and keeps them read-only."
-    />
+    <header class="authoring-hero">
+      <span class="authoring-hero-icon"><Icon name="sparkles" size={27} /></span>
+      <div class="authoring-hero-copy">
+        <h1>Update Documentation</h1>
+        <p>Apply changes and keep your docs accurate with your connected sources.</p>
+      </div>
+    </header>
     {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
       <span class="source-sync-icon"><Icon name="sources" size={18} /></span>
       <div>
@@ -528,46 +518,55 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
         <p>Run Update to synchronize {pendingSources.length === 1 ? 'this source' : 'these sources'} with the existing documentation. Unrelated pages, navigation, and styling will be preserved.</p>
       </div>
     </div>}
-    {activeRun && <LiveJobLog job={activeRun} connected={streamConnected} />}
-    <Panel class="authoring-request" icon="wand" title={hasCompletedRun ? 'Update documentation' : 'Create documentation'} description={hasCompletedRun ? 'Maintain the existing documentation after product or source changes.' : 'Generate the first documentation set from your connected sources.'}>
+    <Panel class="authoring-request">
       <fieldset class="authoring-fields" disabled={runBusy}>
-        <legend>Run options</legend>
-        <div class="authoring-options">
-          <Field label="Agent"><Select icon="bot" value={form.agent} onChange={(event) => {
-            const agent = event.currentTarget.value
-            const model = defaultModelForAgent(agent)
-            const level = preferredReasoningLevel(agent, model)
-            setForm({
-              ...form,
-              agent,
-              model,
-              reasoning: agent === 'codex' ? level : '',
-              effort: agent === 'claude' ? level : '',
-            })
-          }}><option value="">Select coding assistant</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
-          <Field label="Select Model"><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => setForm({ ...form, model: value })} /></Field>
-          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></Field>
-          <div class="screenshot-option"><span>Capture application screenshots</span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
+        <div class="authoring-prompt-block">
+          <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><h2>What changes do you need for your agent?</h2></div>
+          <span class="authoring-textarea-wrap"><Textarea rows={5} maxlength={1000} value={form.request} placeholder="Describe the changes you want to apply…" onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /><small>{form.request.length} / 1000</small></span>
         </div>
-        <Field label="What should the agent do?" wide hint={hasCompletedRun ? 'Be specific about the user outcome, or leave empty to synchronize detected source changes.' : 'Be specific about the user outcome. Leave empty to receive a complete recommendation.'}>
-          <Textarea rows={4} value={form.request} placeholder="For example: Document webhook retries and the new authentication flow for developers integrating our API…" onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} />
-        </Field>
+        <div class="authoring-options">
+          <Field label="Agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
+              const agent = event.currentTarget.value
+              const model = defaultModelForAgent(agent)
+              const level = preferredReasoningLevel(agent, model)
+              setForm({
+                ...form,
+                agent,
+                model,
+                reasoning: agent === 'codex' ? level : '',
+                effort: agent === 'claude' ? level : '',
+              })
+            }}><option value="">Select coding assistant</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></span></Field>
+          <Field label="Model"><span class="authoring-control-icon model"><Icon name="sparkle" size={17} /><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => setForm({ ...form, model: value })} /></span></Field>
+          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><span class="authoring-control-icon reasoning"><Icon name="brain" size={17} /><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></span></Field>
+          <div class="screenshot-option">
+            <strong>Capture screenshots</strong>
+            <div><span class="screenshot-camera"><Icon name="camera" size={18} /></span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
+          </div>
+        </div>
       </fieldset>
       <div class="panel-inline-foot">
-        <span><Icon name="lock" size={14} />Product sources stay read-only</span>
         <div class="row-actions">
-          <Button disabled={runBusy} onClick={() => void startRun('review')}>Start review</Button>
-          <Button disabled={runBusy} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startRun(mode)}>{hasCompletedRun ? 'Update documentation' : 'Create documentation'}</Button>
+          <Button disabled={runBusy} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startRun(mode)}>Update documentation</Button>
         </div>
       </div>
     </Panel>
-    {runs.length > 0 && <Panel class="authoring-history" icon="list" title="Run activity" flush><JobTable jobs={runs} onCancel={(id) => void act(() => post(`/api/jobs/${id}/cancel`), 'Job cancelled')} /></Panel>}
-    {hasCompletedRun && <Panel title="Full regeneration" description="Start over only when you want to reconsider the complete documentation structure.">
-      <div class="regeneration-row">
-        <div><strong>Regenerate all documentation</strong><p>This may restructure or replace existing pages, navigation, styling, and documentation decisions.</p></div>
-        <Button tone="danger" disabled={runBusy} onClick={() => setConfirmRegeneration(true)}>Regenerate all docs…</Button>
-      </div>
-    </Panel>}
+    <section class={`authoring-action-card activity-card ${activityOpen ? 'open' : ''}`}>
+      <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
+        <span class="action-card-icon activity"><Icon name="activity" size={19} /></span>
+        <span class="action-card-copy"><strong>Run activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Run in progress` : 'No active runs'}</small></span>
+        <Icon name="chevronDown" size={17} />
+      </button>
+      {activityOpen && runs.length > 0 && <div class="authoring-activity-list">
+        {runs.slice(0, 3).map((job) => <div class="authoring-activity-row" key={job.id}>
+          <span class={`activity-status-icon ${job.status}`}><Icon name={job.status === 'succeeded' ? 'check' : job.status === 'failed' ? 'alert' : job.status === 'running' ? 'refresh' : 'minus'} size={15} class={job.status === 'running' ? 'spin' : ''} /></span>
+          <div><strong>{job.type.replaceAll(':', ' · ')}</strong><a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">{job.lines.length.toLocaleString()} output line{job.lines.length === 1 ? '' : 's'}</a></div>
+          <Badge tone={job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : job.status === 'running' ? 'info' : 'neutral'}>{job.status === 'succeeded' ? 'Succeeded' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Running' : 'Cancelled'}</Badge>
+          <time>{timeText(job.startedAt)}</time>
+          {job.status === 'running' && <Button size="sm" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Job cancelled')}>Cancel</Button>}
+        </div>)}
+      </div>}
+    </section>
   </div>
 }
 
@@ -651,7 +650,6 @@ function MonitoringDialog({ state, source, act, onClose }: { state: UiState; sou
           {advanced && <div class="form-grid gap-top">
             <Field label="Watched paths"><Lines value={sync.watch} onInput={(value) => set('watch', value)} placeholder={'src/**\nopenapi.yaml'} /></Field>
             <Field label="Ignored paths"><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
-            <Field label="Maximum runs per day"><Input type="number" min="1" value={sync.budget?.maxRunsPerDay ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxRunsPerDay', event.currentTarget.value) })} /></Field>
             <Field label="Maximum agent minutes"><Input type="number" min="1" value={sync.budget?.maxMinutes ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxMinutes', event.currentTarget.value) })} /></Field>
           </div>}
           <Note>Monitoring creates the documentation update as a proposal under Review Changes. It never modifies the product source or publishes automatically.</Note>
@@ -859,29 +857,6 @@ function diffGroups(rows: DiffRow[]): Array<{ hunkId?: string; state?: string; r
 }
 
 
-function Preview({ state, act }: { state: UiState; act: Action }) {
-  const running = state.preview?.running ?? false
-  return <>
-    <PageHeader
-      title="Preview"
-      description="Run the selected generator locally with live reload."
-      meta={<><Badge tone={running ? 'good' : 'neutral'} icon={running ? 'check' : 'clock'}>{running ? 'Running' : 'Stopped'}</Badge><code class="mono">127.0.0.1:4321</code></>}
-      actions={<>
-        <a class="btn secondary md" href="http://127.0.0.1:4321" target="_blank" rel="noreferrer"><Icon name="external" size={16} />Open in new tab</a>
-        {running
-          ? <Button tone="danger" icon="stop" onClick={() => void act(() => post('/api/preview/stop'), 'Preview stopped')}>Stop preview</Button>
-          : <Button tone="primary" icon="play" onClick={() => void act(() => post('/api/preview/start'), 'Preview started')}>Start preview</Button>}
-      </>}
-    />
-    <Panel flush class="frame-panel">
-      {running
-        ? <iframe class="site-frame" title="Documentation preview" src="http://127.0.0.1:4321" />
-        : <Empty icon="preview" title="Preview is not running" detail="Start it to inspect the generated documentation at 127.0.0.1:4321." action={<Button tone="primary" icon="play" onClick={() => void act(() => post('/api/preview/start'), 'Preview started')}>Start preview</Button>} />}
-    </Panel>
-    <Panel title="Preview process" flush><JobTable jobs={state.jobs.filter((job) => job.type === 'preview')} onCancel={(id) => void act(() => post(`/api/jobs/${id}/cancel`), 'Preview stopped')} /></Panel>
-  </>
-}
-
 function Publish({ state, act }: { state: UiState; act: Action }) {
   const effective = state.effectiveDeployment!
   const [deployment, setDeployment] = useState(effective)
@@ -901,10 +876,7 @@ function Publish({ state, act }: { state: UiState; act: Action }) {
     <div class="split wide-left">
       <Panel title="Deployment" description="Where this documentation is published.">
         <div class="form-grid">
-          <Field label="Hosted project name"><Input value={deployment.name} onInput={(event) => setDeployment({ ...deployment, name: event.currentTarget.value })} /></Field>
-          <Field label="Project address"><Input value={deployment.slug} onInput={(event) => setDeployment({ ...deployment, slug: event.currentTarget.value })} /></Field>
           <Field label="Visibility"><Select value={deployment.visibility} onChange={(event) => setDeployment({ ...deployment, visibility: event.currentTarget.value })}><option value="private">Private</option><option value="public">Public</option></Select></Field>
-          <Field label="Doxbrix API destination"><Input value={deployment.apiUrl} onInput={(event) => setDeployment({ ...deployment, apiUrl: event.currentTarget.value })} /></Field>
         </div>
         <Note>Deployment packages documentation pages and media only. Product source directories are excluded.</Note>
         <div class="form-actions"><Button tone="primary" onClick={() => void save()}>Save settings</Button></div>
@@ -933,8 +905,8 @@ function Publish({ state, act }: { state: UiState; act: Action }) {
 const SETTINGS_SECTIONS = [
   ['general', 'General', 'Project identity and defaults', 'settings'],
   ['experience', 'Audience and voice', 'Writing style and accessibility', 'book'],
-  ['capture', 'Visual evidence', 'Design references and screenshots', 'preview'],
-  ['tools', 'Generators', 'Site output support packages', 'publish'],
+  ['capture', 'Visual evidence', 'Application screenshots', 'preview'],
+  ['tools', 'Generator', 'Active documentation generator', 'publish'],
 ] as const
 
 function Settings({ state, act }: { state: UiState; act: Action }) {
@@ -942,7 +914,6 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
   const [section, setSection] = useState<typeof SETTINGS_SECTIONS[number][0]>('general')
   const [identity, setIdentity] = useState({ title: project.title, defaultAgent: project.defaultAgent ?? '' })
   const [docs, setDocs] = useState({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
-  const [references, setReferences] = useState(project.designReferences.map((item) => item.url).join('\n'))
   const [application, setApplication] = useState({
     baseUrl: project.application?.baseUrl ?? '',
     source: project.application?.source ?? '',
@@ -991,13 +962,6 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
         </Panel>}
 
         {section === 'capture' && <>
-          <Panel title="Design references" description="Public documentation sites used as visual evidence.">
-            <Field label="Reference URLs" hint="One public URL per line" wide><Textarea rows={5} value={references} placeholder={'https://docs.example.com\nhttps://developer.example.com'} onInput={(event) => setReferences(event.currentTarget.value)} /></Field>
-            <div class="form-actions">
-              <Button onClick={() => void act(() => post('/api/capture', { urls: references.split('\n').map((item) => item.trim()).filter(Boolean) }), 'Design capture started')}>Capture references</Button>
-              <Button tone="primary" onClick={() => void act(() => patch('/api/project', { designReferences: references.split('\n').map((item) => item.trim()).filter(Boolean) }), 'Design references saved')}>Save references</Button>
-            </div>
-          </Panel>
           <Panel title="Application screenshots" description="Configure a safe local or test application for guide screenshots.">
             <div class="form-grid">
               <Field label="Application base URL"><Input value={application.baseUrl} placeholder="http://localhost:3000" onInput={(event) => setApplication({ ...application, baseUrl: event.currentTarget.value })} /></Field>
@@ -1016,14 +980,11 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
           </Panel>
         </>}
 
-        {section === 'tools' && <Panel title="Documentation generators" description="Install or remove support packages without changing the active generator." flush>
-          <Table head={<><th>Generator</th><th>Status</th><th class="right" /></>}>
-            {state.generators.map((generator) => <tr key={generator.id}>
+        {section === 'tools' && <Panel title="Documentation generator" description="The generator selected for this workspace." flush>
+          <Table head={<><th>Generator</th><th>Status</th></>}>
+            {state.generators.filter((generator) => generator.id === project.generator).map((generator) => <tr key={generator.id}>
               <td><div class="cell-lead"><span class="generator-mark">{generator.displayName.slice(0, 1)}</span><div class="row-copy"><strong>{generator.displayName}</strong><small>{generator.id === 'doxbrix' ? 'Built in' : generator.packageName ?? generator.id}</small></div></div></td>
-              <td>{generator.id === project.generator ? <Badge tone="good" icon="check">Active</Badge> : generator.installed ? <Badge tone="info">Installed</Badge> : <Badge>Available</Badge>}</td>
-              <td class="right">{generator.id === 'doxbrix' || generator.id === project.generator
-                ? <span class="muted-cell">—</span>
-                : <Button size="sm" {...(generator.installed ? { tone: 'danger' as const } : {})} onClick={() => void act(() => post('/api/generator', { action: generator.installed ? 'remove' : 'add', generator: generator.id }), generator.installed ? 'Generator removal started' : 'Generator installation started')}>{generator.installed ? 'Remove' : 'Install'}</Button>}</td>
+              <td><Badge tone="good" icon="check">Active</Badge></td>
             </tr>)}
           </Table>
         </Panel>}

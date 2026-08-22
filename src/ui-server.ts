@@ -364,7 +364,9 @@ async function handleApi(
     }
     const run = await readSyncRun(root, proposalDecision[1]!)
     const selections = syncReviewSelectionsFromBody(run, await readJsonBody(request))
-    sendJson(response, 200, await acceptSyncChanges(root, run.id, selections))
+    const result = await acceptSyncChanges(root, run.id, selections)
+    if (result.status === 'applied') await clearPendingSourceChangesInReceipt(root)
+    sendJson(response, 200, result)
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/validate') {
@@ -398,9 +400,20 @@ async function handleApi(
     }
     const requestedAgent = parseAgent(optionalString(body.agent))
     const effectiveAgent = requestedAgent ?? project.defaultAgent
-    const args = [mode]
-    const requestText = optionalString(body.request)
-    if (requestText) args.push(requestText)
+    const receipt = await readOptionalJson(join(root, '.doxloop', 'last-run.json'))
+    const pendingRemovedSources = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+      ? (receipt as Record<string, unknown>).pendingRemovedSources
+      : undefined
+    const removedSources = Array.isArray(pendingRemovedSources)
+      ? pendingRemovedSources.filter((entry): entry is string => typeof entry === 'string')
+      : []
+    const removalRequest = removedSources.length > 0
+      ? `The following configured sources were removed since the last accepted update: ${removedSources.join(', ')}. Delete documentation pages grounded exclusively in those sources. For pages supported by other active sources, remove the deleted-source evidence and any claims that are no longer supported. Update navigation and .doxloop/evidence-map.json so no stale documentation from the removed sources remains.`
+      : undefined
+    const requestText = [optionalString(body.request), removalRequest].filter(Boolean).join('\n\n')
+    const args = mode === 'update' ? ['sync', 'now', '--trigger', 'manual'] : [mode]
+    if (mode === 'update') appendOption(args, 'request', requestText || undefined)
+    else if (requestText) args.push(requestText)
     appendOption(args, 'agent', requestedAgent)
     appendOption(args, 'model', optionalString(body.model))
     if (effectiveAgent === 'codex') appendOption(args, 'reasoning', optionalString(body.reasoning))
@@ -545,7 +558,9 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     agents,
     account,
     receipt,
-    generators: await installedGeneratorEntries(root),
+    generators: (await installedGeneratorEntries(root)).filter(
+      (generator) => generator.id === project.generator,
+    ),
     jobs: [...runtime.jobs.values()].map(publicJob).reverse(),
     preview: {
       running: runtime.previewJobId
@@ -809,6 +824,7 @@ async function addSourceFromUi(root: string, raw: unknown): Promise<void> {
   await validateProjectSourceBoundaries(root, sources)
   await saveProjectSettings(root, { sources })
   await setPendingSourceInReceipt(root, name, true)
+  await setPendingRemovedSourceInReceipt(root, name, false)
 }
 
 async function updateSourceFromUi(root: string, name: string, raw: unknown): Promise<void> {
@@ -877,6 +893,33 @@ async function removeSourceFromUi(root: string, name: string): Promise<void> {
   }
   await saveProjectSettings(root, { sources, application })
   await setPendingSourceInReceipt(root, name, false)
+  await setPendingRemovedSourceInReceipt(root, name, true)
+}
+
+async function setPendingRemovedSourceInReceipt(root: string, name: string, pending: boolean): Promise<void> {
+  const path = join(root, '.doxloop', 'last-run.json')
+  const raw = await readOptionalJson(path)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+  const receipt = { ...raw } as Record<string, unknown>
+  const existing = Array.isArray(receipt.pendingRemovedSources)
+    ? receipt.pendingRemovedSources.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const pendingRemovedSources = pending
+    ? [...new Set([...existing, name])]
+    : existing.filter((entry) => entry !== name)
+  if (pendingRemovedSources.length > 0) receipt.pendingRemovedSources = pendingRemovedSources
+  else delete receipt.pendingRemovedSources
+  await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8')
+}
+
+async function clearPendingSourceChangesInReceipt(root: string): Promise<void> {
+  const path = join(root, '.doxloop', 'last-run.json')
+  const raw = await readOptionalJson(path)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+  const receipt = { ...raw } as Record<string, unknown>
+  delete receipt.pendingSources
+  delete receipt.pendingRemovedSources
+  await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8')
 }
 
 async function setPendingSourceInReceipt(

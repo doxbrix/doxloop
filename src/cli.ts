@@ -696,11 +696,27 @@ async function syncCommand(args: ParsedArgs, cwd: string): Promise<number> {
   }
   if (action === 'now') {
     const trigger = flag(args, 'trigger')
+    const request = flag(args, 'request')
+    const agent = parseAgent(flag(args, 'agent'))
+    const model = flag(args, 'model')
+    const reasoning = parseReasoning(flag(args, 'reasoning'))
+    const effort = parseClaudeEffort(flag(args, 'effort'))
+    const hasManualAuthoring = Boolean(request || agent || model || reasoning || effort || booleanFlag(args, 'screenshots') || booleanFlag(args, 'no-screenshots'))
     return runSyncNow({
       root,
       project,
       quiet: booleanFlag(args, 'quiet'),
       ...(trigger ? { trigger: parseSyncRunTrigger(trigger) } : {}),
+      ...(hasManualAuthoring ? {
+        authoring: {
+          ...(request ? { request } : {}),
+          ...(agent ? { agent } : {}),
+          ...(model ? { model } : {}),
+          ...(reasoning ? { reasoning } : {}),
+          ...(effort ? { effort } : {}),
+          screenshots: screenshotIntent(args),
+        },
+      } : {}),
     })
   }
   if (action === 'off') {
@@ -810,7 +826,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     capture: [],
     test: ['format'],
     check: ['format', 'quiet'],
-    sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open'],
+    sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open', 'request', 'agent', 'model', 'reasoning', 'effort', 'screenshots', 'no-screenshots'],
     ui: ['port', 'page', 'no-open'],
     status: ['format'],
     settings: [],

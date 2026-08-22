@@ -14,13 +14,19 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
-import { runAuthor } from './author.js'
+import {
+  runAuthor,
+  type ClaudeEffortLevel,
+  type ReasoningLevel,
+  type ScreenshotIntent,
+} from './author.js'
 import { DoxloopError } from './errors.js'
 import { assertInside, pathExists, readJson } from './fs.js'
 import { pageExtensions as documentationPageExtensions, readPage } from './project.js'
 import { formatSourceChanges } from './sync.js'
 import { formatValidation, validateProject } from './validation.js'
 import type {
+  AgentName,
   DoxloopProject,
   DriftResult,
   SourceChange,
@@ -86,6 +92,15 @@ export interface CreateSyncRunOptions {
   author?: typeof runAuthor
   /** Baseline to place in the proposal and apply only after approval. */
   nextSyncState?: SyncState
+  /** User-selected authoring controls for a manual workspace update. */
+  authoring?: {
+    request?: string
+    agent?: AgentName
+    model?: string
+    reasoning?: ReasoningLevel
+    effort?: ClaudeEffortLevel
+    screenshots?: ScreenshotIntent
+  }
 }
 
 export interface AcceptSelection {
@@ -145,6 +160,7 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
       ...(options.project.sync.budget?.maxMinutes
         ? { timeoutMinutes: options.project.sync.budget.maxMinutes }
         : {}),
+      ...options.authoring,
     })
     if (exitCode !== 0) {
       throw new DoxloopError(`The documentation agent exited with status ${exitCode}.`)
