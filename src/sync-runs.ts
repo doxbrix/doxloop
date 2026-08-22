@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { promisify } from 'node:util'
+import { isDeepStrictEqual, promisify } from 'node:util'
 import {
   runAuthor,
   type ClaudeEffortLevel,
@@ -50,6 +50,8 @@ const EXCLUDED_PREFIXES = [
   '.doxloop/cache',
   '.doxloop/last-run.json',
   '.doxloop/sync.log',
+  '.doxloop/ui-jobs.json',
+  '.doxloop/ui-job-logs',
   'build',
   'dist',
   'out',
@@ -236,7 +238,27 @@ export async function readSyncRun(root: string, id: string): Promise<SyncRun> {
   if (run.schemaVersion !== 1 || run.id !== id || !Array.isArray(run.changes)) {
     throw new DoxloopError(`Sync run ${id} is invalid.`)
   }
-  return run
+  const changes = run.changes.filter((change) => !isExcluded(change.path))
+  const excludedRuntimeConflict = run.status === 'conflicted' && Boolean(
+    run.error && EXCLUDED_PREFIXES.some((prefix) =>
+      run.error!.startsWith(`${prefix} `) || run.error!.startsWith(`${prefix}/`),
+    ),
+  )
+  if (changes.length === run.changes.length && !excludedRuntimeConflict) return run
+  if (excludedRuntimeConflict) {
+    const { error: _excludedError, ...cleanRun } = run
+    return {
+      ...cleanRun,
+      status: 'awaiting-review',
+      changes,
+      summary: proposalSummary(changes),
+    }
+  }
+  return {
+    ...run,
+    changes,
+    summary: proposalSummary(changes),
+  }
 }
 
 export async function rejectSyncRun(root: string, id: string): Promise<SyncRun> {
@@ -308,19 +330,25 @@ export async function acceptSyncChanges(
         acceptedIds(change),
         runWorkspace(root, run.id),
       )
-      if (!buffersEqual(current, expected)) {
-        throw new DoxloopError(
-          `${change.path} changed after this proposal was generated. Regenerate or review the conflict; no file was overwritten.`,
-        )
-      }
-      originals.set(change.path, current)
       const accepted = new Set([...acceptedIds(change), ...ids])
-      const result = await materializeChange(
+      let result = await materializeChange(
         before,
         change,
         accepted,
         runWorkspace(root, run.id),
       )
+      if (!buffersEqual(current, expected)) {
+        const merged = change.path === '.doxloop/evidence-map.json' && expected && current && result
+          ? mergeConcurrentJson(expected, current, result)
+          : undefined
+        if (!merged) {
+          throw new DoxloopError(
+            `${change.path} changed after this proposal was generated. Regenerate or review the conflict; no file was overwritten.`,
+          )
+        }
+        result = merged
+      }
+      originals.set(change.path, current)
       await writeAtomic(actualPath, result)
       change.hunks = change.hunks.map((hunk) =>
         ids.has(hunk.id) && !hunk.rejectedAt ? { ...hunk, acceptedAt: now } : hunk,
@@ -337,8 +365,9 @@ export async function acceptSyncChanges(
       change.hunks.every((hunk) => hunk.acceptedAt !== undefined),
     )
     if (complete) await applyStagedSyncState(root, id)
+    const { error: _previousError, ...cleanRun } = run
     const next: SyncRun = {
-      ...run,
+      ...cleanRun,
       status: complete ? 'applied' : 'partially-applied',
       ...(complete ? { appliedAt: now } : {}),
       changes: nextChanges,
@@ -362,6 +391,50 @@ export async function acceptSyncChanges(
     await writeRun(root, conflicted)
     throw error
   }
+}
+
+const JSON_MISSING = Symbol('json-missing')
+
+function mergeConcurrentJson(base: Buffer, current: Buffer, proposed: Buffer): Buffer | undefined {
+  try {
+    const merged = mergeJsonValue(
+      JSON.parse(base.toString('utf8')) as unknown,
+      JSON.parse(current.toString('utf8')) as unknown,
+      JSON.parse(proposed.toString('utf8')) as unknown,
+    )
+    if (merged === JSON_MISSING) return undefined
+    return Buffer.from(`${JSON.stringify(merged, null, 2)}\n`)
+  } catch {
+    return undefined
+  }
+}
+
+function mergeJsonValue(
+  base: unknown | typeof JSON_MISSING,
+  current: unknown | typeof JSON_MISSING,
+  proposed: unknown | typeof JSON_MISSING,
+): unknown | typeof JSON_MISSING {
+  if (isDeepStrictEqual(current, base)) return proposed
+  if (isDeepStrictEqual(proposed, base) || isDeepStrictEqual(current, proposed)) return current
+  if (isJsonRecord(base) && isJsonRecord(current) && isJsonRecord(proposed)) {
+    const result: Record<string, unknown> = {}
+    const keys = new Set([...Object.keys(base), ...Object.keys(current), ...Object.keys(proposed)])
+    for (const key of keys) {
+      const merged = mergeJsonValue(
+        Object.hasOwn(base, key) ? base[key] : JSON_MISSING,
+        Object.hasOwn(current, key) ? current[key] : JSON_MISSING,
+        Object.hasOwn(proposed, key) ? proposed[key] : JSON_MISSING,
+      )
+      if (merged !== JSON_MISSING) result[key] = merged
+    }
+    return result
+  }
+  // Both sides changed the same scalar or array. Preserve the newer accepted value.
+  return current
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 export function formatSyncRunHistory(runs: SyncRun[]): string {

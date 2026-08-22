@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
+import './WorkspaceApplication.css'
 import { api, patch, post, remove } from './api'
 import {
   Badge, Button, Combo, Empty, Field, Input, JobTable, KeyValues, Lines, Note, PageHeader,
@@ -9,11 +10,11 @@ import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReaso
 import type { DiffRow, GeneratorEntry, Proposal, ProposalChange, Source, SourceDiff, SyncConfig, UiJob, UiState } from './types'
 
 const NAV = [
-  ['sources', 'Sources', ''],
-  ['authoring', 'Update Documentation', ''],
-  ['proposals', 'Review Changes', 'Automation'],
-  ['publish', 'Publish', 'Delivery'],
-  ['settings', 'Settings', ''],
+  ['sources', 'Sources'],
+  ['authoring', 'Update'],
+  ['proposals', 'Review'],
+  ['publish', 'Publish'],
+  ['settings', 'Settings'],
 ] as const
 
 const DOXLOOP_LOGO = new URL('../../assets/brand/doxloop-logo-light.png', import.meta.url).href
@@ -29,13 +30,11 @@ type WorkspaceApplicationProps = {
   state: UiState
   loading: boolean
   error: string
-  notice: string
   reload: () => Promise<void>
   act: Action
   onJobsUpdate: (jobs: UiJob[]) => void
   onError: (error: string) => void
   onErrorDismiss: () => void
-  onNoticeDismiss: () => void
 }
 
 export function WorkspaceApplication({
@@ -50,9 +49,39 @@ export function WorkspaceApplication({
 }: WorkspaceApplicationProps) {
   const [page, setPage] = useState<Page>(currentPage())
   const [navOpen, setNavOpen] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
   const [jobStreamConnected, setJobStreamConnected] = useState(false)
+  const [readyProposal, setReadyProposal] = useState<Proposal | null>(null)
+  const runningJobIds = useRef(new Set(state.jobs.filter((job) => job.status === 'running').map((job) => job.id)))
+  const announcedJobIds = useRef(new Set<string>())
+  const pendingProposalCount = validRuns(state.runs).filter((run) => OPEN_STATUSES.includes(run.status)).length
+
+  const receiveJobs = (jobs: UiJob[]) => {
+    const previouslyRunning = runningJobIds.current
+    const completedUpdates = jobs.filter((job) =>
+      job.type === 'author:update' &&
+      job.status === 'succeeded' &&
+      previouslyRunning.has(job.id) &&
+      !announcedJobIds.current.has(job.id),
+    )
+    runningJobIds.current = new Set(jobs.filter((job) => job.status === 'running').map((job) => job.id))
+    onJobsUpdate(jobs)
+    for (const job of completedUpdates) {
+      announcedJobIds.current.add(job.id)
+      void (async () => {
+        await reload()
+        try {
+          const proposals = await api<Proposal[]>('/api/proposals')
+          const proposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
+          if (!proposal) return
+          setReadyProposal(proposal)
+          history.pushState({}, '', '/proposals')
+          setPage('proposals')
+        } catch (cause) {
+          onError(message(cause))
+        }
+      })()
+    }
+  }
 
   useEffect(() => {
     const stream = new EventSource('/api/jobs/stream')
@@ -60,7 +89,7 @@ export function WorkspaceApplication({
     stream.onmessage = (event) => {
       try {
         const jobs = JSON.parse(event.data) as unknown
-        if (Array.isArray(jobs)) onJobsUpdate(jobs as UiJob[])
+        if (Array.isArray(jobs)) receiveJobs(jobs as UiJob[])
       } catch {
         // EventSource reconnects and the next complete snapshot replaces this one.
       }
@@ -78,25 +107,13 @@ export function WorkspaceApplication({
     return () => removeEventListener('popstate', listener)
   }, [])
 
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        setSearchOpen(true)
-      }
-      if (event.key === 'Escape') setSearchOpen(false)
-    }
-    addEventListener('keydown', listener)
-    return () => removeEventListener('keydown', listener)
-  }, [])
-
   const jobsRunning = state.jobs.some((job) => job.status === 'running')
   useEffect(() => {
     if (!jobsRunning) return
     const timer = window.setInterval(async () => {
       try {
         const jobs = await api<UiJob[]>('/api/jobs')
-        onJobsUpdate(jobs)
+        receiveJobs(jobs)
         if (!jobs.some((job) => job.status === 'running')) void reload()
       } catch (cause) {
         onError(message(cause))
@@ -111,67 +128,54 @@ export function WorkspaceApplication({
     setNavOpen(false)
   }
 
-  const project = state.project!
-  const currentLabel = NAV.find(([id]) => id === page)?.[1] ?? 'Update Documentation'
-  const searchResults = NAV.filter(([, label, group]) => `${label} ${group}`.toLowerCase().includes(searchQuery.toLowerCase()))
   const openPreview = async () => {
-    const previewWindow = window.open('', '_blank')
-    if (!state.preview?.running) {
-      const started = await act(() => post('/api/preview/start'), 'Preview started', false)
-      if (started === undefined) {
-        previewWindow?.close()
-        return
+    try {
+      if (!state.preview?.running) {
+        const started = await act(() => post('/api/preview/start'), 'Preview started', false)
+        if (started === undefined) return
       }
-    }
-    if (previewWindow) {
-      previewWindow.opener = null
-      previewWindow.location.href = state.preview?.url ?? 'http://127.0.0.1:4321'
+      const url = state.preview?.url ?? 'http://127.0.0.1:4321'
+      location.assign(url)
+    } catch (cause) {
+      onError(message(cause))
     }
   }
 
   return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
-    {searchOpen && <div class="scrim" onClick={() => setSearchOpen(false)}>
-      <section class="palette" role="dialog" aria-modal="true" aria-label="Search" onClick={(event) => event.stopPropagation()}>
-        <div class="palette-input"><Icon name="search" size={16} /><input autoFocus value={searchQuery} placeholder="Search pages and actions…" onInput={(event) => setSearchQuery(event.currentTarget.value)} /><kbd>esc</kbd></div>
-        <div class="palette-list">
-          {searchResults.map(([id, label, group]) => <button key={id} onClick={() => { navigate(id); setSearchOpen(false); setSearchQuery('') }}>
-            <Icon name={id} size={16} /><span>{label}</span><small>{group || 'Workspace'}</small>
-          </button>)}
-          {searchResults.length === 0 && <p class="palette-empty">No matching pages.</p>}
-        </div>
-      </section>
-    </div>}
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
 
+    <header class="workspace-navbar">
+      <div class="workspace-navbar-left">
+        <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
+        <span class="mode-flag navbar-mode-flag"><i />Local mode</span>
+      </div>
+      <Button tone="link" class="workspace-preview-link" icon="external" onClick={() => void openPreview()}>Preview</Button>
+    </header>
+
+    {readyProposal && <div class="proposal-ready-scrim" role="presentation">
+      <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-ready-title">
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setReadyProposal(null)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon"><Icon name="proposals" size={24} /></span>
+        <div><h2 id="proposal-ready-title">Documentation changes are ready</h2><p>Your update finished successfully. Review the proposed changes before they replace the current documentation.</p></div>
+        <div class="proposal-ready-summary"><strong>{proposalSummaryText(readyProposal.changes)}</strong><span>The current documentation remains unchanged until you accept the proposal.</span></div>
+        <footer><Button icon="external" onClick={() => void openProposalPreview(readyProposal.id, onError)}>Preview changes</Button><Button tone="primary" icon="proposals" onClick={() => setReadyProposal(null)}>Review changes</Button></footer>
+      </section>
+    </div>}
+
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
-      <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span></div>
-      <span class="mode-flag sidebar-mode-flag"><i />Local mode</span>
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {([['sources', 'sources', 'Sources'], ['authoring', 'authoring', 'Update Documentation'], ['proposals', 'proposals', 'Review Changes'], ['publish', 'publish', 'Publish'], ['settings', 'settings', 'Settings']] as const).map(([id, icon, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{label}</span></button>)}
+        {NAV.map(([id, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={id} size={17} /><span>{label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
       </nav>
       <footer class="sidebar-trust-card"><Icon name="shield" size={18} /><p>Your content is read-only and never copied to our servers.</p><a href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer">Learn more <Icon name="external" size={12} /></a></footer>
     </aside>
 
     <div class="main">
-      <header class="workspace-navbar">
-        <strong>{currentLabel}</strong>
-        <div>
-          <button class="workspace-search-button" type="button" onClick={() => setSearchOpen(true)}><Icon name="search" size={16} />Search <kbd>⌘K</kbd></button>
-          <Button tone="primary" icon="external" onClick={() => void openPreview()}>{state.preview?.running ? 'Open preview' : 'Preview'}</Button>
-        </div>
-      </header>
-      <div class="mobile-topbar">
-        <button aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="columns" size={18} /></button>
-        <strong>{currentLabel}</strong>
-        <button class="icon-btn" aria-label="Preview documentation" onClick={() => void openPreview()}><Icon name="preview" size={17} /></button>
-      </div>
-
       <div class="page">
         {loading && <div class="loading-bar" />}
-        {error && <Banner tone="bad" title="Action failed" detail={error} onClose={onErrorDismiss} />}
+        {error && <Banner title="Action failed" detail={error} onClose={onErrorDismiss} />}
         {page === 'sources' && <SourcesReference state={state} act={act} />}
         {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} />}
-        {page === 'proposals' && <Proposals state={state} act={act} />}
+        {page === 'proposals' && <Proposals state={state} act={act} onError={onError} />}
         {page === 'publish' && <Publish state={state} act={act} />}
         {page === 'settings' && <Settings state={state} act={act} />}
       </div>
@@ -179,9 +183,9 @@ export function WorkspaceApplication({
   </div>
 }
 
-function Banner({ tone, title, detail, onClose }: { tone: 'good' | 'bad'; title: string; detail: string; onClose: () => void }) {
-  return <div class={`banner ${tone}`}>
-    <Icon name={tone === 'bad' ? 'alert' : 'check'} size={16} />
+function Banner({ title, detail, onClose }: { title: string; detail: string; onClose: () => void }) {
+  return <div class="banner bad">
+    <Icon name="alert" size={16} />
     <div><strong>{title}</strong><span>{detail}</span></div>
     <button aria-label="Dismiss" onClick={onClose}><Icon name="close" size={14} /></button>
   </div>
@@ -197,6 +201,15 @@ function repositoryProvider(repository: string): 'github' | 'gitlab' | 'git' {
 function repositoryProviderIcon(repository: string): string {
   const provider = repositoryProvider(repository)
   return provider === 'git' ? 'sources' : provider
+}
+
+async function openProposalPreview(runId: string, onError: (error: string) => void): Promise<void> {
+  try {
+    const result = await post<{ url: string }>(`/api/proposals/${runId}/preview/start`)
+    location.assign(result.url)
+  } catch (cause) {
+    onError(message(cause))
+  }
 }
 
 function RepositoryConnectButton({ connected, busy, disabled, onClick }: { connected: boolean; busy: boolean; disabled: boolean; onClick: () => void }) {
@@ -303,8 +316,8 @@ function SourcesReference({ state, act }: { state: UiState; act: Action }) {
     }
   }
   return <div class="sources-reference-page">
-    <header class="sources-page-header"><div><h1>Sources</h1><p>Manage all the sources you've connected to create documentation.</p></div><div class="sources-page-tools"><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div></div></header>
-    <section class="sources-data-panel"><header>All sources ({filtered.length})</header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Last updated</span><span>Status</span><span /></div>{filtered.length ? <div class="sources-table-body">{filtered.map((source) => <div class="sources-data-row" key={source.name}><span class="sources-name-cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.remote ? source.remote.repository : source.path}</small></span></span><span><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'}</em></span><span class="source-updated">Recently</span><span><em class="source-sync-status"><Icon name="check" size={12} />Synced</em></span><span class="source-row-menu"><button type="button" class={`monitoring-button ${project.sync.on.length ? 'monitoring-active' : ''}`} aria-label={`Configure monitoring for ${source.name}`} title="Configure monitoring" onClick={() => setMonitoringSource(source)}><Icon name="bell" size={19} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={19} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources found</strong><small>Add a source or adjust your search.</small></div>}<footer><span>Showing {filtered.length ? `1 to ${filtered.length}` : '0'} of {filtered.length} results</span><span><button disabled><Icon name="chevronRight" size={14} /></button><button disabled><Icon name="chevronRight" size={14} /></button></span></footer></section>
+    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div>} />
+    <section class="sources-data-panel"><header>Connected sources <Badge>{filtered.length}</Badge></header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Actions</span></div>{filtered.length ? <div class="sources-table-body">{filtered.map((source) => <div class="sources-data-row" key={source.name}><span class="sources-name-cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.remote ? source.remote.repository : source.path}</small></span></span><span><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'}</em></span><span class="source-row-menu"><button type="button" class={`monitoring-button ${project.sync.on.length ? 'monitoring-active' : ''}`} aria-label={`Configure monitoring for ${source.name}`} title="Configure monitoring" onClick={() => setMonitoringSource(source)}><Icon name="bell" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small></div>}</section>
     {monitoringSource && <MonitoringDialog state={state} source={monitoringSource} act={act} onClose={() => setMonitoringSource(null)} />}
     {dialog && <div class="sources-modal-scrim" onClick={closeDialog}><section class={`sources-reference-dialog ${dialog}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
       <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
@@ -485,6 +498,7 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
   const [submitting, setSubmitting] = useState(false)
   const runs = state.jobs.filter((job) => job.type.startsWith('author:') || job.type === 'capture')
   const activeRun = runs.find((job) => job.status === 'running')
+  const hasPendingProposal = validRuns(state.runs).some((run) => OPEN_STATUSES.includes(run.status))
   const runBusy = Boolean(activeRun || submitting)
   const startRun = async (runMode: 'create' | 'update' | 'review') => {
     if (runBusy) return
@@ -504,13 +518,7 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
     }
   }
   return <div class="authoring-page">
-    <header class="authoring-hero">
-      <span class="authoring-hero-icon"><Icon name="sparkles" size={27} /></span>
-      <div class="authoring-hero-copy">
-        <h1>Update Documentation</h1>
-        <p>Apply changes and keep your docs accurate with your connected sources.</p>
-      </div>
-    </header>
+    <PageHeader title="Update Documentation" description="Apply changes and keep your docs accurate with your connected sources." />
     {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
       <span class="source-sync-icon"><Icon name="sources" size={18} /></span>
       <div>
@@ -554,17 +562,17 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
     <section class={`authoring-action-card activity-card ${activityOpen ? 'open' : ''}`}>
       <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
         <span class="action-card-icon activity"><Icon name="activity" size={19} /></span>
-        <span class="action-card-copy"><strong>Run activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Run in progress` : 'No active runs'}</small></span>
+        <span class="action-card-copy"><strong>Run activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Run in progress` : hasPendingProposal ? 'Documentation changes are ready for review' : 'No active runs'}</small></span>
         <Icon name="chevronDown" size={17} />
       </button>
       {activityOpen && runs.length > 0 && <div class="authoring-activity-list">
-        {runs.slice(0, 3).map((job) => <div class="authoring-activity-row" key={job.id}>
-          <span class={`activity-status-icon ${job.status}`}><Icon name={job.status === 'succeeded' ? 'check' : job.status === 'failed' ? 'alert' : job.status === 'running' ? 'refresh' : 'minus'} size={15} class={job.status === 'running' ? 'spin' : ''} /></span>
+        {runs.slice(0, 3).map((job) => { const readyForReview = job.type === 'author:update' && job.status === 'succeeded' && hasPendingProposal; return <div class="authoring-activity-row" key={job.id}>
+          <span class={`activity-status-icon ${readyForReview ? 'ready' : job.status}`}><Icon name={readyForReview || job.status === 'succeeded' ? 'check' : job.status === 'failed' ? 'alert' : job.status === 'running' ? 'refresh' : 'minus'} size={15} class={job.status === 'running' ? 'spin' : ''} /></span>
           <div><strong>{job.type.replaceAll(':', ' · ')}</strong><a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">{job.lines.length.toLocaleString()} output line{job.lines.length === 1 ? '' : 's'}</a></div>
-          <Badge tone={job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : job.status === 'running' ? 'info' : 'neutral'}>{job.status === 'succeeded' ? 'Succeeded' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Running' : 'Cancelled'}</Badge>
+          <Badge tone={readyForReview ? 'warn' : job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : job.status === 'running' ? 'info' : 'neutral'}>{readyForReview ? 'Ready for review' : job.status === 'succeeded' ? 'Succeeded' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Running' : 'Cancelled'}</Badge>
           <time>{timeText(job.startedAt)}</time>
           {job.status === 'running' && <Button size="sm" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Job cancelled')}>Cancel</Button>}
-        </div>)}
+        </div>})}
       </div>}
     </section>
   </div>
@@ -717,11 +725,14 @@ function commandText(line: string) {
   return <>{match[1]}<code>{match[2]}</code>{match[3]}</>
 }
 
-function Proposals({ state, act }: { state: UiState; act: Action }) {
+function Proposals({ state, act, onError }: { state: UiState; act: Action; onError: (error: string) => void }) {
   const runs = validRuns(state.runs)
-  const [selectedId, setSelectedId] = useState(runs[0]?.id ?? '')
-  const selected = runs.find((run) => run.id === selectedId) ?? runs[0]
+  const initialRun = runs.find((run) => OPEN_STATUSES.includes(run.status)) ?? runs[0]
+  const [selectedId, setSelectedId] = useState(initialRun?.id ?? '')
+  const selected = runs.find((run) => run.id === selectedId) ?? initialRun
   const [changeId, setChangeId] = useState(selected?.changes[0]?.id ?? '')
+  const [confirmingAcceptance, setConfirmingAcceptance] = useState<Proposal | null>(null)
+  const [appliedProposal, setAppliedProposal] = useState<Proposal | null>(null)
   const [view, setView] = useState<'rendered' | 'source'>('rendered')
   const [layout, setLayout] = useState<'split' | 'unified'>('split')
   const [onlyChanges, setOnlyChanges] = useState(true)
@@ -729,8 +740,31 @@ function Proposals({ state, act }: { state: UiState; act: Action }) {
   useEffect(() => setChangeId(selected?.changes[0]?.id ?? ''), [selected?.id])
   const open = selected ? OPEN_STATUSES.includes(selected.status) : false
   const counts = selected ? proposalChangeCounts(selected.changes) : { added: 0, modified: 0, deleted: 0 }
+  const acceptAll = async (proposal: Proposal) => {
+    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all' }))
+    setConfirmingAcceptance(null)
+    if (result?.status === 'applied') setAppliedProposal(result)
+  }
   return <>
-    <PageHeader title="Proposals" description="Compare isolated documentation changes and decide exactly what reaches the real project." />
+    {confirmingAcceptance && <div class="proposal-ready-scrim" role="presentation">
+      <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-accept-title">
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingAcceptance(null)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon"><Icon name="proposals" size={24} /></span>
+        <div><h2 id="proposal-accept-title">Apply these documentation changes?</h2><p>This replaces the current versions of the reviewed files with the proposed versions.</p></div>
+        <div class="proposal-ready-summary"><strong>{proposalSummaryText(confirmingAcceptance.changes)}</strong><span>Only the files listed in this proposal will be applied.</span></div>
+        <footer><Button onClick={() => setConfirmingAcceptance(null)}>Cancel</Button><Button tone="primary" icon="check" onClick={() => void acceptAll(confirmingAcceptance)}>Apply changes</Button></footer>
+      </section>
+    </div>}
+    {appliedProposal && <div class="proposal-ready-scrim" role="presentation">
+      <section class="proposal-ready-dialog proposal-applied-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-applied-title">
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setAppliedProposal(null)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon applied"><Icon name="check" size={24} /></span>
+        <div><h2 id="proposal-applied-title">Documentation changes applied</h2><p>The proposal was accepted and the current documentation now includes these changes.</p></div>
+        <div class="proposal-ready-summary"><strong>{proposalSummaryText(appliedProposal.changes)}</strong><span>Use Preview in the navbar to open the updated documentation.</span></div>
+        <footer><Button tone="primary" onClick={() => setAppliedProposal(null)}>Done</Button></footer>
+      </section>
+    </div>}
+    <PageHeader title="Review Changes" description="Preview and approve documentation changes before they replace the current site." actions={selected && <Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview proposed documentation</Button>} />
     {runs.length === 0
       ? <Panel flush><Empty icon="proposals" title="No proposals yet" detail="Run source monitoring, or start an update when documentation becomes stale." /></Panel>
       : <div class="review">
@@ -760,7 +794,7 @@ function Proposals({ state, act }: { state: UiState; act: Action }) {
               <div class="proposal-summary-side">
                 <div class="proposal-actions">
                   <Button tone="danger" disabled={!open} onClick={() => confirm('Reject this complete proposal?') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Proposal rejected')}>Reject</Button>
-                  <Button tone="primary" icon="check" disabled={!open} onClick={() => confirm('Apply every change in this proposal?') && void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'all' }), 'Proposal accepted')}>Accept all</Button>
+                  <Button tone="primary" icon="check" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
                 </div>
                 <div class="proposal-meta"><span><Icon name="clock" size={15} />{timeText(selected.createdAt)}</span><b /><span><Icon name="file" size={15} />{selected.changes.length} file{selected.changes.length === 1 ? '' : 's'}</span></div>
               </div>
@@ -999,7 +1033,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
 type Action = <T>(run: () => Promise<T>, success?: string, refresh?: boolean) => Promise<T | undefined>
 
 /** Proposal states a reviewer can still act on. */
-const OPEN_STATUSES = ['awaiting-review', 'partially-applied']
+const OPEN_STATUSES = ['awaiting-review', 'partially-applied', 'conflicted']
 
 function statusTone(status: string): string {
   if (['applied', 'accepted', 'succeeded', 'pass', 'added'].includes(status)) return 'good'

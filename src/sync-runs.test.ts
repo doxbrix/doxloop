@@ -104,6 +104,9 @@ describe('sync review runs', () => {
       author: async (options) => {
         const staged = await loadProject(options.root)
         const site = JSON.parse(await readFile(join(options.root, 'docs', 'docs.json'), 'utf8'))
+        await mkdir(join(options.root, '.doxloop', 'ui-job-logs'), { recursive: true })
+        await writeFile(join(options.root, '.doxloop', 'ui-jobs.json'), '{"schemaVersion":1,"jobs":[]}\n')
+        await writeFile(join(options.root, '.doxloop', 'ui-job-logs', 'runtime.log'), 'agent output\n')
         await writeFile(
           join(options.root, 'docs', 'docs.json'),
           `${JSON.stringify({ ...site, name: 'Renamed site' }, null, 2)}\n`,
@@ -122,7 +125,71 @@ describe('sync review runs', () => {
     const page = created.changes.find((change) => change.path === 'docs/index.mdx')
     expect(site?.category).toBe('navigation')
     expect(page?.category).toBe('page')
+    expect(created.changes.some((change) => change.path.includes('ui-job'))).toBe(false)
   })
+
+  test('repairs a legacy runtime-file conflict when reading a proposal', async () => {
+    const { root } = await fixture()
+    const created = await proposal(root, '---\ntitle: Updated\ndescription: Updated docs.\n---\n\nThe limit is now 20.\n')
+    const runtimeChange = {
+      ...created.changes[0]!,
+      id: 'change-runtime',
+      path: '.doxloop/ui-job-logs/runtime.log',
+    }
+    await writeFile(
+      join(root, '.doxloop', 'runs', created.id, 'run.json'),
+      `${JSON.stringify({
+        ...created,
+        status: 'conflicted',
+        error: '.doxloop/ui-job-logs/runtime.log changed after this proposal was generated. Regenerate or review the conflict; no file was overwritten.',
+        changes: [...created.changes, runtimeChange],
+      }, null, 2)}\n`,
+    )
+
+    const repaired = await readSyncRun(root, created.id)
+    expect(repaired.status).toBe('awaiting-review')
+    expect(repaired.error).toBeUndefined()
+    expect(repaired.changes).toHaveLength(created.changes.length)
+    expect(repaired.changes.some((change) => change.path.includes('ui-job'))).toBe(false)
+  }, 15_000)
+
+  test('merges non-overlapping concurrent evidence-map updates during acceptance', async () => {
+    const { root } = await fixture()
+    const loaded = await loadProject(root)
+    const created = await createSyncRun({
+      root,
+      project: { ...loaded, sync: { ...loaded.sync, mode: 'propose' as const } },
+      drift: await computeDrift(root, loaded),
+      sourceChanges: await collectSourceChanges(root, loaded.sources),
+      author: async (options) => {
+        const evidencePath = join(options.root, '.doxloop', 'evidence-map.json')
+        const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
+        evidence.pages['docs/index.mdx'].claims = ['Proposal evidence.']
+        await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
+        await writeFile(
+          join(options.root, 'docs', 'index.mdx'),
+          '---\ntitle: Updated\ndescription: Updated docs.\n---\n\nThe limit is now 20.\n',
+        )
+        await recordSyncState(options.root, (await loadProject(options.root)).sources)
+        return 0
+      },
+    })
+    const evidencePath = join(root, '.doxloop', 'evidence-map.json')
+    const currentEvidence = JSON.parse(await readFile(evidencePath, 'utf8'))
+    currentEvidence.pages['docs/quickstart.mdx'].claims = ['Newer accepted evidence.']
+    await writeFile(evidencePath, `${JSON.stringify(currentEvidence, null, 2)}\n`)
+
+    const applied = await acceptSyncChanges(
+      root,
+      created.id,
+      created.changes.map((change) => ({ changeId: change.id })),
+    )
+    const mergedEvidence = JSON.parse(await readFile(evidencePath, 'utf8'))
+    expect(applied.status).toBe('applied')
+    expect(applied.error).toBeUndefined()
+    expect(mergedEvidence.pages['docs/index.mdx'].claims).toEqual(['Proposal evidence.'])
+    expect(mergedEvidence.pages['docs/quickstart.mdx'].claims).toEqual(['Newer accepted evidence.'])
+  }, 15_000)
 
   test('generates outside the real non-Git documentation and applies only after acceptance', async () => {
     const { root } = await fixture()

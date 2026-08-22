@@ -7,7 +7,6 @@ import type { UiState } from './types'
 export function App() {
   const [state, setState] = useState<UiState | null>(null)
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
 
   const reload = async () => {
@@ -24,12 +23,10 @@ export function App() {
 
   useEffect(() => { void reload() }, [])
 
-  const act: Action = async <T,>(run: () => Promise<T>, success?: string, refresh = true): Promise<T | undefined> => {
+  const act: Action = async <T,>(run: () => Promise<T>, _success?: string, refresh = true): Promise<T | undefined> => {
     setError('')
-    setNotice('')
     try {
       const result = await run()
-      if (success) setNotice(success)
       if (refresh) await reload()
       return result
     } catch (cause) {
@@ -60,13 +57,11 @@ export function App() {
     state={state}
     loading={loading}
     error={error}
-    notice={notice}
     reload={reload}
     act={act}
     onJobsUpdate={(jobs) => setState((current) => current ? { ...current, jobs } : current)}
     onError={setError}
     onErrorDismiss={() => setError('')}
-    onNoticeDismiss={() => setNotice('')}
   />
 }
 

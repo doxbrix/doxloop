@@ -86,6 +86,8 @@ interface UiRuntime {
   root?: string | undefined
   jobs: Map<string, UiJob>
   previewJobId?: string | undefined
+  proposalPreviewJobId?: string | undefined
+  proposalPreviewRunId?: string | undefined
   jobSubscribers: Set<ServerResponse>
   jobPersistTimer?: ReturnType<typeof setTimeout> | undefined
   jobPersistQueue: Promise<void>
@@ -348,6 +350,34 @@ async function handleApi(
     sendJson(response, 200, await readSyncRun(requireProject(runtime), proposal[1]!))
     return
   }
+  const proposalPreview = /^\/api\/proposals\/([a-z0-9-]+)\/preview\/start$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalPreview) {
+    const root = requireProject(runtime)
+    const run = await readSyncRun(root, proposalPreview[1]!)
+    const existing = runtime.proposalPreviewJobId
+      ? runtime.jobs.get(runtime.proposalPreviewJobId)
+      : undefined
+    if (existing?.status === 'running' && runtime.proposalPreviewRunId === run.id) {
+      await waitForPreviewServer('http://127.0.0.1:4322', existing)
+      sendJson(response, 200, { job: publicJob(existing), url: 'http://127.0.0.1:4322' })
+      return
+    }
+    if (existing?.status === 'running') {
+      existing.status = 'cancelled'
+      existing.finishedAt = new Date().toISOString()
+      const child = existing.child
+      child?.kill('SIGTERM')
+      if (child) await new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()))
+    }
+    const workspace = join(root, '.doxloop', 'runs', run.id, 'workspace')
+    const args = ['preview', '--host', '127.0.0.1', '--port', '4322', '--cwd', workspace]
+    const job = startCliJob(runtime, `proposal-preview:${run.id}`, args, workspace)
+    runtime.proposalPreviewJobId = job.id
+    runtime.proposalPreviewRunId = run.id
+    await waitForPreviewServer('http://127.0.0.1:4322', job)
+    sendJson(response, 202, { job: publicJob(job), url: 'http://127.0.0.1:4322' })
+    return
+  }
   const proposalDiff = /^\/api\/proposals\/([a-z0-9-]+)\/changes\/(change-\d+)\/diff$/.exec(url.pathname)
   if (request.method === 'GET' && proposalDiff) {
     const root = requireProject(runtime)
@@ -441,6 +471,7 @@ async function handleApi(
     if (runtime.previewJobId) {
       const existing = runtime.jobs.get(runtime.previewJobId)
       if (existing?.status === 'running') {
+        await waitForPreviewServer('http://127.0.0.1:4321', existing)
         if (open) openBrowser('http://127.0.0.1:4321')
         sendJson(response, 200, publicJob(existing))
         return
@@ -451,6 +482,7 @@ async function handleApi(
     if (open) args.push('--open')
     const job = startCliJob(runtime, 'preview', args, root)
     runtime.previewJobId = job.id
+    await waitForPreviewServer('http://127.0.0.1:4321', job)
     sendJson(response, 202, publicJob(job))
     return
   }
@@ -1167,6 +1199,24 @@ function startCliJob(
 function publicJob(job: UiJob): Omit<UiJob, 'child'> {
   const { child: _child, ...rest } = job
   return rest
+}
+
+async function waitForPreviewServer(url: string, job: UiJob): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (job.status !== 'running') {
+      throw new DoxloopError(job.lines.at(-1) ?? 'The documentation preview failed to start.')
+    }
+    try {
+      const response = await fetch(url, { cache: 'no-store' })
+      await response.body?.cancel()
+      if (response.ok) return
+    } catch {
+      // The preview process may still be binding its local port.
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 150))
+  }
+  job.child?.kill('SIGTERM')
+  throw new DoxloopError('The documentation preview did not become ready. Try again.')
 }
 
 function streamJobs(

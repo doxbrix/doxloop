@@ -1,0 +1,875 @@
+/* ── Workspace visual system ──────────────────────────────────────────────
+   Workspace routes intentionally end with one authoritative layer. The setup
+   flow above keeps its own presentation while the daily product UI shares a
+   restrained type scale, spacing rhythm, and surface treatment. */
+
+.shell:has(.reference-sidebar-nav) {
+  --heading: #172033;
+  --text: #344054;
+  --muted: #667085;
+  --faint: #98a2b3;
+  --canvas: #f7f8fa;
+  --subtle: #f8fafb;
+  --hover: #f2f4f7;
+  --border: #e4e7ec;
+  --divider: #eef0f3;
+  --strong-border: #cfd4dc;
+  --radius: 8px;
+  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-rows: 56px minmax(0, 1fr);
+  color: var(--text);
+  background: var(--canvas);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.shell:has(.reference-sidebar-nav).proposal-shell {
+  grid-template-columns: 248px minmax(0, 1fr);
+}
+
+.shell:has(.reference-sidebar-nav) .sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  top: 56px;
+  height: calc(100vh - 56px);
+  gap: 0;
+  padding: 14px 14px 16px;
+  background: #fff;
+  border-right: 1px solid var(--border);
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav {
+  gap: 3px !important;
+  margin-top: 0;
+  padding: 0;
+  border-top: 0;
+  border-bottom: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button {
+  min-height: 40px;
+  gap: 11px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button .icon {
+  color: var(--muted);
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button:hover {
+  color: var(--heading);
+  background: var(--hover);
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button.active {
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button.active .icon {
+  color: var(--brand-dark);
+}
+
+.shell:has(.reference-sidebar-nav) .reference-sidebar-nav button > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.shell:has(.reference-sidebar-nav) .nav-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--brand-dark);
+  font-size: 11px;
+  line-height: 20px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.shell:has(.reference-sidebar-nav) .sidebar-trust-card {
+  gap: 7px;
+  margin: auto 6px 0;
+  padding: 14px 10px 0;
+  border: 0;
+  border-top: 1px solid var(--divider);
+  border-radius: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.shell:has(.reference-sidebar-nav) .sidebar-trust-card > .icon {
+  color: var(--faint);
+}
+
+.shell:has(.reference-sidebar-nav) .sidebar-trust-card p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.shell:has(.reference-sidebar-nav) .sidebar-trust-card a {
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.shell:has(.reference-sidebar-nav) .main {
+  grid-column: 2;
+  grid-row: 2;
+  min-height: calc(100vh - 56px);
+  background: var(--canvas);
+}
+
+.shell:has(.reference-sidebar-nav) .workspace-navbar {
+  position: sticky;
+  z-index: 40;
+  top: 0;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: rgb(255 255 255 / 92%);
+}
+
+.workspace-navbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.workspace-brand {
+  width: 128px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  cursor: default;
+}
+
+.workspace-brand img {
+  width: 128px;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+
+.shell:has(.reference-sidebar-nav) .navbar-mode-flag {
+  width: auto;
+  height: auto;
+  min-height: 24px;
+  margin: 0;
+  padding: 0 0 0 14px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.shell:has(.reference-sidebar-nav) .navbar-mode-flag i {
+  width: 6px;
+  height: 6px;
+}
+
+.shell:has(.reference-sidebar-nav) .navbar-mode-flag::after {
+  content: none;
+}
+
+.shell:has(.reference-sidebar-nav) .workspace-preview-link.btn {
+  height: auto;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  background: transparent;
+  box-shadow: none;
+}
+
+.shell:has(.reference-sidebar-nav) .workspace-preview-link.btn:hover:not(:disabled) {
+  color: var(--brand-dark);
+  background: transparent;
+}
+
+.shell:has(.reference-sidebar-nav) .loading-bar {
+  top: 56px;
+  left: 248px;
+}
+
+.proposal-ready-scrim {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(23 32 51 / 38%);
+  backdrop-filter: blur(3px);
+}
+
+.proposal-ready-dialog {
+  position: relative;
+  width: min(500px, 100%);
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 20px 55px rgb(23 32 51 / 20%);
+}
+
+.proposal-ready-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.proposal-ready-close:hover {
+  color: var(--heading);
+  background: var(--hover);
+}
+
+.proposal-ready-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.proposal-ready-icon.applied {
+  color: #16794b;
+  background: #e9f8f0;
+}
+
+.proposal-ready-dialog h2 {
+  padding-right: 28px;
+  color: var(--heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 700;
+}
+
+.proposal-ready-dialog p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.proposal-ready-summary {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+}
+
+.proposal-ready-summary strong {
+  color: var(--heading);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.proposal-ready-summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.proposal-ready-dialog footer {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.shell:has(.reference-sidebar-nav) .page,
+.shell:has(.reference-sidebar-nav).sources-shell .page,
+.shell:has(.reference-sidebar-nav).proposal-shell .page {
+  width: min(1280px, 100%);
+  max-width: 1280px;
+  gap: 24px;
+  margin: 0 auto;
+  padding: 32px clamp(20px, 3vw, 40px) 64px;
+  background: transparent;
+}
+
+.shell:has(.reference-sidebar-nav).proposal-shell .page {
+  width: min(1440px, 100%);
+  max-width: 1440px;
+}
+
+.shell:has(.reference-sidebar-nav) .page-head,
+.shell:has(.reference-sidebar-nav) .sources-page-header {
+  min-height: 48px;
+  align-items: flex-start;
+  gap: 20px;
+  margin: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .page-head h1,
+.shell:has(.reference-sidebar-nav) .sources-page-header h1,
+.shell:has(.reference-sidebar-nav).proposal-shell .page-head h1 {
+  color: var(--heading);
+  font-size: 24px;
+  line-height: 30px;
+  font-weight: 700;
+  letter-spacing: -.35px;
+}
+
+.shell:has(.reference-sidebar-nav) .page-head p,
+.shell:has(.reference-sidebar-nav) .sources-page-header p,
+.shell:has(.reference-sidebar-nav).proposal-shell .page-head p {
+  max-width: 68ch;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.shell:has(.reference-sidebar-nav) .page-head-actions {
+  padding-top: 2px;
+}
+
+.shell:has(.reference-sidebar-nav) .btn {
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .btn.md {
+  height: 36px;
+  padding-inline: 13px;
+  border-radius: 7px;
+  font-size: 14px;
+}
+
+.shell:has(.reference-sidebar-nav) .btn.sm {
+  height: 30px;
+  padding-inline: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .panel,
+.shell:has(.reference-sidebar-nav) .authoring-action-card,
+.shell:has(.reference-sidebar-nav) .sources-data-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.shell:has(.reference-sidebar-nav) .panel-head {
+  min-height: 56px;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom-color: var(--divider);
+}
+
+.shell:has(.reference-sidebar-nav) .panel-head h2 {
+  color: var(--heading);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .panel-head p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.shell:has(.reference-sidebar-nav) .panel-body {
+  gap: 18px;
+  padding: 18px;
+}
+
+.shell:has(.reference-sidebar-nav) .input {
+  min-height: 38px;
+  padding: 8px 11px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.shell:has(.reference-sidebar-nav) .field {
+  gap: 6px;
+}
+
+.shell:has(.reference-sidebar-nav) .field-label,
+.shell:has(.reference-sidebar-nav) .authoring-request .field-label,
+.shell:has(.reference-sidebar-nav) .screenshot-option > strong {
+  color: var(--heading);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .field small,
+.shell:has(.reference-sidebar-nav) .toggle-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .badge {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .banner {
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+}
+
+/* Sources */
+.shell:has(.reference-sidebar-nav) .sources-reference-page {
+  display: grid;
+  gap: 24px;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-add-wrap {
+  width: auto;
+  min-width: 144px;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-add-dropdown-button {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--brand);
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-add-menu {
+  width: 220px;
+  margin-top: 5px;
+  padding: 6px;
+  border-radius: 8px;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-data-panel > header {
+  height: 56px;
+  min-height: 56px;
+  gap: 8px;
+  padding: 0 18px;
+  border-bottom-color: var(--divider);
+  color: var(--heading);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-table-head,
+.shell:has(.reference-sidebar-nav) .sources-data-row {
+  grid-template-columns: minmax(260px, 1fr) 140px 88px;
+  padding-inline: 18px;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-table-head {
+  height: 38px;
+  min-height: 38px;
+  color: var(--muted);
+  background: var(--subtle);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-table-head > :last-child {
+  text-align: right;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-data-row {
+  min-height: 68px;
+  border-bottom-color: var(--divider);
+}
+
+.shell:has(.reference-sidebar-nav) .sources-data-row:last-child {
+  border-bottom: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-data-row:hover {
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .source-service-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .source-service-icon .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-name-cell strong {
+  color: var(--heading);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .sources-name-cell small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .source-type-pill {
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+  font-size: 11px;
+}
+
+/* Authoring */
+.shell:has(.reference-sidebar-nav) .page:has(.authoring-page),
+.shell:has(.reference-sidebar-nav) .authoring-page {
+  min-height: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-page {
+  gap: 24px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-request {
+  overflow: visible;
+  border-radius: 10px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-request .panel-body {
+  min-height: 0;
+  gap: 0;
+  padding: 20px 20px 0;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-fields {
+  gap: 20px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-prompt-block {
+  gap: 10px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-prompt-title {
+  gap: 10px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-prompt-title > span {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-prompt-title h2 {
+  color: var(--heading);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-request .textarea {
+  min-height: 124px;
+  padding: 12px 13px 30px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-textarea-wrap > small {
+  right: 12px;
+  bottom: 8px;
+  color: var(--muted) !important;
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-options {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  padding-top: 2px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-options > * {
+  padding: 0;
+  border: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-options .field,
+.shell:has(.reference-sidebar-nav) .screenshot-option {
+  gap: 7px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-control-icon::before {
+  left: 5px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-control-icon.model::before,
+.shell:has(.reference-sidebar-nav) .authoring-control-icon.reasoning::before {
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-control-icon > .icon,
+.shell:has(.reference-sidebar-nav) .authoring-control-icon.agent > .icon,
+.shell:has(.reference-sidebar-nav) .authoring-control-icon.model > .icon,
+.shell:has(.reference-sidebar-nav) .authoring-control-icon.reasoning > .icon {
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  color: var(--brand-dark);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-control-icon .input {
+  min-height: 38px;
+  padding-left: 42px;
+  font-size: 14px;
+}
+
+.shell:has(.reference-sidebar-nav) .screenshot-option > div {
+  min-height: 38px;
+  gap: 10px;
+}
+
+.shell:has(.reference-sidebar-nav) .screenshot-camera {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot {
+  min-height: 64px;
+  margin: 20px -20px 0;
+  padding: 13px 20px;
+  border-top: 1px solid var(--divider);
+  border-bottom: 0;
+  border-radius: 0 0 10px 10px;
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot .btn {
+  min-width: 190px;
+  height: 38px;
+  font-size: 14px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-action-card {
+  overflow: hidden;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-action-card-head {
+  min-height: 64px;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .action-card-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  color: var(--brand-dark);
+  background: var(--brand-soft) !important;
+}
+
+.shell:has(.reference-sidebar-nav) .action-card-copy strong {
+  color: var(--heading);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .action-card-copy small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-activity-row strong {
+  color: var(--heading);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-activity-row time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .activity-status-icon.ready {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+@media (max-width: 1100px) {
+  .shell:has(.reference-sidebar-nav) .authoring-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .shell:has(.reference-sidebar-nav),
+  .shell:has(.reference-sidebar-nav).proposal-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 56px minmax(0, 1fr);
+  }
+
+  .shell:has(.reference-sidebar-nav) .page,
+  .shell:has(.reference-sidebar-nav).sources-shell .page,
+  .shell:has(.reference-sidebar-nav).proposal-shell .page {
+    width: 100%;
+    padding: 24px 18px 48px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .main {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sidebar {
+    position: fixed;
+    top: 56px;
+    width: 248px;
+    height: calc(100vh - 56px);
+  }
+
+  .shell:has(.reference-sidebar-nav) .workspace-brand {
+    cursor: pointer;
+  }
+
+  .shell:has(.reference-sidebar-nav) .loading-bar {
+    left: 0;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-table-head,
+  .shell:has(.reference-sidebar-nav) .sources-data-row,
+  .shell:has(.reference-sidebar-nav) .sources-data-panel > header,
+  .shell:has(.reference-sidebar-nav) .sources-table-body {
+    min-width: 0;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-data-panel {
+    overflow: hidden;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell:has(.reference-sidebar-nav) .workspace-navbar {
+    padding-inline: 14px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .workspace-brand,
+  .shell:has(.reference-sidebar-nav) .workspace-brand img {
+    width: 112px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .workspace-navbar-left {
+    gap: 10px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .navbar-mode-flag {
+    padding-left: 10px;
+  }
+
+  .proposal-ready-dialog {
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 12px;
+    padding: 20px;
+  }
+
+  .proposal-ready-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .proposal-ready-dialog footer {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .proposal-ready-dialog footer .btn {
+    width: 100%;
+  }
+
+  .shell:has(.reference-sidebar-nav) .page-head {
+    display: grid;
+    gap: 14px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .page-head-actions {
+    width: 100%;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-add-wrap,
+  .shell:has(.reference-sidebar-nav) .sources-add-dropdown-button {
+    width: 100%;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-table-head {
+    display: none;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-data-row {
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .sources-data-row > :nth-child(2) {
+    grid-column: 1;
+    padding-left: 50px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .source-row-menu {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    align-self: center;
+  }
+
+  .shell:has(.reference-sidebar-nav) .authoring-options {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot {
+    align-items: stretch;
+  }
+
+  .shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot .row-actions,
+  .shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot .btn {
+    width: 100%;
+    min-width: 0;
+  }
+}

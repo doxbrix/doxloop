@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
+import './SetupApplication.css'
 import { post } from './api'
 import { Badge, Button, Combo, Field, Input, Lines, Note, Segmented, Select, Textarea, Toggle } from './components'
 import { Icon } from './icons'
