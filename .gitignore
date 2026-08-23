@@ -4,6 +4,10 @@ dist/
 coverage/
 evals/results/
 .doxloop/last-run.json
+# Run workspaces are throwaway git repos Doxloop creates to diff proposals
+# against a baseline. Committing them leaves permanently dirty gitlinks.
+.doxloop/runs/
+/doxloop docs/
 .doxloop/doxloop.db
 .doxloop/doxloop.db-wal
 .doxloop/doxloop.db-shm
