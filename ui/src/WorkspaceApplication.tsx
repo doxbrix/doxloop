@@ -47,8 +47,16 @@ export function WorkspaceApplication({
   onError,
   onErrorDismiss,
 }: WorkspaceApplicationProps) {
+  const project = state.project!
   const [page, setPage] = useState<Page>(currentPage())
   const [navOpen, setNavOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('doxloop.sidebarCollapsed') === 'true'
+    } catch {
+      return false
+    }
+  })
   const [jobStreamConnected, setJobStreamConnected] = useState(false)
   const [readyProposal, setReadyProposal] = useState<Proposal | null>(null)
   const runningJobIds = useRef(new Set(state.jobs.filter((job) => job.status === 'running').map((job) => job.id)))
@@ -107,6 +115,14 @@ export function WorkspaceApplication({
     return () => removeEventListener('popstate', listener)
   }, [])
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('doxloop.sidebarCollapsed', String(sidebarCollapsed))
+    } catch {
+      // The preference remains available for this session when storage is unavailable.
+    }
+  }, [sidebarCollapsed])
+
   const jobsRunning = state.jobs.some((job) => job.status === 'running')
   useEffect(() => {
     if (!jobsRunning) return
@@ -141,15 +157,22 @@ export function WorkspaceApplication({
     }
   }
 
-  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
+  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
 
     <header class="workspace-navbar">
       <div class="workspace-navbar-left">
         <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
-        <span class="mode-flag navbar-mode-flag"><i />Local mode</span>
+        <div class="workspace-identity" aria-label={`Current workspace: ${project.title}`}>
+          <span class="workspace-identity-mark">{project.title.slice(0, 1).toUpperCase()}</span>
+          <span class="workspace-identity-copy"><strong>{project.title}</strong><small>Local workspace</small></span>
+        </div>
       </div>
-      <Button tone="primary" class="workspace-preview-link" icon="external" onClick={() => void openPreview()}>Preview</Button>
+      <div class="workspace-navbar-actions">
+        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer"><Icon name="help" size={16} />Support</a>
+        <span class="mode-flag navbar-mode-flag"><i />Local</span>
+        <button type="button" class="workspace-preview-primary" onClick={() => void openPreview()}><span><Icon name="preview" size={16} /></span><strong>Preview docs</strong><Icon name="external" size={14} /></button>
+      </div>
     </header>
 
     {readyProposal && <div class="proposal-ready-scrim" role="presentation">
@@ -163,10 +186,17 @@ export function WorkspaceApplication({
     </div>}
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
+      <span class="sidebar-section-label">Workspace</span>
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {NAV.map(([id, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={id} size={17} /><span>{label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
+        {NAV.slice(0, 4).map(([id, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={id} size={17} /><span>{label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
       </nav>
-      <footer class="sidebar-trust-card"><Icon name="shield" size={18} /><p>Your content is read-only and never copied to our servers.</p><a href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer">Learn more <Icon name="external" size={12} /></a></footer>
+      <span class="sidebar-section-label settings-label">Settings</span>
+      <nav class="reference-sidebar-nav settings-sidebar-nav" aria-label="Settings navigation">
+        <button class={page === 'settings' ? 'active' : ''} aria-current={page === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}><Icon name="settings" size={17} /><span>Settings</span></button>
+      </nav>
+      <button type="button" class="sidebar-collapse-button" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
+        <Icon name="chevronRight" size={15} /><span>{sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span>
+      </button>
     </aside>
 
     <div class="main">
@@ -318,13 +348,25 @@ function SourcesReference({ state, act }: { state: UiState; act: Action }) {
       setSaving(false)
     }
   }
+  const remoteSourceCount = filtered.filter((source) => Boolean(source.remote)).length
+  const openapiSourceCount = filtered.filter((source) => source.kind === 'openapi').length
   return <div class="sources-reference-page">
     <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div>} />
-    <section class="sources-data-panel"><header>Connected sources <Badge>{filtered.length}</Badge></header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Actions</span></div>{filtered.length ? <div class="sources-table-body">{filtered.map((source) => <div class="sources-data-row" key={source.name}><span class="sources-name-cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.remote ? source.remote.repository : source.path}</small></span></span><span><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'}</em></span><span class="source-row-menu"><button type="button" class={`monitoring-button ${project.sync.on.length ? 'monitoring-active' : ''}`} aria-label={`Configure monitoring for ${source.name}`} title="Configure monitoring" onClick={() => setMonitoringSource(source)}><Icon name="bell" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small></div>}</section>
+    <section class="sources-library">
+      <header class="sources-library-header">
+        <div><h2>Connected sources</h2><p>Evidence Doxloop can read when it creates and updates your documentation.</p></div>
+        <div class="sources-library-summary"><span><strong>{filtered.length}</strong> connected</span><i /><span><strong>{remoteSourceCount}</strong> remote</span><i /><span><strong>{openapiSourceCount}</strong> API</span></div>
+      </header>
+      {filtered.length ? <div class="sources-card-grid">{filtered.map((source) => <article class="source-card" key={source.name}>
+        <div class="source-card-top"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'}</em></div>
+        <div class="source-card-copy"><strong>{source.name}</strong><small>{source.remote ? source.remote.repository : source.path}</small></div>
+        <footer><span class="source-connection-status"><i />Available</span><span class="source-row-menu"><button type="button" class={`monitoring-button ${project.sync.on.length ? 'monitoring-active' : ''}`} aria-label={`Configure monitoring for ${source.name}`} title="Configure monitoring" onClick={() => setMonitoringSource(source)}><Icon name="bell" size={17} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={17} /></button></span></footer>
+      </article>)}<button type="button" class="sources-add-card" onClick={() => openDialog('source')}><span><Icon name="plus" size={18} /></span><strong>Add another source</strong><small>Connect source code or an API specification.</small></button></div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
+    </section>
     {monitoringSource && <MonitoringDialog state={state} source={monitoringSource} act={act} onClose={() => setMonitoringSource(null)} />}
     {dialog && <div class="sources-modal-scrim" onClick={closeDialog}><section class={`sources-reference-dialog ${dialog}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
       <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
-      {dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><div class="openapi-url-input"><Icon name="external" size={18} /><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /></div><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
+      {dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><Input value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
       <footer><Button onClick={closeDialog}>Cancel</Button><Button tone="primary" busy={saving} disabled={dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()} onClick={() => void addSource()}>Add source</Button></footer>
     </section></div>}
   </div>
@@ -526,7 +568,7 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
     }
   }
   return <div class="authoring-page">
-    <PageHeader title="Update Documentation" description="Apply changes and keep your docs accurate with your connected sources." />
+    <PageHeader title="Update documentation" description="Describe what changed and prepare a documentation update." />
     {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
       <span class="source-sync-icon"><Icon name="sources" size={18} /></span>
       <div>
@@ -534,14 +576,17 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
         <p>Run Update to synchronize {pendingSources.length === 1 ? 'this source' : 'these sources'} with the existing documentation. Unrelated pages, navigation, and styling will be preserved.</p>
       </div>
     </div>}
-    <Panel class="authoring-request">
-      <fieldset class="authoring-fields" disabled={runBusy}>
-        <div class="authoring-prompt-block">
-          <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><h2>What changes do you need for your agent?</h2></div>
-          <span class="authoring-textarea-wrap"><Textarea rows={5} maxlength={1000} value={form.request} placeholder="Describe the changes you want to apply…" onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /><small>{form.request.length} / 1000</small></span>
-        </div>
-        <div class="authoring-options">
-          <Field label="Agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
+    <div class="authoring-workbench">
+      <Panel class="authoring-request">
+        <fieldset class="authoring-fields" disabled={runBusy}>
+          <div class="authoring-prompt-block">
+            <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>Describe the update</h2><p>Tell the agent what changed, what readers need, or which pages should be improved.</p></div></div>
+            <span class="authoring-textarea-wrap"><Textarea rows={6} maxlength={1000} value={form.request} placeholder="For example: Document the new API key rotation flow and update the authentication guide with a TypeScript example." onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
+          </div>
+        </fieldset>
+        <section class="authoring-run-config">
+        <fieldset class="authoring-options" disabled={runBusy}>
+          <Field label="Coding agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
               const agent = event.currentTarget.value
               const model = defaultModelForAgent(agent)
               const level = preferredReasoningLevel(agent, model)
@@ -556,17 +601,13 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
           <Field label="Model"><span class="authoring-control-icon model"><Icon name="sparkle" size={17} /><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => setForm({ ...form, model: value })} /></span></Field>
           <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><span class="authoring-control-icon reasoning"><Icon name="brain" size={17} /><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></span></Field>
           <div class="screenshot-option">
-            <strong>Capture screenshots</strong>
-            <div><span class="screenshot-camera"><Icon name="camera" size={18} /></span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
+            <div><span class="screenshot-camera"><Icon name="camera" size={18} /></span><span><strong>Visual evidence</strong><small>Capture application screenshots during the run.</small></span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
           </div>
-        </div>
-      </fieldset>
-      <div class="panel-inline-foot">
-        <div class="row-actions">
-          <Button disabled={runBusy} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startRun(mode)}>Update documentation</Button>
-        </div>
-      </div>
-    </Panel>
+        </fieldset>
+        <footer><Button disabled={runBusy} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startRun(mode)}>Start documentation update</Button><small>The current documentation stays unchanged until you approve the proposal.</small></footer>
+        </section>
+      </Panel>
+    </div>
     <section class={`authoring-action-card activity-card live-activity-card ${activityOpen ? 'open' : ''}`}>
       <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
         <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
@@ -724,10 +765,9 @@ function commandText(line: string) {
 
 function Proposals({ state, act, onError }: { state: UiState; act: Action; onError: (error: string) => void }) {
   const runs = validRuns(state.runs)
-  const initialRun = runs.find((run) => OPEN_STATUSES.includes(run.status)) ?? runs[0]
-  const [selectedId, setSelectedId] = useState(initialRun?.id ?? '')
-  const selected = runs.find((run) => run.id === selectedId) ?? initialRun
-  const [changeId, setChangeId] = useState(selected?.changes[0]?.id ?? '')
+  const [selectedId, setSelectedId] = useState('')
+  const selected = runs.find((run) => run.id === selectedId)
+  const [changeId, setChangeId] = useState('')
   const [confirmingAcceptance, setConfirmingAcceptance] = useState<Proposal | null>(null)
   const [appliedProposal, setAppliedProposal] = useState<Proposal | null>(null)
   const [view, setView] = useState<'rendered' | 'source'>('rendered')
@@ -761,18 +801,36 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
         <footer><Button tone="primary" onClick={() => setAppliedProposal(null)}>Done</Button></footer>
       </section>
     </div>}
-    <PageHeader title="Review Changes" description="Preview and approve documentation changes before they replace the current site." actions={selected && <Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview proposed documentation</Button>} />
+    {selected
+      ? <div class="review-detail-heading">
+        <button type="button" class="review-back-button" onClick={() => setSelectedId('')}><Icon name="chevronRight" size={14} />All proposals</button>
+        <PageHeader title="Review proposal" description="Compare the current documentation with the proposed update." actions={<Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview documentation</Button>} />
+      </div>
+      : <PageHeader title="Review Changes" description="Choose a proposal to inspect and approve its documentation changes." />}
     {runs.length === 0
       ? <Panel flush><Empty icon="proposals" title="No proposals yet" detail="Run source monitoring, or start an update when documentation becomes stale." /></Panel>
-      : <div class="review">
-        <aside class="review-rail">
-          <div class="rail-head"><span>{runs.length} proposal{runs.length === 1 ? '' : 's'}</span><span class="rail-sort">Newest first <Icon name="filter" size={14} /></span></div>
-          {runs.map((run) => <button key={run.id} class={selected?.id === run.id ? 'active' : ''} onClick={() => setSelectedId(run.id)}>
-            <strong>{proposalSummaryText(run.changes)}</strong>
-            <div class="rail-row"><small>{timeText(run.createdAt)} · {run.changes.length} file{run.changes.length === 1 ? '' : 's'}</small><Badge tone={statusTone(run.status)}>{statusLabel(run.status)}</Badge></div>
-          </button>)}
-        </aside>
-        {selected && <section class="review-main">
+      : !selected
+        ? <Panel class="proposal-index-panel" title="All proposals" description={runs.length + ' documentation update' + (runs.length === 1 ? '' : 's') + ' available for review.'} flush>
+          <Table class="proposal-index-table" head={<><th>Proposal</th><th>Changes</th><th>Files</th><th>Created</th><th>Status</th><th><span class="sr-only">Open</span></th></>}>
+            {runs.map((run) => {
+              const runCounts = proposalChangeCounts(run.changes)
+              return <tr key={run.id} class="proposal-index-row" tabIndex={0} onClick={() => setSelectedId(run.id)} onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return
+                event.preventDefault()
+                setSelectedId(run.id)
+              }}>
+                <td><span class="proposal-index-name"><span><Icon name="proposals" size={17} /></span><span><strong>{run.summary || 'Documentation update'}</strong><small>{run.sourceSummary}</small></span></span></td>
+                <td><span class="proposal-index-counts"><b class="added">+{runCounts.added}</b><b class="modified">{runCounts.modified} modified</b><b class="deleted">−{runCounts.deleted}</b></span></td>
+                <td><span class="proposal-index-files"><Icon name="file" size={14} />{run.changes.length}</span></td>
+                <td><time>{timeText(run.createdAt)}</time></td>
+                <td><Badge tone={statusTone(run.status)}>{statusLabel(run.status)}</Badge></td>
+                <td><Icon name="chevronRight" size={15} /></td>
+              </tr>
+            })}
+          </Table>
+        </Panel>
+        : <div class="review">
+        <section class="review-main">
           <div class="proposal-card">
             <header class="proposal-summary">
               <span class="proposal-summary-icon"><Icon name="proposals" size={25} /></span>
@@ -793,43 +851,97 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                   <Button tone="danger" disabled={!open} onClick={() => confirm('Reject this complete proposal?') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Proposal rejected')}>Reject</Button>
                   <Button tone="primary" icon="check" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
                 </div>
-                <div class="proposal-meta"><span><Icon name="clock" size={15} />{timeText(selected.createdAt)}</span><b /><span><Icon name="file" size={15} />{selected.changes.length} file{selected.changes.length === 1 ? '' : 's'}</span></div>
+                <div class="proposal-meta"><span><Icon name="file" size={15} />Review files individually or apply the full proposal</span></div>
               </div>
             </header>
 
-            <div class="file-picker-bar">
-              <label class="file-picker">
-                <span class="file-picker-icon"><Icon name="file" size={16} /></span>
-                <span class="file-picker-copy"><small>Reviewing file</small><strong>{change?.path ?? 'Choose a file'}</strong></span>
-                <Select class="file-picker-select" aria-label="Choose a proposal file" value={change?.id ?? ''} onChange={(event) => setChangeId(event.currentTarget.value)}>
-                  {selected.changes.map((item) => <option key={item.id} value={item.id}>{item.path} · {item.kind}</option>)}
-                </Select>
-                <Badge tone={statusTone(change?.kind ?? '')}>{change?.kind ?? ''}</Badge>
-                <span class="file-position">{Math.max(0, selected.changes.findIndex((item) => item.id === change?.id)) + 1} of {selected.changes.length}</span>
-                <Icon name="chevronDown" size={16} />
-              </label>
+            <div class="review-workspace">
+              <aside class="review-file-rail" aria-label="Changed files">
+                <header><div><strong>Changed files</strong><small>{selected.changes.length} file{selected.changes.length === 1 ? '' : 's'} in this proposal</small></div></header>
+                <ReviewFileTree nodes={proposalFileTree(selected.changes)} selectedId={change?.id ?? ''} onSelect={setChangeId} />
+              </aside>
+
+              <section class="review-diff-panel">
+                {change ? <>
+                  <header class="review-file-head">
+                    <div><span class="review-file-head-icon"><Icon name="file" size={16} /></span><span><small>Reviewing file</small><strong>{change.path}</strong></span></div>
+                    <span class="file-position">{Math.max(0, selected.changes.findIndex((item) => item.id === change.id)) + 1} of {selected.changes.length}</span>
+                  </header>
+                  <div class="review-toolbar">
+                    <div class="review-view-control">
+                      <span class="toolbar-label">View</span>
+                      <Segmented value={view} onChange={setView} items={[['rendered', 'Preview'], ['source', 'Source']] as const} />
+                    </div>
+                    <div class="row-actions">
+                      {view === 'rendered' && <>
+                        <div class="review-layout-control"><span class="toolbar-label">Diff layout</span><Segmented value={layout} onChange={setLayout} items={[['split', 'Side-by-side'], ['unified', 'Inline']] as const} /></div>
+                        <Button size="sm" class={onlyChanges ? 'active-filter' : ''} onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Changes only' : 'Show all'}</Button>
+                      </>}
+                      <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id }), 'Page accepted')}>Accept file</Button>
+                    </div>
+                  </div>
+                  <div class="review-diff-body">
+                    {view === 'source'
+                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} />
+                      : <iframe class="review-frame" title={`Review ${change.title}`} src={`/review-preview/${selected.id}/${change.id}?layout=${layout}${onlyChanges ? '&only=1' : ''}`} />}
+                  </div>
+                </> : <Empty title="This proposal contains no file changes" />}
+              </section>
             </div>
-            {change ? <>
-              <div class="review-toolbar">
-                <div class="chips"><Badge>{change.category}</Badge><Badge>{change.kind}</Badge></div>
-                <div class="row-actions">
-                  <span class="toolbar-label">View</span>
-                  <Segmented value={view} onChange={setView} items={[['rendered', 'Rendered'], ['source', 'Source']] as const} />
-                  {view === 'rendered' && <>
-                    <Segmented value={layout} onChange={setLayout} items={[['split', 'Side by side'], ['unified', 'Stacked']] as const} />
-                    <Button size="sm" onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Show context' : 'Only changes'}</Button>
-                  </>}
-                  <Button size="sm" tone="primary" disabled={!open} onClick={() => void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id }), 'Page accepted')}>Accept file</Button>
-                </div>
-              </div>
-              {view === 'source'
-                ? <ProposalSourceDiff runId={selected.id} change={change} act={act} />
-                : <iframe class="review-frame" title={`Review ${change.title}`} src={`/review-preview/${selected.id}/${change.id}?layout=${layout}${onlyChanges ? '&only=1' : ''}`} />}
-            </> : <Empty title="This proposal contains no file changes" />}
           </div>
-        </section>}
+        </section>
       </div>}
   </>
+}
+
+type ReviewTreeNode = {
+  name: string
+  path: string
+  children: ReviewTreeNode[]
+  change?: ProposalChange
+}
+
+function proposalFileTree(changes: ProposalChange[]): ReviewTreeNode[] {
+  const root: ReviewTreeNode[] = []
+  for (const change of changes) {
+    const parts = change.path.split('/').filter(Boolean)
+    let level = root
+    let currentPath = ''
+    parts.forEach((part, index) => {
+      currentPath = currentPath ? currentPath + '/' + part : part
+      const isFile = index === parts.length - 1
+      let node = level.find((item) => item.name === part && Boolean(item.change) === isFile)
+      if (!node) {
+        node = { name: part, path: currentPath, children: [], ...(isFile ? { change } : {}) }
+        level.push(node)
+      }
+      level = node.children
+    })
+  }
+  const sort = (nodes: ReviewTreeNode[]): ReviewTreeNode[] => nodes
+    .sort((left, right) => Number(Boolean(left.change)) - Number(Boolean(right.change)) || left.name.localeCompare(right.name))
+    .map((node) => ({ ...node, children: sort(node.children) }))
+  return sort(root)
+}
+
+function ReviewFileTree({ nodes, selectedId, onSelect, depth = 0 }: {
+  nodes: ReviewTreeNode[]
+  selectedId: string
+  onSelect: (id: string) => void
+  depth?: number
+}) {
+  return <div class={depth === 0 ? 'review-file-tree' : 'review-tree-children'}>
+    {nodes.map((node) => node.change
+      ? <button type="button" key={node.path} class={'review-tree-file ' + (selectedId === node.change?.id ? 'active' : '')} style={'--tree-depth:' + depth} aria-current={selectedId === node.change.id ? 'true' : undefined} title={node.path} onClick={() => onSelect(node.change!.id)}>
+        <span class="review-file-icon"><Icon name="file" size={14} /></span>
+        <span class="review-file-copy"><strong>{node.name}</strong></span>
+        <Badge tone={statusTone(node.change.kind)}>{node.change.kind}</Badge>
+      </button>
+      : <details key={node.path} class="review-tree-folder" open>
+        <summary style={'--tree-depth:' + depth}><Icon name="chevronRight" size={12} /><Icon name="folder" size={15} /><strong>{node.name}</strong></summary>
+        <ReviewFileTree nodes={node.children} selectedId={selectedId} onSelect={onSelect} depth={depth + 1} />
+      </details>)}
+  </div>
 }
 
 function proposalChangeCounts(changes: ProposalChange[]): { added: number; modified: number; deleted: number } {
@@ -891,45 +1003,89 @@ function diffGroups(rows: DiffRow[]): Array<{ hunkId?: string; state?: string; r
 function Publish({ state, act }: { state: UiState; act: Action }) {
   const effective = state.effectiveDeployment!
   const [deployment, setDeployment] = useState(effective)
+  const [confirmingDeploy, setConfirmingDeploy] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
+  const activitySection = useRef<HTMLElement>(null)
   const account = state.account
-  const save = () => act(() => patch('/api/project', { deployment }), 'Deployment settings saved')
+  const publishingJobs = state.jobs.filter((job) => job.type.startsWith('deploy') || job.type === 'login')
+  const selectVisibility = async (visibility: 'public' | 'private') => {
+    const previous = deployment
+    const next = { ...deployment, visibility }
+    setDeployment(next)
+    const saved = await act(() => patch('/api/project', { deployment: next }), undefined, false)
+    if (saved === undefined) setDeployment(previous)
+  }
   const deploy = async (dryRun: boolean) => {
-    if (!dryRun && !confirm(`Deploy ${deployment.visibility === 'public' ? 'PUBLICLY' : 'privately'} to ${deployment.apiUrl}?`)) return
+    if (!dryRun) {
+      setConfirmingDeploy(true)
+      return
+    }
     await act(() => post('/api/deploy', { ...deployment, public: deployment.visibility === 'public', dryRun }), dryRun ? 'Deployment validation started' : 'Deployment started')
   }
+  const confirmDeployment = async () => {
+    setConfirmingDeploy(false)
+    await act(() => post('/api/deploy', { ...deployment, public: deployment.visibility === 'public', dryRun: false }), 'Deployment started')
+  }
   return <>
+    {confirmingDeploy && <div class="proposal-ready-scrim" role="presentation">
+      <section class="proposal-ready-dialog deploy-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="deploy-confirm-title">
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingDeploy(false)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon"><Icon name={deployment.visibility === 'public' ? 'cloud' : 'lock'} size={24} /></span>
+        <div><h2 id="deploy-confirm-title">Deploy documentation {deployment.visibility === 'public' ? 'publicly' : 'privately'}?</h2><p>{deployment.visibility === 'public' ? 'Anyone with the published URL will be able to open this documentation.' : 'Only signed-in members with access will be able to open this documentation.'}</p></div>
+        <div class="proposal-ready-summary"><strong>Deployment destination</strong><span>{deployment.apiUrl}</span></div>
+        <footer><Button onClick={() => setConfirmingDeploy(false)}>Cancel</Button><Button tone="primary" icon="publish" onClick={() => void confirmDeployment()}>Deploy {deployment.visibility === 'public' ? 'publicly' : 'privately'}</Button></footer>
+      </section>
+    </div>}
     <PageHeader
       title="Publish"
       description="Validate and deploy documentation without including configured product sources."
-      meta={<><Badge tone={account?.signedIn ? 'good' : 'warn'} icon={account?.signedIn ? 'check' : 'alert'}>{account?.signedIn ? 'Signed in' : 'Not signed in'}</Badge><span>{deployment.visibility === 'public' ? 'Public site' : 'Private site'}</span></>}
       actions={<><Button onClick={() => void deploy(true)}>Dry run</Button><Button tone="primary" icon="publish" disabled={!account?.signedIn} onClick={() => void deploy(false)}>Deploy</Button></>}
     />
-    <div class="split wide-left">
-      <Panel title="Deployment" description="Where this documentation is published.">
-        <div class="form-grid">
-          <Field label="Visibility"><Select value={deployment.visibility} onChange={(event) => setDeployment({ ...deployment, visibility: event.currentTarget.value })}><option value="private">Private</option><option value="public">Public</option></Select></Field>
-        </div>
-        <Note>Deployment packages documentation pages and media only. Product source directories are excluded.</Note>
-        <div class="form-actions"><Button tone="primary" onClick={() => void save()}>Save settings</Button></div>
-      </Panel>
-      <Panel title="Doxbrix account">
+    <div class="publish-stack">
+      <Panel class="publish-account-panel" title="Doxbrix account" description="Connect your account before publishing documentation.">
         {account?.signedIn
           ? <div class="account-card">
             <span class="avatar">{account.user?.email.slice(0, 1).toUpperCase()}</span>
             <strong>{account.user?.name ?? account.user?.email}</strong>
             <small>{account.user?.email}</small>
             <code class="mono">{account.apiUrl}</code>
-            <Button icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button>
+            <div class="account-card-actions"><Badge tone="good" icon="check">Signed in</Badge><Button icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button></div>
           </div>
           : <div class="account-card">
             <span class="avatar muted"><Icon name="user" size={18} /></span>
             <strong>Not signed in</strong>
             <small>{account?.detail ?? 'Sign in to deploy this documentation.'}</small>
-            <Button tone="primary" icon="key" onClick={() => void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started')}>Sign in with browser</Button>
+            <div class="account-card-actions"><Badge tone="warn" icon="alert">Not signed in</Badge><Button tone="primary" icon="key" onClick={() => void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started')}>Sign in with browser</Button></div>
           </div>}
       </Panel>
+      <Panel class="publish-visibility-panel" title="Deployment visibility" description="Choose who can access the published documentation.">
+        <div class="visibility-card-grid" role="radiogroup" aria-label="Deployment visibility">
+          <button type="button" role="radio" aria-checked={deployment.visibility === 'private'} class={`visibility-card ${deployment.visibility === 'private' ? 'selected' : ''}`} onClick={() => void selectVisibility('private')}>
+            <span class="visibility-card-icon private"><Icon name="lock" size={20} /></span>
+            <span><strong>Private</strong><small>Only signed-in members with access can open the documentation.</small></span>
+            <i class="visibility-radio"><Icon name="check" size={12} /></i>
+          </button>
+          <button type="button" role="radio" aria-checked={deployment.visibility === 'public'} class={`visibility-card ${deployment.visibility === 'public' ? 'selected' : ''}`} onClick={() => void selectVisibility('public')}>
+            <span class="visibility-card-icon public"><Icon name="cloud" size={20} /></span>
+            <span><strong>Public</strong><small>Anyone with the published URL can open the documentation.</small></span>
+            <i class="visibility-radio"><Icon name="check" size={12} /></i>
+          </button>
+        </div>
+        <p class="visibility-autosave"><Icon name="check" size={13} />Visibility is saved automatically.</p>
+      </Panel>
     </div>
-    <Panel title="Publishing activity" flush><JobTable jobs={state.jobs.filter((job) => job.type.startsWith('deploy') || job.type === 'login')} onCancel={(id) => void act(() => post(`/api/jobs/${id}/cancel`), 'Job cancelled')} /></Panel>
+    <section ref={activitySection} class={`authoring-action-card activity-card live-activity-card publish-activity-card ${activityOpen ? 'open' : ''}`}>
+      <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => {
+        const nextOpen = !activityOpen
+        setActivityOpen(nextOpen)
+        if (nextOpen) requestAnimationFrame(() => activitySection.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+      }}>
+        <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
+        <span class="action-card-copy"><strong>Publishing activity</strong><small>{publishingJobs.length ? `${publishingJobs.length} publishing event${publishingJobs.length === 1 ? '' : 's'}` : 'No activity yet'}</small></span>
+        <Icon name="chevronDown" size={17} />
+      </button>
+      {activityOpen && <JobTable jobs={publishingJobs} onCancel={(id) => void act(() => post(`/api/jobs/${id}/cancel`), 'Job cancelled')} />}
+    </section>
   </>
 }
 

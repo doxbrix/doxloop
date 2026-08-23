@@ -190,15 +190,15 @@ export function renderedDiffDocument(input: ComparisonDocument): string {
 
 function renderedDiffCss(): string {
   return `
-:root{--rv-accent:#635BFF;--rv-border:#E3E8EE;--rv-text:#353A44;--rv-heading:#1A1F36;--rv-muted:#6A7383;--rv-added:#0E6245;--rv-added-soft:#EFFCEF;--rv-added-line:#C4EFC2;--rv-removed:#A41C4E;--rv-removed-soft:#FFF5F6;--rv-removed-line:#F7D4D9;--rv-changed:#8A4D00;--rv-changed-line:#F6E3B4;--rv-page:#F7F9FC;color-scheme:light}
+:root{--rv-accent:#0B7F7B;--rv-border:#E1E5ED;--rv-text:#193B73;--rv-heading:#032F7B;--rv-muted:#647392;--rv-added:#16794B;--rv-added-soft:#F0FAF4;--rv-added-line:#C7EAD5;--rv-removed:#B4233F;--rv-removed-soft:#FFF5F6;--rv-removed-line:#F3CDD4;--rv-changed:#865A00;--rv-changed-line:#EEDCA9;--rv-page:#F7F8FB;color-scheme:light}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body.rd-body{margin:0;background:var(--rv-page);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:var(--rv-text);-webkit-font-smoothing:antialiased}
 .rd-notice{margin:16px 18px 0;padding:10px 14px;border-radius:7px;background:#FFFAEB;border:1px solid var(--rv-changed-line);color:var(--rv-changed);font-size:12.5px;font-weight:600}
 .rd-none{margin:18px auto;max-width:560px;padding:22px;text-align:center;border:1px solid var(--rv-border);border-radius:8px;color:var(--rv-muted);font-size:13px;background:#fff}
 
-.rd-scroll{padding:16px 18px 72px}
-.rd-heads{position:sticky;top:0;z-index:15;display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:8px 0 10px;background:linear-gradient(180deg,var(--rv-page) 70%,rgba(245,247,251,0))}
+.rd-scroll{padding:14px 16px 64px}
+.rd-heads{position:sticky;top:0;z-index:15;display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:6px 0 10px;background:linear-gradient(180deg,var(--rv-page) 70%,rgba(247,248,246,0))}
 body.rd-body[data-mode='unified'] .rd-heads{display:none}
 .rd-head{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--rv-muted)}
 .rd-dot{width:8px;height:8px;border-radius:50%}
@@ -208,14 +208,14 @@ body.rd-body[data-mode='unified'] .rd-heads{display:none}
 /* The reader stylesheet paints its own page background; the comparison supplies
    the surface instead, so it is cleared for both themes. */
 .rd-root,.rd-root[data-color-theme='light'],.rd-root[data-color-theme='dark']{min-height:0;background:transparent;background-image:none;display:flex;flex-direction:column;gap:2px}
-.rd-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch}
+.rd-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch}
 body.rd-body[data-mode='unified'] .rd-row{grid-template-columns:1fr;gap:0}
 body.rd-body[data-mode='unified'] .rd-row[data-status='equal'] .rd-cell--before{display:none}
 body.rd-body[data-mode='unified'] .rd-row[data-status='changed'] .rd-cell--before{margin-bottom:2px}
 body.rd-body.rd-only-changes .rd-row[data-status='equal']{display:none}
 body.rd-body.rd-only-changes .rd-fold{display:none}
 
-.rd-cell{position:relative;display:flex;gap:10px;padding:6px 14px 6px 0;border-radius:8px;background:#fff;border:1px solid transparent;min-width:0}
+.rd-cell{position:relative;display:flex;gap:10px;padding:6px 14px 6px 0;border-radius:7px;background:#fff;border:1px solid transparent;min-width:0}
 .rd-gutter{width:4px;flex:none;border-radius:4px;background:transparent;margin:6px 0 6px 6px}
 .rd-content{margin-top:0;padding:8px 0;min-width:0;flex:1;overflow-x:auto}
 .rd-content>*:first-child{margin-top:0}
@@ -227,7 +227,7 @@ body.rd-body.rd-only-changes .rd-fold{display:none}
 .rd-content code,.rd-content kbd,.rd-content samp{overflow-wrap:normal;word-break:keep-all}
 .rd-content pre{max-width:100%;overflow-x:auto}
 
-.rd-cell[data-status='equal']{background:#FCFDFE;border-color:#EEF1F5}
+.rd-cell[data-status='equal']{background:#fff;border-color:#ECEFEB}
 .rd-cell--before[data-status='changed']{background:var(--rv-removed-soft);border-color:var(--rv-removed-line)}
 .rd-cell--before[data-status='changed'] .rd-gutter{background:var(--rv-removed)}
 .rd-cell--after[data-status='changed']{background:var(--rv-added-soft);border-color:var(--rv-added-line)}
@@ -260,7 +260,7 @@ body.rd-body[data-mode='unified'] .rd-row[data-status='equal'] .rd-cell-tag{disp
 
 /* Below this width the two columns cannot sit side by side, so the comparison
    stacks and every cell names the side it belongs to. */
-@media(max-width:900px){
+@media(max-width:640px){
   .rd-row{grid-template-columns:1fr;gap:2px}
   .rd-heads{display:none}
   .rd-cell-tag{display:inline-block}
