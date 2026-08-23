@@ -122,7 +122,8 @@ The request body is:
   "media": [
     {"path": "assets/logo.svg", "base64": "…"}
   ],
-  "publish": true
+  "publish": true,
+  "replace": true
 }
 ```
 
@@ -132,6 +133,12 @@ converts markdown to blocks and materializes spaces, navigation, and pages.
 Only the manifest and files under the configured documentation directory may
 be represented in the payload; configured product-source directories must
 never be included.
+
+Set `replace` to `true` when the bundle is the complete source of truth. The
+server then removes pages, navigation items, and spaces that existed in the
+previous bundle but are absent from this one. Doxloop deployments always use
+this mode so deleting or renaming a local page cannot leave stale published
+content behind.
 
 This endpoint is the native Doxbrix generator boundary. Do not send external
 generator output to it; use the artifact deployment API below.

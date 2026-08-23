@@ -61,9 +61,12 @@ interface ProjectSummary {
 
 interface PushReport {
   spaces: number
+  spacesDeleted?: number
   pagesCreated: number
   pagesUpdated: number
+  pagesDeleted?: number
   navItems: number
+  navItemsDeleted?: number
   warnings: string[]
 }
 
@@ -147,14 +150,17 @@ export async function deploy(options: {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...bundle, publish: true }),
+        // A deployment bundle is the complete documentation snapshot. Asking
+        // Doxbrix to replace the previous snapshot prevents pages and menu
+        // items removed locally from surviving on the published site.
+        body: JSON.stringify({ ...bundle, publish: true, replace: true }),
       },
       options.apiUrl,
     )
     const report = pushed.result
     publishing.done(
       'Published',
-      `${count(bundle.pages.length, 'page')} (${report.pagesCreated} created, ${report.pagesUpdated} updated), ${count(report.spaces, 'space')}${bundle.media.length > 0 ? `, ${count(bundle.media.length, 'media file')}` : ''} · ${formatDuration(publishing.durationMs)}`,
+      `${count(bundle.pages.length, 'page')} (${report.pagesCreated} created, ${report.pagesUpdated} updated${report.pagesDeleted ? `, ${report.pagesDeleted} removed` : ''}), ${count(report.spaces, 'space')}${bundle.media.length > 0 ? `, ${count(bundle.media.length, 'media file')}` : ''} · ${formatDuration(publishing.durationMs)}`,
     )
     for (const warning of report.warnings ?? []) {
       process.stdout.write(`warning: ${warning}\n`)

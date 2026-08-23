@@ -171,6 +171,13 @@ description: List accessible projects.
       visibility: 'private',
       seedTemplate: false,
     })
+    const push = requests.find(
+      (request) => request.url.endsWith('/api/v1/projects/docs/bundle'),
+    )
+    expect(JSON.parse(String(push?.init?.body))).toMatchObject({
+      publish: true,
+      replace: true,
+    })
   })
 
   test('builds, uploads, completes, and polls a static generator deployment', async () => {
