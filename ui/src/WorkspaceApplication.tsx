@@ -129,14 +129,14 @@ export function WorkspaceApplication({
   }
 
   const openPreview = async () => {
+    const previewTab = window.open('about:blank', '_blank')
+    if (previewTab) previewTab.opener = null
     try {
-      if (!state.preview?.running) {
-        const started = await act(() => post('/api/preview/start'), 'Preview started', false)
-        if (started === undefined) return
-      }
-      const url = state.preview?.url ?? 'http://127.0.0.1:4321'
-      location.assign(url)
+      await post('/api/preview/start', { open: !previewTab })
+      previewTab?.location.replace(state.preview?.url ?? 'http://127.0.0.1:4321')
+      void reload()
     } catch (cause) {
+      previewTab?.close()
       onError(message(cause))
     }
   }
@@ -149,7 +149,7 @@ export function WorkspaceApplication({
         <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
         <span class="mode-flag navbar-mode-flag"><i />Local mode</span>
       </div>
-      <Button tone="link" class="workspace-preview-link" icon="external" onClick={() => void openPreview()}>Preview</Button>
+      <Button tone="primary" class="workspace-preview-link" icon="external" onClick={() => void openPreview()}>Preview</Button>
     </header>
 
     {readyProposal && <div class="proposal-ready-scrim" role="presentation">
@@ -204,10 +204,13 @@ function repositoryProviderIcon(repository: string): string {
 }
 
 async function openProposalPreview(runId: string, onError: (error: string) => void): Promise<void> {
+  const previewTab = window.open('about:blank', '_blank')
+  if (previewTab) previewTab.opener = null
   try {
-    const result = await post<{ url: string }>(`/api/proposals/${runId}/preview/start`)
-    location.assign(result.url)
+    const result = await post<{ url: string }>(`/api/proposals/${runId}/preview/start`, { open: !previewTab })
+    previewTab?.location.replace(result.url)
   } catch (cause) {
+    previewTab?.close()
     onError(message(cause))
   }
 }
@@ -498,8 +501,11 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
   const [submitting, setSubmitting] = useState(false)
   const runs = state.jobs.filter((job) => job.type.startsWith('author:') || job.type === 'capture')
   const activeRun = runs.find((job) => job.status === 'running')
-  const hasPendingProposal = validRuns(state.runs).some((run) => OPEN_STATUSES.includes(run.status))
+  const currentRun = activeRun ?? runs[0]
   const runBusy = Boolean(activeRun || submitting)
+  useEffect(() => {
+    setActivityOpen(Boolean(activeRun))
+  }, [activeRun?.id, activeRun?.status])
   const startRun = async (runMode: 'create' | 'update' | 'review') => {
     if (runBusy) return
     const label = runMode === 'review' ? 'Review started' : 'Documentation run started'
@@ -511,8 +517,10 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
       ...(form.agent === 'claude' && effort ? { effort } : {}),
     }
     setSubmitting(true)
+    setActivityOpen(true)
     try {
-      await act(() => post('/api/author', request), label)
+      const started = await act(() => post<UiJob>('/api/author', request), label)
+      if (!started) setActivityOpen(false)
     } finally {
       setSubmitting(false)
     }
@@ -559,48 +567,37 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
         </div>
       </div>
     </Panel>
-    <section class={`authoring-action-card activity-card ${activityOpen ? 'open' : ''}`}>
+    <section class={`authoring-action-card activity-card live-activity-card ${activityOpen ? 'open' : ''}`}>
       <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
-        <span class="action-card-icon activity"><Icon name="activity" size={19} /></span>
-        <span class="action-card-copy"><strong>Run activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Run in progress` : hasPendingProposal ? 'Documentation changes are ready for review' : 'No active runs'}</small></span>
+        <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
+        <span class="action-card-copy"><strong>Live activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Documentation update in progress` : submitting ? 'Starting documentation update…' : currentRun ? 'Show the latest update log' : 'Logs will appear when an update starts'}</small></span>
+        {activeRun && <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>}
         <Icon name="chevronDown" size={17} />
       </button>
-      {activityOpen && runs.length > 0 && <div class="authoring-activity-list">
-        {runs.slice(0, 3).map((job) => { const readyForReview = job.type === 'author:update' && job.status === 'succeeded' && hasPendingProposal; return <div class="authoring-activity-row" key={job.id}>
-          <span class={`activity-status-icon ${readyForReview ? 'ready' : job.status}`}><Icon name={readyForReview || job.status === 'succeeded' ? 'check' : job.status === 'failed' ? 'alert' : job.status === 'running' ? 'refresh' : 'minus'} size={15} class={job.status === 'running' ? 'spin' : ''} /></span>
-          <div><strong>{job.type.replaceAll(':', ' · ')}</strong><a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">{job.lines.length.toLocaleString()} output line{job.lines.length === 1 ? '' : 's'}</a></div>
-          <Badge tone={readyForReview ? 'warn' : job.status === 'succeeded' ? 'good' : job.status === 'failed' ? 'bad' : job.status === 'running' ? 'info' : 'neutral'}>{readyForReview ? 'Ready for review' : job.status === 'succeeded' ? 'Succeeded' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Running' : 'Cancelled'}</Badge>
-          <time>{timeText(job.startedAt)}</time>
-          {job.status === 'running' && <Button size="sm" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Job cancelled')}>Cancel</Button>}
-        </div>})}
-      </div>}
+      {activityOpen && currentRun && <AuthoringLiveLog job={currentRun} act={act} />}
+      {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the documentation agent…</div>}
     </section>
   </div>
 }
 
-function LiveJobLog({ job, connected }: { job: UiJob; connected: boolean }) {
+function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
   const log = useRef<HTMLPreElement>(null)
   const agent = job.agent ? agentLabel(job.agent) : 'Agent'
   useEffect(() => {
     if (log.current) log.current.scrollTop = log.current.scrollHeight
   }, [job.lines.length])
-  return <Panel
-    class="live-authoring"
-    icon="record"
-    title="Live run activity"
-    description={`Output appears here until ${agent} exits and Doxloop finishes validation.`}
-    actions={<><Badge tone="info">Running</Badge><Badge tone={connected ? 'good' : 'warn'} icon="broadcast">{connected ? 'Live' : 'Reconnecting…'}</Badge></>}
-  >
-    <p class="live-job-help"><Icon name="info" size={15} />A completed tool action is one step. The documentation run finishes only after validation succeeds.</p>
+  return <div class="authoring-live-log">
     <div class="live-job-meta" aria-live="polite">
-      <span><Icon name="user" size={14} />{job.type.replaceAll(':', ' · ')}</span>
-      <b class="meta-divider" />
+      <span><Icon name="bot" size={14} />{agent}</span>
       <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
       <span><Icon name="file" size={14} />{job.lines.length} recent line{job.lines.length === 1 ? '' : 's'}</span>
-      <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log<Icon name="external" size={13} /></a>
+      <span class="authoring-live-actions">
+        <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
+        {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>Stop update</Button>}
+      </span>
     </div>
-    <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? job.lines.join('\n') : `Starting ${agent}…`}</pre>
-  </Panel>
+    <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.join('\n') : `Starting ${agent}…`}</pre>
+  </div>
 }
 
 

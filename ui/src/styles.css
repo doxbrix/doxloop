@@ -633,9 +633,10 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
 .terminal {
   margin: 8px 0 0;
   padding: 12px 14px;
+  border: 1px solid #e1e5ed;
   border-radius: 6px;
-  background: #1a1f36;
-  color: #d7dbe7;
+  background: #fff;
+  color: #3f4a5f;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 12px;
   line-height: 18px;

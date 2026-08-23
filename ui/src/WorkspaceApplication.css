@@ -4,16 +4,16 @@
    restrained type scale, spacing rhythm, and surface treatment. */
 
 .shell:has(.reference-sidebar-nav) {
-  --heading: #172033;
-  --text: #344054;
-  --muted: #667085;
-  --faint: #98a2b3;
-  --canvas: #f7f8fa;
-  --subtle: #f8fafb;
-  --hover: #f2f4f7;
-  --border: #e4e7ec;
-  --divider: #eef0f3;
-  --strong-border: #cfd4dc;
+  --heading: #032f7b;
+  --text: #193b73;
+  --muted: #647392;
+  --faint: #8794ab;
+  --canvas: #fbfcff;
+  --subtle: #f7f9fc;
+  --hover: #f6f8fa;
+  --border: #e1e5ed;
+  --divider: #edf0f5;
+  --strong-border: #cfd7e3;
   --radius: 8px;
   grid-template-columns: 248px minmax(0, 1fr);
   grid-template-rows: 56px minmax(0, 1fr);
@@ -188,19 +188,18 @@
 }
 
 .shell:has(.reference-sidebar-nav) .workspace-preview-link.btn {
-  height: auto;
+  height: 36px;
   gap: 6px;
-  padding: 4px 0;
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 500;
-  background: transparent;
-  box-shadow: none;
+  padding: 0 13px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--brand);
 }
 
 .shell:has(.reference-sidebar-nav) .workspace-preview-link.btn:hover:not(:disabled) {
-  color: var(--brand-dark);
-  background: transparent;
+  color: #fff;
+  background: var(--brand-dark);
 }
 
 .shell:has(.reference-sidebar-nav) .loading-bar {
@@ -336,10 +335,10 @@
 .shell:has(.reference-sidebar-nav) .sources-page-header h1,
 .shell:has(.reference-sidebar-nav).proposal-shell .page-head h1 {
   color: var(--heading);
-  font-size: 24px;
-  line-height: 30px;
+  font-size: 25px;
+  line-height: 31px;
   font-weight: 700;
-  letter-spacing: -.35px;
+  letter-spacing: -.4px;
 }
 
 .shell:has(.reference-sidebar-nav) .page-head p,
@@ -348,8 +347,8 @@
   max-width: 68ch;
   margin-top: 4px;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 13px;
+  line-height: 19px;
 }
 
 .shell:has(.reference-sidebar-nav) .page-head-actions {
@@ -364,7 +363,7 @@
   height: 36px;
   padding-inline: 13px;
   border-radius: 7px;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .shell:has(.reference-sidebar-nav) .btn.sm {
@@ -394,13 +393,13 @@
   color: var(--heading);
   font-size: 14px;
   line-height: 20px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .shell:has(.reference-sidebar-nav) .panel-head p {
   color: var(--muted);
   font-size: 12px;
-  line-height: 18px;
+  line-height: 17px;
 }
 
 .shell:has(.reference-sidebar-nav) .panel-body {
@@ -413,7 +412,7 @@
   padding: 8px 11px;
   border-radius: 7px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .shell:has(.reference-sidebar-nav) .field {
@@ -424,18 +423,18 @@
 .shell:has(.reference-sidebar-nav) .authoring-request .field-label,
 .shell:has(.reference-sidebar-nav) .screenshot-option > strong {
   color: var(--heading);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 620;
 }
 
 .shell:has(.reference-sidebar-nav) .field small,
 .shell:has(.reference-sidebar-nav) .toggle-text {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .shell:has(.reference-sidebar-nav) .badge {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
 }
 
@@ -532,13 +531,13 @@
 
 .shell:has(.reference-sidebar-nav) .sources-name-cell strong {
   color: var(--heading);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .shell:has(.reference-sidebar-nav) .sources-name-cell small {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .shell:has(.reference-sidebar-nav) .source-type-pill {
@@ -594,14 +593,14 @@
   color: var(--heading);
   font-size: 14px;
   line-height: 20px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .shell:has(.reference-sidebar-nav) .authoring-request .textarea {
   min-height: 124px;
   padding: 12px 13px 30px;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 20px;
 }
 
@@ -609,7 +608,7 @@
   right: 12px;
   bottom: 8px;
   color: var(--muted) !important;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .shell:has(.reference-sidebar-nav) .authoring-options {
@@ -654,7 +653,7 @@
 .shell:has(.reference-sidebar-nav) .authoring-control-icon .input {
   min-height: 38px;
   padding-left: 42px;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .shell:has(.reference-sidebar-nav) .screenshot-option > div {
@@ -683,7 +682,7 @@
 .shell:has(.reference-sidebar-nav) .authoring-request .panel-inline-foot .btn {
   min-width: 190px;
   height: 38px;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .shell:has(.reference-sidebar-nav) .authoring-action-card {
@@ -697,6 +696,14 @@
   border: 0;
 }
 
+.shell:has(.reference-sidebar-nav) .live-activity-card .authoring-action-card-head {
+  border-bottom: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .live-activity-card.open .authoring-action-card-head {
+  border-bottom: 1px solid var(--divider);
+}
+
 .shell:has(.reference-sidebar-nav) .action-card-icon {
   width: 34px;
   height: 34px;
@@ -708,7 +715,7 @@
 .shell:has(.reference-sidebar-nav) .action-card-copy strong {
   color: var(--heading);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .shell:has(.reference-sidebar-nav) .action-card-copy small {
@@ -730,6 +737,40 @@
 .shell:has(.reference-sidebar-nav) .activity-status-icon.ready {
   border-color: var(--warn);
   color: var(--warn);
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-log {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 16px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-log .live-job-meta {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-actions {
+  margin-left: auto;
+  gap: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-actions .btn {
+  min-height: 30px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-log .live-terminal {
+  min-height: 190px;
+  max-height: 360px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+}
+
+.shell:has(.reference-sidebar-nav) .authoring-live-empty {
+  padding: 20px 16px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 @media (max-width: 1100px) {

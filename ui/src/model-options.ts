@@ -8,9 +8,9 @@ export type AgentModelOption = {
 
 export const AGENT_MODELS: Record<AgentId, readonly AgentModelOption[]> = {
   codex: [
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', reasoning: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
     { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', reasoning: ['low', 'medium', 'high', 'xhigh'] },
     { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', reasoning: ['low', 'medium', 'high', 'xhigh'] },
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', reasoning: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
   ],
   claude: [
     { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', reasoning: ['low', 'medium', 'high', 'xhigh'] },
@@ -40,5 +40,6 @@ export function modelReasoningLevels(agent: string, model: string): readonly str
 
 export function preferredReasoningLevel(agent: string, model: string): string {
   const levels = modelReasoningLevels(agent, model)
+  if (agent === 'codex' && levels.includes('low')) return 'low'
   return levels.includes('high') ? 'high' : levels[0] ?? ''
 }

@@ -585,6 +585,7 @@ export function SetupApplication({ state, act, error, onOpenPreview, onContinue 
         {step === 5 && creationJob?.status === 'succeeded' && <SetupNextSteps
           openingPreview={openingPreview}
           onPreview={() => void openDocumentationPreview()}
+          onUpdate={() => void onContinue('authoring')}
           onPublish={() => void onContinue('publish')}
         />}
         {step === 5 && creationJob && (setupError || error) && <Note tone="bad">{error || setupError}</Note>}
@@ -693,9 +694,10 @@ async function waitForPreview(url: string): Promise<void> {
   }
 }
 
-function SetupNextSteps({ openingPreview, onPreview, onPublish }: {
+function SetupNextSteps({ openingPreview, onPreview, onUpdate, onPublish }: {
   openingPreview: boolean
   onPreview: () => void
+  onUpdate: () => void
   onPublish: () => void
 }) {
   return <section class="setup-next-steps" aria-labelledby="setup-next-steps-title">
@@ -712,7 +714,10 @@ function SetupNextSteps({ openingPreview, onPreview, onPublish }: {
           <li><span><Icon name="check" size={13} /></span>Get accurate answers with citations</li>
           <li><span><Icon name="check" size={13} /></span>Keep your docs up-to-date and accessible</li>
         </ul>
-        <Button class="setup-agentify-action" onClick={onPublish}>Agentify docs on Doxbrix <Icon name="arrowRight" size={17} /></Button>
+        <div class="setup-agentify-actions">
+          <Button tone="primary" class="setup-update-documentation" icon="authoring" onClick={onUpdate}>Update documentation</Button>
+          <Button class="setup-agentify-action" onClick={onPublish}>Agentify docs on Doxbrix <Icon name="arrowRight" size={17} /></Button>
+        </div>
       </div>
       <div class="setup-assistant-preview" aria-label="AI assistant preview">
         <header><span><Icon name="sparkles" size={14} />AI Assistant preview</span><i>−</i></header>

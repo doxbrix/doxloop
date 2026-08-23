@@ -352,6 +352,8 @@ async function handleApi(
   }
   const proposalPreview = /^\/api\/proposals\/([a-z0-9-]+)\/preview\/start$/.exec(url.pathname)
   if (request.method === 'POST' && proposalPreview) {
+    const body = recordBody(await readJsonBody(request))
+    const open = body.open === true
     const root = requireProject(runtime)
     const run = await readSyncRun(root, proposalPreview[1]!)
     const existing = runtime.proposalPreviewJobId
@@ -359,6 +361,7 @@ async function handleApi(
       : undefined
     if (existing?.status === 'running' && runtime.proposalPreviewRunId === run.id) {
       await waitForPreviewServer('http://127.0.0.1:4322', existing)
+      if (open) openBrowser('http://127.0.0.1:4322')
       sendJson(response, 200, { job: publicJob(existing), url: 'http://127.0.0.1:4322' })
       return
     }
@@ -375,6 +378,7 @@ async function handleApi(
     runtime.proposalPreviewJobId = job.id
     runtime.proposalPreviewRunId = run.id
     await waitForPreviewServer('http://127.0.0.1:4322', job)
+    if (open) openBrowser('http://127.0.0.1:4322')
     sendJson(response, 202, { job: publicJob(job), url: 'http://127.0.0.1:4322' })
     return
   }
