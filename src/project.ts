@@ -510,6 +510,9 @@ export async function scaffoldProject(options: {
     '.doxloop/runs/',
     '.doxloop/last-run.json',
     '.doxloop/sync.log',
+    '.doxloop/doxloop.db',
+    '.doxloop/doxloop.db-wal',
+    '.doxloop/doxloop.db-shm',
     ...(adapter?.project.gitignore ?? []),
   ])
   return root

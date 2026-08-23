@@ -230,6 +230,7 @@ doxloop create --print \
 | Validate the project | `doxloop test` |
 | Check setup and agent readiness | `doxloop doctor` |
 | See project status | `doxloop status` |
+| See past requests and page changes | `doxloop history` |
 | Deploy using saved settings | `doxloop deploy` |
 
 Run `doxloop <command> --help` for every option.
@@ -483,6 +484,31 @@ settings.
 
 `sync off` removes the registered schedule but retains the rest of the sync
 policy and remote configuration so setup can be run again.
+
+## Review what changed and why
+
+Doxloop keeps a local record of what it was asked to do and what happened, so a
+page change can be traced back to the request behind it.
+
+```bash
+doxloop history
+doxloop history --page docs/quickstart.mdx
+doxloop history --deployments
+```
+
+Each entry stores the request, its outcome, the pages it touched, and whether
+each page was accepted or rejected in review. Pages edited by hand are picked up
+too, so the record matches what is actually on disk.
+
+Agent transcripts are **not** recorded—those stay in `.doxloop/ui-job-logs/`,
+and diffs stay in `.doxloop/runs/`. Documentation itself lives in git; the
+history file is a local index that can be deleted and rebuilt at any time.
+
+The record is stored in `.doxloop/doxloop.db`, which is added to `.gitignore`
+automatically and readable only by its owner. It needs no installation: Doxloop
+uses the SQLite built into Node.js 22.13 and newer. On older runtimes every
+command works normally and no history is kept. Set `DOXLOOP_NO_HISTORY=1` to
+turn recording off.
 
 ## Preview, test, and publish
 

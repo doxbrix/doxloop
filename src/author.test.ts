@@ -13,7 +13,9 @@ import {
   runAuthor,
   sourceAccessDirectories,
 } from './author.js'
+import { closeHistory, historyAvailable } from './db.js'
 import { pathExists } from './fs.js'
+import { listRequests, pageHistory } from './history.js'
 import { scaffoldProject } from './project.js'
 
 const roots: string[] = []
@@ -635,6 +637,46 @@ describe('author lifecycle', () => {
     await expect(pathExists(join(root, '.doxloop', 'last-run.json'))).resolves.toBe(
       false,
     )
+  })
+
+  test('records the pages the agent wrote against the request', async () => {
+    if (process.platform === 'win32') return
+    if (!(await historyAvailable())) return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-history-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const page = (title: string, body: string): string =>
+      `---\ntitle: ${title}\ndescription: ${body}\n---\n\n${body}\n`
+    await writeFile(join(root, 'docs', 'index.mdx'), page('Limits', 'The limit is 10.'))
+    await writeFile(join(root, 'docs', 'quickstart.mdx'), page('Quickstart', 'Start safely.'))
+
+    const executable = join(parent, 'codex')
+    await writeFile(
+      executable,
+      `#!/bin/sh\ncat > "${join(root, 'docs', 'index.mdx')}" <<'PAGE'\n${page('Limits', 'The limit is 20.')}PAGE\nexit 0\n`,
+    )
+    await chmod(executable, 0o755)
+    // The stub uses `cat`, so the real PATH has to stay reachable behind it.
+    process.env.PATH = `${parent}:${originalPath ?? ''}`
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    try {
+      await expect(runAuthor({ root, mode: 'update', agent: 'codex' })).resolves.toBe(0)
+
+      const [request] = await listRequests(root)
+      expect(request?.status).toBe('completed')
+      expect(request?.pagesChanged).toBe(1)
+      expect(request?.linesAdded).toBeGreaterThan(0)
+
+      const entry = (await pageHistory(root, 'docs/index.mdx'))[0]
+      expect(entry?.changeKind).toBe('modified')
+      expect(entry?.requestId).toBe(request?.id)
+      // The page the agent left alone stays out of the request.
+      expect(await pageHistory(root, 'docs/quickstart.mdx')).toEqual([])
+    } finally {
+      closeHistory()
+    }
   })
 
   test('review does not install missing skills or write a run receipt', async () => {

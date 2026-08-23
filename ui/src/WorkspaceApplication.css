@@ -1900,72 +1900,444 @@
 }
 
 /* Publish */
-@media (min-width: 901px) {
-  html:has(.publish-activity-card:not(.open)),
-  body:has(.publish-activity-card:not(.open)) {
-    scrollbar-width: none;
-  }
-
-  html:has(.publish-activity-card:not(.open))::-webkit-scrollbar,
-  body:has(.publish-activity-card:not(.open))::-webkit-scrollbar {
-    display: none;
-  }
-}
-
-.shell:has(.reference-sidebar-nav) .publish-stack {
+.shell:has(.reference-sidebar-nav) .publish-page {
   display: grid;
   gap: 16px;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card {
+/* Publishing is one card read top to bottom: what and where, who, then the action. */
+.shell:has(.reference-sidebar-nav) .publish-card {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
-  grid-template-rows: auto auto auto;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-card-head {
+  display: flex;
   align-items: center;
-  column-gap: 13px;
-  row-gap: 2px;
+  gap: 13px;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .avatar {
-  grid-column: 1;
-  grid-row: 1 / 4;
+.shell:has(.reference-sidebar-nav) .publish-card-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > strong,
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > small,
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > code {
-  grid-column: 2;
+.shell:has(.reference-sidebar-nav) .publish-card-head > div {
+  flex: 1;
   min-width: 0;
+  display: grid;
+  gap: 3px;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > strong {
+.shell:has(.reference-sidebar-nav) .publish-card-head h2 {
+  margin: 0;
+  color: var(--heading);
+  font-size: 16px;
+  font-weight: 660;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-card-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-account-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .publish-account-row .avatar {
+  width: 38px;
+  height: 38px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-account-identity {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-account-identity strong {
+  color: var(--heading);
   font-size: 13.5px;
   font-weight: 650;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > small {
-  font-size: 11.5px;
-}
-
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card > code {
-  width: fit-content;
-  max-width: 100%;
+.shell:has(.reference-sidebar-nav) .publish-account-identity small {
   overflow: hidden;
   color: var(--muted);
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card-actions {
-  grid-column: 3;
-  grid-row: 1 / 4;
+.shell:has(.reference-sidebar-nav) .publish-signin-required {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px;
+  border: 1px solid #f0d38a;
+  border-radius: 10px;
+  background: #fdf7e6;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-signin-required > .icon {
+  color: #a9761b;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-signin-required > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-signin-required strong {
+  color: #7a5510;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-signin-required small {
+  color: #8a6520;
+  font-size: 11.5px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px 20px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination dt {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--heading);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination-visibility dd {
   display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: normal;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-destination-visibility small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.shell:has(.reference-sidebar-nav) .visibility-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.shell:has(.reference-sidebar-nav) .visibility-pill.private {
+  color: #7754a5;
+  background: #f3edfa;
+}
+
+.shell:has(.reference-sidebar-nav) .visibility-pill.public {
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .publish-link-button {
+  padding: 0;
+  border: 0;
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 600;
+  background: none;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--divider);
+}
+
+.shell:has(.reference-sidebar-nav) .publish-deploy-button {
+  min-height: 40px;
+  padding: 0 20px;
+  font-size: 13.5px;
+}
+
+.shell:has(.reference-sidebar-nav) .publish-card-actions > small {
+  flex: 1;
+  min-width: 200px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* Deployment progress */
+.shell:has(.reference-sidebar-nav) .deploy-progress {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress.running {
+  border-color: #7bc7c1;
+  box-shadow: 0 0 0 1px rgb(21 175 170 / 12%);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress.failed {
+  border-color: #e6b4b4;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon.failed,
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon.cancelled {
+  color: #b3261e;
+  background: #fdecea;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-title {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-title strong {
+  color: var(--heading);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-title small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-track {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--divider);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-dark);
+  transition: width .4s ease;
+}
+
+/* Steps report only on completion, so the active segment shimmers to show work. */
+.shell:has(.reference-sidebar-nav) .deploy-progress-track.running i {
+  background: linear-gradient(90deg, var(--brand-dark), #6fd0c9, var(--brand-dark));
+  background-size: 200% 100%;
+  animation: deploy-progress-shimmer 1.6s linear infinite;
+}
+
+@keyframes deploy-progress-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: 0 0; }
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-bar > span {
+  min-width: 36px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
 }
 
-.shell:has(.reference-sidebar-nav) .publish-account-panel .account-card-actions .badge {
-  white-space: nowrap;
+.shell:has(.reference-sidebar-nav) .deploy-step-mark {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: transparent;
+  background: #fff;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.done .deploy-step-mark {
+  border-color: var(--brand-dark);
+  color: #fff;
+  background: var(--brand-dark);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.failed .deploy-step-mark {
+  border-color: #b3261e;
+  color: #fff;
+  background: #b3261e;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.running .deploy-step-mark {
+  border-color: var(--brand-dark);
+  border-top-color: transparent;
+  animation: deploy-step-spin .8s linear infinite;
+}
+
+@keyframes deploy-step-spin {
+  to { transform: rotate(360deg); }
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-step-copy {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-step-copy strong {
+  color: var(--heading);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.pending .deploy-step-copy strong {
+  color: var(--faint);
+  font-weight: 500;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-step-copy small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-log {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-log .live-job-meta {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-log-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 600;
+  background: none;
+  cursor: pointer;
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-log-toggle[aria-expanded='false'] .icon {
+  transform: rotate(-90deg);
+}
+
+.shell:has(.reference-sidebar-nav) .deploy-progress-log .live-terminal {
+  min-height: 160px;
+  max-height: 320px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+}
+
+.shell:has(.reference-sidebar-nav) .visibility-dialog {
+  width: min(620px, 100%);
+}
+
+/* The dialog is an icon/content grid, so full-width children have to say so. */
+.shell:has(.reference-sidebar-nav) .visibility-dialog .visibility-card-grid {
+  grid-column: 1 / -1;
 }
 
 .shell:has(.reference-sidebar-nav) .visibility-card-grid {
@@ -2052,18 +2424,6 @@
   border-color: var(--brand-dark);
   color: #fff;
   background: var(--brand-dark);
-}
-
-.shell:has(.reference-sidebar-nav) .visibility-autosave {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.shell:has(.reference-sidebar-nav) .visibility-autosave .icon {
-  color: #22a06b;
 }
 
 @media (max-width: 1100px) {
@@ -2339,24 +2699,17 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .shell:has(.reference-sidebar-nav) .publish-account-panel .account-card {
-    grid-template-columns: 44px minmax(0, 1fr);
+  .shell:has(.reference-sidebar-nav) .publish-account-row {
+    grid-template-columns: 38px minmax(0, 1fr);
   }
 
-  .shell:has(.reference-sidebar-nav) .publish-account-panel .account-card-actions {
+  .shell:has(.reference-sidebar-nav) .publish-account-row > .btn {
     grid-column: 1 / -1;
-    grid-row: auto;
-    align-items: stretch;
-    flex-direction: column;
-    margin-top: 10px;
-  }
-
-  .shell:has(.reference-sidebar-nav) .publish-account-panel .account-card-actions .badge {
-    width: fit-content;
-  }
-
-  .shell:has(.reference-sidebar-nav) .publish-account-panel .account-card-actions .btn {
     width: 100%;
+  }
+
+  .shell:has(.reference-sidebar-nav) .publish-card {
+    padding: 16px;
   }
 
   .shell:has(.reference-sidebar-nav) .sources-table-head {

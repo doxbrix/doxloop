@@ -180,6 +180,44 @@ description: List accessible projects.
     })
   })
 
+  test('reports the rendered reader site Doxbrix hosts the project at', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    await writeFile(
+      join(root, 'docs', 'index.mdx'),
+      '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
+    )
+    await writeFile(
+      join(root, 'docs', 'quickstart.mdx'),
+      '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
+    )
+    vi.stubEnv('DOXLOOP_TOKEN', 'dxb_test')
+    const written: string[] = []
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk))
+      return true
+    })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/projects/docs') && init?.method === 'GET') {
+        return Response.json({
+          project: { id: 'project-1', name: 'Docs', slug: 'docs', hostedUrl: 'https://docs.host.test' },
+        })
+      }
+      if (init?.method === 'GET') return new Response(null, { status: 404 })
+      return Response.json({
+        result: { spaces: 1, pagesCreated: 2, pagesUpdated: 0, navItems: 3, warnings: [], affectedPageIds: [] },
+      })
+    })
+
+    await deploy({ root, apiUrl: 'https://doxbrix.test' })
+
+    const output = written.join('')
+    expect(output).toContain('https://docs.host.test')
+    expect(output).not.toContain('/editor?project=')
+  })
+
   test('builds, uploads, completes, and polls a static generator deployment', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
     roots.push(parent)

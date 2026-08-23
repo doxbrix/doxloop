@@ -345,3 +345,90 @@ export interface ParsedArgs {
   positionals: string[]
   flags: Map<string, string[]>
 }
+
+/** What the user asked Doxloop to do. Agent transcripts are never recorded. */
+export type RequestKind = 'create' | 'update' | 'review'
+
+export type RequestStatus =
+  | 'running'
+  | 'generating'
+  | 'awaiting-review'
+  | 'partially-applied'
+  | 'applied'
+  | 'rejected'
+  | 'failed'
+  | 'conflicted'
+  | 'completed'
+
+export interface HistoryRequest {
+  id: string
+  createdAt: string
+  finishedAt?: string | undefined
+  durationMs?: number | undefined
+  kind: RequestKind
+  trigger: SyncRunTrigger | 'watch'
+  /** The instruction the user typed, which exists nowhere else after the run. */
+  requestText?: string | undefined
+  agent?: string | undefined
+  model?: string | undefined
+  status: RequestStatus
+  pagesChanged: number
+  linesAdded: number
+  linesRemoved: number
+  validationErrors?: number | undefined
+  validationWarnings?: number | undefined
+  sourceSummary?: string | undefined
+  error?: string | undefined
+}
+
+/** A page touched by one request, as shown beside that request. */
+export interface HistoryChangedPage {
+  path: string
+  title?: string | undefined
+  changeKind: SyncChangeKind
+  decision: 'pending' | 'accepted' | 'rejected' | 'partial'
+  linesAdded: number
+  linesRemoved: number
+}
+
+export interface HistoryRequestPage {
+  requestId: string
+  path: string
+  title?: string | undefined
+  changeKind: SyncChangeKind
+  decision: 'pending' | 'accepted' | 'rejected' | 'partial'
+  decidedAt?: string | undefined
+  linesAdded: number
+  linesRemoved: number
+  requestedAt: string
+  requestText?: string | undefined
+  agent?: string | undefined
+  requestStatus: RequestStatus
+}
+
+export interface HistoryPage {
+  path: string
+  title?: string | undefined
+  createdAt: string
+  updatedAt: string
+  changeCount: number
+  evidenceConfidence?: string | undefined
+  status: 'active' | 'deleted'
+}
+
+export interface DeploymentRecord {
+  startedAt: string
+  finishedAt?: string | undefined
+  durationMs?: number | undefined
+  target: string
+  name?: string | undefined
+  slug?: string | undefined
+  visibility?: string | undefined
+  url?: string | undefined
+  status: 'succeeded' | 'failed'
+  pagesCount?: number | undefined
+  pagesCreated?: number | undefined
+  pagesUpdated?: number | undefined
+  pagesDeleted?: number | undefined
+  error?: string | undefined
+}

@@ -5,6 +5,14 @@ import spawn from 'cross-spawn'
 import { chooseAgent, installSkill } from './agents.js'
 import { DoxloopError, UsageError } from './errors.js'
 import { generatorSkillName } from './generators.js'
+import {
+  finishRequest,
+  recordAuthoredPages,
+  recordSourceSyncs,
+  snapshotPages,
+  startRequest,
+  syncPageRegistry,
+} from './history.js'
 import { isSpecUrl, loadProject, sourceKind } from './project.js'
 import { monitorRemoteSources } from './remote-monitor.js'
 import { collectSourceChanges, formatSourceChanges, recordSyncState } from './sync.js'
@@ -66,6 +74,11 @@ export async function runAuthor(options: {
   changeSummary?: string
   nonInteractive?: boolean
   timeoutMinutes?: number
+  /**
+   * Proposal workspaces are throwaway copies of the project. They must not open
+   * a history database of their own; the real project records the run instead.
+   */
+  recordHistory?: boolean
 }): Promise<number> {
   let project = await loadProject(options.root)
   let remoteChanges: Awaited<ReturnType<typeof monitorRemoteSources>>['changes'] | undefined
@@ -112,6 +125,24 @@ export async function runAuthor(options: {
   if (options.mode !== 'review') {
     await installSkill({ root: options.root, agent: selected.name })
   }
+  const requestId =
+    options.recordHistory === false
+      ? undefined
+      : await startRequest(options.root, {
+          kind: options.mode,
+          ...(options.request ? { requestText: options.request } : {}),
+          agent: selected.name,
+          ...(options.model ? { model: options.model } : {}),
+          ...(options.reasoning ?? options.effort
+            ? { reasoningEffort: options.reasoning ?? options.effort }
+            : {}),
+        })
+  // Authoring edits the working tree directly, so the pages it touched can only
+  // be identified by comparing against what was there before it started.
+  const pagesBefore =
+    requestId && options.mode !== 'review'
+      ? await snapshotPages(options.root, project)
+      : undefined
   process.stdout.write(`Starting ${selected.name} with $doxloop-authoring...\n`)
   const preparedPrompt = await prepareAgentPrompt(options.root, prompt)
   const sourceDirectories = sourceAccessDirectories(options.root, project.sources)
@@ -174,6 +205,15 @@ export async function runAuthor(options: {
   } finally {
     if (preparedPrompt.path) await rm(preparedPrompt.path, { force: true })
   }
+  if (exitCode !== 0) {
+    await finishRequest(options.root, requestId, {
+      status: 'failed',
+      error: `The documentation agent exited with status ${exitCode}.`,
+    })
+  }
+  if (exitCode === 0 && options.mode === 'review') {
+    await finishRequest(options.root, requestId, { status: 'completed' })
+  }
   if (exitCode === 0 && options.mode !== 'review') {
     const completedProject = await loadProject(options.root)
     const validation = await validateProject(options.root)
@@ -181,6 +221,15 @@ export async function runAuthor(options: {
       process.stderr.write(
         `Agent run completed, but documentation validation failed:\n${formatValidation(validation)}\nThe synchronization baseline was not updated.\n`,
       )
+      await finishRequest(options.root, requestId, {
+        status: 'failed',
+        validation: {
+          pages: validation.pages.length,
+          errors: validation.errors,
+          warnings: validation.warnings,
+        },
+        error: 'Documentation validation failed.',
+      })
       return 1
     }
     if (
@@ -191,6 +240,10 @@ export async function runAuthor(options: {
       process.stderr.write(
         'Agent run completed, but the documentation brief is missing primaryAudience or priorityOutcomes. The synchronization baseline was not updated.\n',
       )
+      await finishRequest(options.root, requestId, {
+        status: 'failed',
+        error: 'The documentation brief is incomplete.',
+      })
       return 1
     }
     const state = await recordSyncState(options.root, completedProject.sources)
@@ -220,6 +273,28 @@ export async function runAuthor(options: {
       )}\n`,
       'utf8',
     )
+    const authored = pagesBefore
+      ? await recordAuthoredPages(options.root, requestId, pagesBefore, completedProject)
+      : undefined
+    await finishRequest(options.root, requestId, {
+      status: 'completed',
+      ...(authored
+        ? {
+            pagesChanged: authored.paths.size,
+            linesAdded: authored.linesAdded,
+            linesRemoved: authored.linesRemoved,
+          }
+        : {}),
+      validation: {
+        pages: validation.pages.length,
+        errors: validation.errors,
+        warnings: validation.warnings,
+      },
+    })
+    if (requestId) {
+      await syncPageRegistry(options.root, completedProject, requestId, authored?.paths)
+      await recordSourceSyncs(options.root, state, requestId)
+    }
   }
   return exitCode
 }

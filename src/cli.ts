@@ -31,7 +31,15 @@ import {
   runSyncSetupWizard,
 } from './autosync.js'
 import { deploy } from './deploy.js'
+import { historyAvailable } from './db.js'
 import { formatDrift } from './drift.js'
+import {
+  backfillHistory,
+  formatRequestHistory,
+  listDeployments,
+  listRequests,
+  pageHistory,
+} from './history.js'
 import { formatDoctorReport, runDoctor } from './doctor.js'
 import { DoxloopError, UsageError } from './errors.js'
 import {
@@ -173,6 +181,8 @@ async function main(): Promise<number> {
     }
     case 'status':
       return statusCommand(cwd, outputFormat(flag(args, 'format')))
+    case 'history':
+      return historyCommand(args, cwd)
     case 'settings': {
       const root = await findProjectRoot(cwd)
       if (!isInteractive(args)) {
@@ -814,6 +824,74 @@ async function statusCommand(cwd: string, format?: string): Promise<number> {
   return result.errors > 0 ? 1 : 0
 }
 
+/**
+ * Show what the project has been asked to do and what happened. History is
+ * derived data; an older runtime without built-in SQLite simply has none.
+ */
+async function historyCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const root = await findProjectRoot(cwd)
+  if (!(await historyAvailable())) {
+    process.stdout.write(
+      `Documentation history needs a Node.js runtime with built-in SQLite (Node 22.13 or newer).\nThis runtime is ${process.version}; every other Doxloop command works normally.\n`,
+    )
+    return 0
+  }
+  await backfillHistory(root)
+  const limit = numberFlag(args, 'limit', 20)
+  const page = flag(args, 'page')
+  const format = outputFormat(flag(args, 'format'))
+
+  if (page) {
+    const entries = await pageHistory(root, page, limit)
+    if (format === 'json') {
+      process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`)
+      return 0
+    }
+    if (entries.length === 0) {
+      process.stdout.write(`No recorded history for ${page}.\n`)
+      return 0
+    }
+    process.stdout.write(`History for ${page}\n`)
+    for (const entry of entries) {
+      const when = entry.requestedAt.replace('T', ' ').slice(0, 16)
+      process.stdout.write(
+        `  ${when}  ${entry.changeKind.padEnd(8)} ${entry.decision.padEnd(9)} +${entry.linesAdded}/-${entry.linesRemoved}${entry.agent ? ` · ${entry.agent}` : ''}\n`,
+      )
+      if (entry.requestText) {
+        process.stdout.write(`      "${entry.requestText.replace(/\s+/g, ' ').trim()}"\n`)
+      }
+    }
+    return 0
+  }
+
+  if (booleanFlag(args, 'deployments')) {
+    const deployments = await listDeployments(root, limit)
+    if (format === 'json') {
+      process.stdout.write(`${JSON.stringify(deployments, null, 2)}\n`)
+      return 0
+    }
+    if (deployments.length === 0) {
+      process.stdout.write('No deployments recorded yet.\n')
+      return 0
+    }
+    for (const record of deployments) {
+      const when = record.startedAt.replace('T', ' ').slice(0, 16)
+      process.stdout.write(
+        `  ${record.status === 'succeeded' ? '✓' : '✗'} ${when}  ${record.slug ?? record.target}  ${record.pagesCount ?? 0} pages${record.error ? `  ${record.error}` : ''}\n`,
+      )
+    }
+    return 0
+  }
+
+  const requests = await listRequests(root, limit)
+  process.stdout.write(
+    format === 'json'
+      ? `${JSON.stringify(requests, null, 2)}\n`
+      : `${formatRequestHistory(requests)}\n`,
+  )
+  return 0
+}
+
 function validateCommandArguments(args: ParsedArgs): void {
   const allowed: Record<string, string[]> = {
     init: ['title', 'source', 'spec', 'reference', 'generator'],
@@ -829,6 +907,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open', 'request', 'agent', 'model', 'reasoning', 'effort', 'screenshots', 'no-screenshots'],
     ui: ['port', 'page', 'no-open'],
     status: ['format'],
+    history: ['format', 'limit', 'page', 'deployments'],
     settings: [],
     preview: ['host', 'port', 'open'],
     login: ['api-url', 'token'],
@@ -1134,6 +1213,26 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'history') {
+    return `Usage: doxloop history [options]
+
+Show what this project was asked to document and what happened. Records the
+request, its outcome, and the pages it touched. Agent transcripts stay in
+.doxloop/ui-job-logs and are never stored.
+
+Options:
+  --page <path>            History for one page, such as docs/quickstart.mdx
+  --deployments            List publishing history instead of documentation runs
+  --limit <count>          Entries to show (default: 20)
+  --format <text|json>     Output format (default: text)
+  --cwd <directory>        Run from this project directory
+
+Examples:
+  doxloop history
+  doxloop history --page docs/quickstart.mdx
+  doxloop history --deployments --limit 5
+`
+  }
   if (command === 'settings') {
     return `Usage: doxloop settings
 
@@ -1230,6 +1329,7 @@ Visual:
 Verify:
   doctor     Check runtime, source, agent, generator, skills, and documentation
   status     Summarize the documentation project
+  history    Show past documentation requests, page changes, and deployments
   settings   View or change project settings
   test       Validate pages, navigation, links, and code fences
   preview    Run a beautiful local preview

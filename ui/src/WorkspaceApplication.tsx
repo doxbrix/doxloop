@@ -2,18 +2,18 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import './WorkspaceApplication.css'
 import { api, patch, post, remove } from './api'
 import {
-  Badge, Button, Combo, Empty, Field, Input, JobTable, KeyValues, Lines, Note, PageHeader,
+  Badge, Button, Combo, Empty, Field, Input, KeyValues, Lines, Note, PageHeader,
   Panel, Segmented, Select, Stat, Table, Tabs, Textarea, Toggle, parseTerms, splitComma, termText, timeText,
 } from './components'
 import { Icon } from './icons'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
-import type { DiffRow, GeneratorEntry, Proposal, ProposalChange, Source, SourceDiff, SyncConfig, UiJob, UiState } from './types'
+import type { DeploymentRecord, DiffRow, GeneratorEntry, HistoryChangedPage, HistoryRequest, Proposal, ProposalChange, Source, SourceDiff, SyncConfig, UiJob, UiState } from './types'
 
 const NAV = [
   ['sources', 'Sources'],
   ['authoring', 'Update'],
   ['proposals', 'Review'],
-  ['publish', 'Publish'],
+  ['publish', 'Deploy'],
   ['settings', 'Settings'],
 ] as const
 
@@ -204,9 +204,9 @@ export function WorkspaceApplication({
         {loading && <div class="loading-bar" />}
         {error && <Banner title="Action failed" detail={error} onClose={onErrorDismiss} />}
         {page === 'sources' && <SourcesReference state={state} act={act} />}
-        {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} />}
+        {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
         {page === 'proposals' && <Proposals state={state} act={act} onError={onError} />}
-        {page === 'publish' && <Publish state={state} act={act} />}
+        {page === 'publish' && <Publish state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
         {page === 'settings' && <Settings state={state} act={act} />}
       </div>
     </div>
@@ -529,7 +529,7 @@ function SourceDetail({ source, act }: { source: Source; act: Action }) {
   </Panel>
 }
 
-function Authoring({ state, act, streamConnected }: { state: UiState; act: Action; streamConnected: boolean }) {
+function Authoring({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
   const hasCompletedRun = Boolean(state.receipt)
   const mode = hasCompletedRun ? 'update' : 'create'
   const pendingSources = state.receipt?.pendingSources ?? []
@@ -618,6 +618,13 @@ function Authoring({ state, act, streamConnected }: { state: UiState; act: Actio
       {activityOpen && currentRun && <AuthoringLiveLog job={currentRun} act={act} />}
       {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the documentation agent…</div>}
     </section>
+    <Panel
+      class="history-panel"
+      title="Update history"
+      description="Every documentation request, what it changed, and how it was reviewed."
+    >
+      <RequestHistory jobs={state.jobs} onError={onError} />
+    </Panel>
   </div>
 }
 
@@ -641,6 +648,171 @@ function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
   </div>
 }
 
+
+/**
+ * History is read on demand rather than carried in the shared state: it is only
+ * needed on the page showing it, and it refreshes when a run finishes.
+ */
+interface HistoryFeed<T> {
+  entries: T[]
+  available: boolean
+  loading: boolean
+}
+
+function useHistoryFeed<T>(
+  path: string,
+  read: (payload: Record<string, unknown>) => T[],
+  jobs: UiJob[],
+  onError: (error: string) => void,
+): HistoryFeed<T> {
+  const [entries, setEntries] = useState<T[]>([])
+  const [available, setAvailable] = useState(true)
+  const [loading, setLoading] = useState(true)
+  const settled = jobs.filter((job) => job.status !== 'running').map((job) => job.id).join(',')
+  useEffect(() => {
+    let current = true
+    void (async () => {
+      try {
+        const payload = await api<Record<string, unknown>>(path)
+        if (!current) return
+        setAvailable(payload.available !== false)
+        setEntries(read(payload))
+      } catch (cause) {
+        if (current) onError(message(cause))
+      } finally {
+        if (current) setLoading(false)
+      }
+    })()
+    return () => {
+      current = false
+    }
+  }, [path, settled])
+  return { entries, available, loading }
+}
+
+function HistoryUnavailable() {
+  return <Note tone="info">
+    Documentation history needs a Node.js runtime with built-in SQLite (Node 22.13 or newer).
+    Every other part of this workspace works normally.
+  </Note>
+}
+
+function changeCountText(pages: HistoryChangedPage[], total: number): string {
+  const count = pages.length || total
+  return count === 1 ? '1 page' : `${count} pages`
+}
+
+/** Past documentation requests: what was asked, what happened, what changed. */
+function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: string) => void }) {
+  const { entries, available, loading } = useHistoryFeed<HistoryRequest>(
+    '/api/history?limit=25',
+    (payload) => (payload.requests as HistoryRequest[]) ?? [],
+    jobs,
+    onError,
+  )
+  if (!available) return <HistoryUnavailable />
+  if (loading && entries.length === 0) return <div class="history-loading">Loading history…</div>
+  if (entries.length === 0) {
+    return <Empty
+      icon="clock"
+      title="No documentation history yet"
+      detail="Once you start an update, the request and everything it changed are recorded here."
+    />
+  }
+  return <Table class="history-table" head={<><th>Request</th><th>Result</th><th>Changed</th><th>When</th></>}>
+    {entries.map((entry) => {
+      const pages = entry.pages ?? []
+      return <tr key={entry.id} class="history-row">
+        <td>
+          <div class="history-request">
+            {entry.requestText
+              ? <strong>{entry.requestText}</strong>
+              : <strong class="muted-cell">{entry.sourceSummary ?? 'Source change'}</strong>}
+            <small>
+              <span class="history-kind">{entry.kind}</span>
+              {entry.agent && <> · {agentLabel(entry.agent)}</>}
+              {entry.model && <> · {entry.model}</>}
+              {entry.trigger === 'schedule' && <> · scheduled</>}
+            </small>
+            {entry.error && <small class="history-error">{entry.error}</small>}
+          </div>
+          {pages.length > 0 && <details class="history-pages">
+            <summary>View changed {pages.length === 1 ? 'page' : 'pages'}</summary>
+            <ul>
+              {pages.map((page) => <li key={page.path}>
+                <Badge tone={statusTone(page.changeKind)}>{page.changeKind}</Badge>
+                <code class="mono">{page.path}</code>
+                <Badge tone={statusTone(page.decision)}>{statusLabel(page.decision)}</Badge>
+              </li>)}
+            </ul>
+          </details>}
+        </td>
+        <td><Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge></td>
+        <td class="history-changed">
+          <span>{changeCountText(pages, entry.pagesChanged)}</span>
+          {(entry.linesAdded > 0 || entry.linesRemoved > 0) && <small class="history-lines">
+            <i class="added">+{entry.linesAdded}</i>
+            <i class="removed">−{entry.linesRemoved}</i>
+          </small>}
+        </td>
+        <td class="muted-cell">
+          {timeText(entry.createdAt)}
+          {entry.durationMs !== undefined && <small class="history-duration">{durationText(entry.durationMs)}</small>}
+        </td>
+      </tr>
+    })}
+  </Table>
+}
+
+/**
+ * Every publish attempt, including the ones that failed. The feed is read by the
+ * Deploy page itself, which also needs the last successful deployment URL.
+ */
+function DeploymentHistory({ entries, available, loading }: HistoryFeed<DeploymentRecord>) {
+  if (!available) return <HistoryUnavailable />
+  if (loading && entries.length === 0) return <div class="history-loading">Loading history…</div>
+  if (entries.length === 0) {
+    return <Empty
+      icon="clock"
+      title="Nothing published yet"
+      detail="Each deployment is recorded here with the pages it published and whether it succeeded."
+    />
+  }
+  return <Table class="history-table" head={<><th>Destination</th><th>Result</th><th>Pages</th><th>When</th></>}>
+    {entries.map((entry) => <tr key={`${entry.startedAt}-${entry.slug ?? entry.target}`} class="history-row">
+      <td>
+        <div class="history-request">
+          <strong>{entry.slug ?? entry.name ?? entry.target}</strong>
+          <small>
+            {entry.target}
+            {entry.visibility && <> · {entry.visibility}</>}
+          </small>
+          {entry.error && <small class="history-error">{entry.error}</small>}
+        </div>
+      </td>
+      <td><Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge></td>
+      <td class="history-changed">
+        <span>{entry.pagesCount === undefined ? '—' : changeCountText([], entry.pagesCount)}</span>
+        {(entry.pagesCreated || entry.pagesUpdated) && <small class="history-lines">
+          {entry.pagesCreated ? <i class="added">+{entry.pagesCreated} new</i> : null}
+          {entry.pagesUpdated ? <i>{entry.pagesUpdated} updated</i> : null}
+        </small>}
+      </td>
+      <td class="muted-cell">
+        {timeText(entry.startedAt)}
+        {entry.durationMs !== undefined && <small class="history-duration">{durationText(entry.durationMs)}</small>}
+      </td>
+    </tr>)}
+  </Table>
+}
+
+function durationText(milliseconds: number): string {
+  if (milliseconds < 1000) return 'under a second'
+  const seconds = Math.round(milliseconds / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}m ${seconds % 60}s`
+}
 
 function MonitoringDialog({ state, source, act, onClose }: { state: UiState; source: Source; act: Action; onClose: () => void }) {
   const project = state.project!
@@ -1000,93 +1172,304 @@ function diffGroups(rows: DiffRow[]): Array<{ hunkId?: string; state?: string; r
 }
 
 
-function Publish({ state, act }: { state: UiState; act: Action }) {
+/**
+ * The deploy CLI prints one checklist line per finished step (`✓ label · detail`,
+ * or `✗ label` for the step that failed). Nothing is printed while a step runs,
+ * so the labels below name the steps up front and the log fills in the details.
+ */
+const DEPLOY_STEP_LINE = /^\s*([✓✗])\s+(.+)$/
+const ANSI = /\x1b\[[0-9;]*m/g
+
+function deployStepLabels(generator: string | undefined, dryRun: boolean): string[] {
+  if (generator === 'doxbrix') {
+    return dryRun
+      ? ['Validating documentation', 'Building bundle']
+      : ['Validating documentation', 'Building bundle', 'Locating project', 'Publishing to Doxbrix']
+  }
+  return dryRun
+    ? ['Validating documentation', 'Building site locally']
+    : ['Validating documentation', 'Locating project', 'Building site locally', 'Reserving secure upload', 'Uploading static artifact', 'Indexing and deploying']
+}
+
+interface DeployStep {
+  label: string
+  detail?: string
+  status: 'done' | 'failed' | 'running' | 'pending'
+}
+
+function deploySteps(job: UiJob, labels: string[]): { steps: DeployStep[]; percent: number } {
+  const reported: Array<{ text: string; ok: boolean }> = []
+  for (const raw of job.lines) {
+    const match = DEPLOY_STEP_LINE.exec(raw.replace(ANSI, ''))
+    if (match) reported.push({ text: (match[2] ?? '').trim(), ok: match[1] === '✓' })
+  }
+  const running = job.status === 'running'
+  const steps: DeployStep[] = labels.map((label, index) => {
+    const entry = reported[index]
+    if (entry) {
+      const [text, detail] = entry.text.split(' · ')
+      return { label: text || label, ...(detail ? { detail } : {}), status: entry.ok ? 'done' : 'failed' }
+    }
+    if (index === reported.length && running) return { label, status: 'running' }
+    return { label, status: 'pending' }
+  })
+  const done = steps.filter((step) => step.status === 'done').length
+  const percent = job.status === 'succeeded'
+    ? 100
+    : Math.min(95, Math.round((done / Math.max(labels.length, 1)) * 100) + (running ? 6 : 0))
+  return { steps, percent }
+}
+
+/** Live checklist, progress bar and log for the deployment that is running (or just finished). */
+function DeployProgress({ job, generator, act, streamConnected }: {
+  job: UiJob
+  generator: string | undefined
+  act: Action
+  streamConnected: boolean
+}) {
+  const log = useRef<HTMLPreElement>(null)
+  const [logOpen, setLogOpen] = useState(true)
+  const dryRun = job.type === 'deploy:dry-run'
+  const { steps, percent } = deploySteps(job, deployStepLabels(generator, dryRun))
+  const running = job.status === 'running'
+  const active = steps.find((step) => step.status === 'running')
+  useEffect(() => {
+    if (log.current) log.current.scrollTop = log.current.scrollHeight
+  }, [job.lines.length, logOpen])
+  const headline = running
+    ? active?.label ?? (dryRun ? 'Validating deployment' : 'Deploying documentation')
+    : job.status === 'succeeded'
+      ? dryRun ? 'Deployment is valid' : 'Documentation published'
+      : job.status === 'cancelled' ? 'Deployment cancelled' : 'Deployment failed'
+  return <section class={`deploy-progress ${job.status}`} aria-live="polite">
+    <header class="deploy-progress-head">
+      <span class={`deploy-progress-icon ${job.status}`}>
+        <Icon name={running ? 'publish' : job.status === 'succeeded' ? 'check' : 'alert'} size={19} />
+      </span>
+      <div class="deploy-progress-title">
+        <strong>{headline}</strong>
+        <small>{dryRun ? 'Validation only — nothing is uploaded.' : 'Uploading the documentation snapshot to Doxbrix.'}</small>
+      </div>
+      {running
+        ? <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
+        : <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>}
+      {running && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Deployment stopped')}>Stop</Button>}
+    </header>
+    <div class="deploy-progress-bar">
+      <div class={`deploy-progress-track ${running ? 'running' : ''}`}><i style={{ width: `${percent}%` }} /></div>
+      <span>{percent}%</span>
+    </div>
+    <ol class="deploy-progress-steps">
+      {steps.map((step, index) => <li key={index} class={step.status}>
+        <span class="deploy-step-mark">{step.status === 'done'
+          ? <Icon name="check" size={12} />
+          : step.status === 'failed' ? <Icon name="close" size={12} /> : null}</span>
+        <span class="deploy-step-copy"><strong>{step.label}</strong>{step.detail && <small>{step.detail}</small>}</span>
+      </li>)}
+    </ol>
+    <div class="deploy-progress-log">
+      <div class="live-job-meta">
+        <button type="button" class="deploy-log-toggle" aria-expanded={logOpen} onClick={() => setLogOpen(!logOpen)}>
+          <Icon name="chevronDown" size={14} />{logOpen ? 'Hide log' : 'Show log'}
+        </button>
+        <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
+        <span class="authoring-live-actions">
+          <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
+        </span>
+      </div>
+      {logOpen && <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? job.lines.join('\n') : 'Starting deployment…'}</pre>}
+    </div>
+  </section>
+}
+
+function Publish({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
   const effective = state.effectiveDeployment!
   const [deployment, setDeployment] = useState(effective)
-  const [confirmingDeploy, setConfirmingDeploy] = useState(false)
-  const [activityOpen, setActivityOpen] = useState(false)
-  const activitySection = useRef<HTMLElement>(null)
+  /** Visibility is asked once. An explicit saved choice means every later deploy runs straight away. */
+  const chosenVisibility = state.project?.deployment?.visibility
+  const [dialog, setDialog] = useState<'first' | 'change' | null>(null)
+  const [choice, setChoice] = useState<'private' | 'public'>(deployment.visibility === 'public' ? 'public' : 'private')
+  const [starting, setStarting] = useState(false)
+  /** Set when a deploy is attempted while signed out, so the reason is explained in place. */
+  const [signInRequired, setSignInRequired] = useState(false)
   const account = state.account
-  const publishingJobs = state.jobs.filter((job) => job.type.startsWith('deploy') || job.type === 'login')
-  const selectVisibility = async (visibility: 'public' | 'private') => {
-    const previous = deployment
+  const signedIn = Boolean(account?.signedIn)
+  const activeDeploy = state.jobs.find((job) => job.type.startsWith('deploy') && job.status === 'running')
+  const busy = Boolean(activeDeploy || starting)
+  const isPublic = deployment.visibility === 'public'
+  const deployments = useHistoryFeed<DeploymentRecord>(
+    '/api/history/deployments?limit=25',
+    (payload) => (payload.deployments as DeploymentRecord[]) ?? [],
+    state.jobs,
+    onError,
+  )
+  /**
+   * Doxbrix hosts the reader site on a slug it provisions, so the live lookup is
+   * the source of truth. Deployments recorded before Doxloop read `hostedUrl`
+   * stored an editor link, which must never be offered as the deployed site.
+   */
+  const [siteUrl, setSiteUrl] = useState<string | null>(null)
+  const settledDeploys = state.jobs.filter((job) => job.type.startsWith('deploy') && job.status !== 'running').length
+  useEffect(() => {
+    if (!signedIn) return
+    let current = true
+    void api<{ url: string | null }>('/api/deployment/site')
+      .then((payload) => { if (current) setSiteUrl(payload.url) })
+      .catch(() => undefined)
+    return () => { current = false }
+  }, [signedIn, settledDeploys])
+  const recordedUrl = deployments.entries.find((entry) => entry.status === 'succeeded' && entry.url)?.url
+  const publishedUrl = siteUrl ?? (recordedUrl && !recordedUrl.includes('/editor?project=') ? recordedUrl : undefined)
+
+  const start = async (visibility: 'private' | 'public', dryRun: boolean) => {
+    setStarting(true)
+    try {
+      await act(
+        () => post('/api/deploy', { ...deployment, visibility, public: visibility === 'public', dryRun }),
+        dryRun ? 'Deployment validation started' : 'Deployment started',
+      )
+    } finally {
+      setStarting(false)
+    }
+  }
+  const saveVisibility = async (visibility: 'private' | 'public') => {
     const next = { ...deployment, visibility }
     setDeployment(next)
-    const saved = await act(() => patch('/api/project', { deployment: next }), undefined, false)
-    if (saved === undefined) setDeployment(previous)
+    return act(() => patch('/api/project', { deployment: next }), undefined)
   }
   const deploy = async (dryRun: boolean) => {
-    if (!dryRun) {
-      setConfirmingDeploy(true)
+    if (busy) return
+    if (!signedIn) {
+      setSignInRequired(true)
       return
     }
-    await act(() => post('/api/deploy', { ...deployment, public: deployment.visibility === 'public', dryRun }), dryRun ? 'Deployment validation started' : 'Deployment started')
+    setSignInRequired(false)
+    if (!dryRun && !chosenVisibility) {
+      setChoice(isPublic ? 'public' : 'private')
+      setDialog('first')
+      return
+    }
+    await start(isPublic ? 'public' : 'private', dryRun)
   }
-  const confirmDeployment = async () => {
-    setConfirmingDeploy(false)
-    await act(() => post('/api/deploy', { ...deployment, public: deployment.visibility === 'public', dryRun: false }), 'Deployment started')
+  const confirmFirstDeploy = async () => {
+    setDialog(null)
+    const saved = await saveVisibility(choice)
+    if (saved === undefined) return
+    await start(choice, false)
   }
-  return <>
-    {confirmingDeploy && <div class="proposal-ready-scrim" role="presentation">
-      <section class="proposal-ready-dialog deploy-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="deploy-confirm-title">
-        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingDeploy(false)}><Icon name="close" size={16} /></button>
-        <span class="proposal-ready-icon"><Icon name={deployment.visibility === 'public' ? 'cloud' : 'lock'} size={24} /></span>
-        <div><h2 id="deploy-confirm-title">Deploy documentation {deployment.visibility === 'public' ? 'publicly' : 'privately'}?</h2><p>{deployment.visibility === 'public' ? 'Anyone with the published URL will be able to open this documentation.' : 'Only signed-in members with access will be able to open this documentation.'}</p></div>
-        <div class="proposal-ready-summary"><strong>Deployment destination</strong><span>{deployment.apiUrl}</span></div>
-        <footer><Button onClick={() => setConfirmingDeploy(false)}>Cancel</Button><Button tone="primary" icon="publish" onClick={() => void confirmDeployment()}>Deploy {deployment.visibility === 'public' ? 'publicly' : 'privately'}</Button></footer>
-      </section>
-    </div>}
-    <PageHeader
-      title="Publish"
-      description="Validate and deploy documentation without including configured product sources."
-      actions={<><Button onClick={() => void deploy(true)}>Dry run</Button><Button tone="primary" icon="publish" disabled={!account?.signedIn} onClick={() => void deploy(false)}>Deploy</Button></>}
-    />
-    <div class="publish-stack">
-      <Panel class="publish-account-panel" title="Doxbrix account" description="Connect your account before publishing documentation.">
-        {account?.signedIn
-          ? <div class="account-card">
-            <span class="avatar">{account.user?.email.slice(0, 1).toUpperCase()}</span>
-            <strong>{account.user?.name ?? account.user?.email}</strong>
-            <small>{account.user?.email}</small>
-            <code class="mono">{account.apiUrl}</code>
-            <div class="account-card-actions"><Badge tone="good" icon="check">Signed in</Badge><Button icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button></div>
-          </div>
-          : <div class="account-card">
-            <span class="avatar muted"><Icon name="user" size={18} /></span>
-            <strong>Not signed in</strong>
-            <small>{account?.detail ?? 'Sign in to deploy this documentation.'}</small>
-            <div class="account-card-actions"><Badge tone="warn" icon="alert">Not signed in</Badge><Button tone="primary" icon="key" onClick={() => void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started')}>Sign in with browser</Button></div>
-          </div>}
-      </Panel>
-      <Panel class="publish-visibility-panel" title="Deployment visibility" description="Choose who can access the published documentation.">
+
+  return <div class="publish-page">
+    {dialog && <div class="proposal-ready-scrim" role="presentation">
+      <section class="proposal-ready-dialog visibility-dialog" role="dialog" aria-modal="true" aria-labelledby="visibility-dialog-title">
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setDialog(null)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon"><Icon name="shield" size={24} /></span>
+        <div>
+          <h2 id="visibility-dialog-title">{dialog === 'first' ? 'Who can see this documentation?' : 'Deployment visibility'}</h2>
+          <p>{dialog === 'first'
+            ? 'Choose once — later deployments publish with this setting without asking again.'
+            : 'This applies to the next and every following deployment.'}</p>
+        </div>
         <div class="visibility-card-grid" role="radiogroup" aria-label="Deployment visibility">
-          <button type="button" role="radio" aria-checked={deployment.visibility === 'private'} class={`visibility-card ${deployment.visibility === 'private' ? 'selected' : ''}`} onClick={() => void selectVisibility('private')}>
+          <button type="button" role="radio" aria-checked={choice === 'private'} class={`visibility-card ${choice === 'private' ? 'selected' : ''}`} onClick={() => setChoice('private')}>
             <span class="visibility-card-icon private"><Icon name="lock" size={20} /></span>
             <span><strong>Private</strong><small>Only signed-in members with access can open the documentation.</small></span>
             <i class="visibility-radio"><Icon name="check" size={12} /></i>
           </button>
-          <button type="button" role="radio" aria-checked={deployment.visibility === 'public'} class={`visibility-card ${deployment.visibility === 'public' ? 'selected' : ''}`} onClick={() => void selectVisibility('public')}>
+          <button type="button" role="radio" aria-checked={choice === 'public'} class={`visibility-card ${choice === 'public' ? 'selected' : ''}`} onClick={() => setChoice('public')}>
             <span class="visibility-card-icon public"><Icon name="cloud" size={20} /></span>
             <span><strong>Public</strong><small>Anyone with the published URL can open the documentation.</small></span>
             <i class="visibility-radio"><Icon name="check" size={12} /></i>
           </button>
         </div>
-        <p class="visibility-autosave"><Icon name="check" size={13} />Visibility is saved automatically.</p>
-      </Panel>
-    </div>
-    <section ref={activitySection} class={`authoring-action-card activity-card live-activity-card publish-activity-card ${activityOpen ? 'open' : ''}`}>
-      <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => {
-        const nextOpen = !activityOpen
-        setActivityOpen(nextOpen)
-        if (nextOpen) requestAnimationFrame(() => activitySection.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-      }}>
-        <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
-        <span class="action-card-copy"><strong>Publishing activity</strong><small>{publishingJobs.length ? `${publishingJobs.length} publishing event${publishingJobs.length === 1 ? '' : 's'}` : 'No activity yet'}</small></span>
-        <Icon name="chevronDown" size={17} />
-      </button>
-      {activityOpen && <JobTable jobs={publishingJobs} onCancel={(id) => void act(() => post(`/api/jobs/${id}/cancel`), 'Job cancelled')} />}
+        <footer>
+          <Button onClick={() => setDialog(null)}>Cancel</Button>
+          {dialog === 'first'
+            ? <Button tone="primary" icon="publish" onClick={() => void confirmFirstDeploy()}>Deploy {choice === 'public' ? 'publicly' : 'privately'}</Button>
+            : <Button tone="primary" icon="check" onClick={() => { setDialog(null); void saveVisibility(choice) }}>Save visibility</Button>}
+        </footer>
+      </section>
+    </div>}
+
+    <PageHeader
+      title="Deploy"
+      description="Deploy the generated documentation to Doxbrix. Configured product sources are never included."
+      actions={publishedUrl
+        ? <a class="btn secondary md" href={publishedUrl} target="_blank" rel="noreferrer"><Icon name="external" size={16} />View deployed docs</a>
+        : undefined}
+    />
+
+    <section class="publish-card">
+      <header class="publish-card-head">
+        <span class="publish-card-icon"><Icon name="publish" size={20} /></span>
+        <div>
+          <h2>Deploy to Doxbrix</h2>
+          <p>{chosenVisibility
+            ? `This documentation publishes ${isPublic ? 'publicly' : 'privately'} — no further prompts.`
+            : 'The first deployment asks who can see the documentation.'}</p>
+        </div>
+        {signedIn
+          ? <Badge tone="good" icon="check">Signed in</Badge>
+          : <Badge tone="warn" icon="alert">Not signed in</Badge>}
+      </header>
+
+      <dl class="publish-destination">
+        <div><dt>Project</dt><dd>{deployment.name}</dd></div>
+        <div><dt>Address</dt><dd><code class="mono">{deployment.slug}</code></dd></div>
+        <div><dt>Doxbrix</dt><dd><code class="mono">{deployment.apiUrl}</code></dd></div>
+        <div class="publish-destination-visibility">
+          <dt>Visibility</dt>
+          <dd>
+            <span class={`visibility-pill ${isPublic ? 'public' : 'private'}`}><Icon name={isPublic ? 'cloud' : 'lock'} size={13} />{isPublic ? 'Public' : 'Private'}</span>
+            {chosenVisibility
+              ? <button type="button" class="publish-link-button" onClick={() => { setChoice(isPublic ? 'public' : 'private'); setDialog('change') }}>Change</button>
+              : <small>Chosen on first deploy</small>}
+          </dd>
+        </div>
+      </dl>
+
+      {signedIn
+        ? <div class="publish-account-row">
+          <span class="avatar">{account?.user?.email.slice(0, 1).toUpperCase()}</span>
+          <span class="publish-account-identity">
+            <strong>{account?.user?.name ?? account?.user?.email}</strong>
+            <small>{account?.user?.email}</small>
+          </span>
+          <Button icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button>
+        </div>
+        : <div class="publish-account-row signed-out">
+          <span class="avatar muted"><Icon name="user" size={18} /></span>
+          <span class="publish-account-identity">
+            <strong>Not signed in</strong>
+            <small>{account?.detail ?? 'Deploying needs a connected Doxbrix account.'}</small>
+          </span>
+          <Button tone="primary" icon="key" onClick={() => { setSignInRequired(false); void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started') }}>Sign in with browser</Button>
+        </div>}
+
+      {signInRequired && !signedIn && <div class="publish-signin-required" role="alert">
+        <Icon name="alert" size={16} />
+        <span>
+          <strong>Sign in with Doxbrix to deploy the documentation.</strong>
+          <small>Deploying uploads the documentation to your Doxbrix account, so use “Sign in with browser” above to connect it first.</small>
+        </span>
+      </div>}
+
+      <footer class="publish-card-actions">
+        <Button class="publish-deploy-button" tone="primary" icon="publish" busy={busy} onClick={() => void deploy(false)}>Deploy to Doxbrix</Button>
+        <Button disabled={busy} onClick={() => void deploy(true)}>Dry run</Button>
+        <small>A dry run validates and builds the bundle without uploading anything.</small>
+      </footer>
     </section>
-  </>
+
+    {activeDeploy && <DeployProgress job={activeDeploy} generator={state.project?.generator} act={act} streamConnected={streamConnected} />}
+
+    <Panel
+      class="history-panel"
+      title="Deployment history"
+      description="Past deployments, including the ones that did not succeed."
+    >
+      <DeploymentHistory {...deployments} />
+    </Panel>
+  </div>
 }
 
 const SETTINGS_SECTIONS = [

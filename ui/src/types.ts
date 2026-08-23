@@ -122,6 +122,68 @@ export interface Proposal {
   error?: string
 }
 
+export interface HistoryChangedPage {
+  path: string
+  title?: string
+  changeKind: 'added' | 'modified' | 'deleted'
+  decision: 'pending' | 'accepted' | 'rejected' | 'partial'
+  linesAdded: number
+  linesRemoved: number
+}
+
+export interface HistoryRequest {
+  id: string
+  pages?: HistoryChangedPage[]
+  createdAt: string
+  finishedAt?: string
+  durationMs?: number
+  kind: 'create' | 'update' | 'review'
+  trigger: string
+  requestText?: string
+  agent?: string
+  model?: string
+  status: string
+  pagesChanged: number
+  linesAdded: number
+  linesRemoved: number
+  validationErrors?: number
+  validationWarnings?: number
+  sourceSummary?: string
+  error?: string
+}
+
+export interface HistoryPageEntry {
+  requestId: string
+  path: string
+  title?: string
+  changeKind: 'added' | 'modified' | 'deleted'
+  decision: 'pending' | 'accepted' | 'rejected' | 'partial'
+  decidedAt?: string
+  linesAdded: number
+  linesRemoved: number
+  requestedAt: string
+  requestText?: string
+  agent?: string
+  requestStatus: string
+}
+
+export interface DeploymentRecord {
+  startedAt: string
+  finishedAt?: string
+  durationMs?: number
+  target: string
+  name?: string
+  slug?: string
+  visibility?: string
+  url?: string
+  status: 'succeeded' | 'failed'
+  pagesCount?: number
+  pagesCreated?: number
+  pagesUpdated?: number
+  pagesDeleted?: number
+  error?: string
+}
+
 export interface AgentState {
   name: string
   executable: string

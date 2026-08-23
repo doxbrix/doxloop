@@ -623,6 +623,42 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
 .cell-lead .icon { color: var(--faint); }
 .cell-lead strong { font-weight: 600; color: var(--heading); }
 
+/* ── History ────────────────────────────────────────────────────────────── */
+
+.history-panel { margin-top: 18px; }
+.history-loading { padding: 26px 18px; color: var(--muted); font-size: 13.5px; text-align: center; }
+.history-table td { vertical-align: top; }
+.history-table tr.history-row:hover td { background: var(--hover); }
+.history-request { display: grid; gap: 3px; max-width: 560px; }
+.history-request strong {
+  color: var(--heading);
+  font-size: 14px;
+  line-height: 19px;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+.history-request small { color: var(--muted); font-size: 12px; line-height: 16px; }
+.history-request .history-kind { text-transform: capitalize; }
+.history-request .history-error { color: var(--bad); overflow-wrap: anywhere; }
+.history-pages { margin-top: 8px; }
+.history-pages summary {
+  font-size: 12.5px;
+  color: var(--brand);
+  cursor: pointer;
+  list-style: none;
+}
+.history-pages summary::-webkit-details-marker { display: none; }
+.history-pages summary:hover { text-decoration: underline; }
+.history-pages ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.history-pages li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.history-pages li code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.history-changed { white-space: nowrap; }
+.history-lines { display: flex; gap: 8px; margin-top: 3px; font-size: 12px; font-style: normal; }
+.history-lines i { font-style: normal; color: var(--muted); }
+.history-lines i.added { color: var(--good); }
+.history-lines i.removed { color: var(--bad); }
+.history-duration { display: block; margin-top: 3px; font-size: 12px; color: var(--faint); }
+
 .job-table .job-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .job-table .job-name .icon { color: var(--muted); }
 .job-output { margin-top: 6px; }
@@ -1616,13 +1652,13 @@ body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
 .setup-sidebar-heading { display: grid; gap: 5px; margin: 34px 10px 23px; padding-bottom: 21px; border-bottom: 1px solid #e5e8f0; }
 .setup-sidebar-heading strong { color: var(--heading); font-size: 17px; line-height: 22px; font-weight: 680; }
 .setup-sidebar-heading small { color: var(--heading); font-size: 12.5px; line-height: 18px; }
-.setup-reference-nav { gap: 7px !important; }
-.setup-reference-nav button { min-height: 66px; gap: 14px; padding: 9px 11px; }
-.setup-reference-nav button > .icon { width: 20px; height: 20px; flex: 0 0 auto; }
-.setup-reference-nav button > span { display: grid; gap: 3px; }
-.setup-reference-nav button strong { color: inherit; font-size: 15px; line-height: 19px; font-weight: 620; }
-.setup-reference-nav button small { color: var(--heading); font-size: 12px; line-height: 16px; }
-.setup-reference-nav button.active small { color: var(--brand-dark); }
+.reference-setup .setup-reference-nav { gap: 7px !important; }
+.reference-setup .setup-reference-nav button { min-height: 66px; gap: 14px; padding: 9px 11px; color: var(--text); font-size: 14px; font-weight: 500; }
+.reference-setup .setup-reference-nav button > .icon { width: 20px; height: 20px; flex: 0 0 auto; color: var(--muted); }
+.reference-setup .setup-reference-nav button > span { display: grid; gap: 3px; }
+.reference-setup .setup-reference-nav button strong { color: inherit; font-size: 14px; line-height: 19px; font-weight: 500; }
+.reference-setup .setup-reference-nav button small { color: var(--muted); font-size: 12px; line-height: 16px; }
+.reference-setup .setup-reference-nav button.active small { color: var(--brand-dark); }
 .reference-sidebar-nav { display: grid !important; gap: 7px !important; margin-top: 18px; padding: 18px 0; border-top: 1px solid #e0e4ec; border-bottom: 1px solid #e0e4ec; }
 .reference-sidebar-nav button { min-height: 45px; display: flex; align-items: center; gap: 13px; padding: 0 9px; border-left: 1.5px solid transparent; border-radius: 7px; color: var(--heading); font-size: 14px; font-weight: 500; text-align: left; }
 .reference-sidebar-nav button .icon { color: var(--heading); }

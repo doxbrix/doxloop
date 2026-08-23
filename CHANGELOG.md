@@ -7,6 +7,19 @@ uses semantic versioning after its first stable release.
 
 ### Added
 
+- The workspace Update page shows an update history table: every request, its
+  result, the pages it changed, and how each page was reviewed. The Publish page
+  shows a publishing history table covering successful and failed deployments.
+- `doxloop history` shows what the project was asked to document and what
+  happened: the request text, its outcome, the pages it touched, and whether
+  each page was accepted or rejected in review. `--page` traces a single page,
+  `--deployments` lists publishing history. Pages edited outside Doxloop are
+  detected by content hash, so the record matches what is on disk.
+- Documentation history is stored in `.doxloop/doxloop.db` using the SQLite
+  built into Node.js 22.13 and newer. There is nothing extra to install, the
+  file is gitignored and owner-readable, and older runtimes keep working with
+  no history. `DOXLOOP_NO_HISTORY=1` turns recording off. Agent transcripts are
+  never stored; they remain in `.doxloop/ui-job-logs/`.
 - `doxloop ui` opens a loopback-only project control center covering setup,
   product evidence and GitHub connection tests, agent authoring, source
   monitoring, proposal review, quality diagnostics, preview, publishing, and

@@ -6,9 +6,17 @@ import { extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
 import { applySyncConfig, computeConfiguredDrift, disableSync, formatSyncStatus, parseSyncMode, parseTriggerList } from './autosync.js'
-import { authenticatedRequest, loadUserConfig, logout } from './auth.js'
+import { authenticatedRequest, authenticatedRequestOptional, loadUserConfig, logout } from './auth.js'
+import { historyAvailable } from './db.js'
 import { DoxloopError } from './errors.js'
 import { addGenerator } from './generator-manager.js'
+import {
+  backfillHistory,
+  listDeployments,
+  listRequests,
+  pageHistory,
+  requestPages,
+} from './history.js'
 import { installedGeneratorEntries, parseGenerator } from './generators.js'
 import { runDoctor } from './doctor.js'
 import {
@@ -341,6 +349,37 @@ async function handleApi(
     sendJson(response, 202, publicJob(startCliJob(runtime, 'sync', ['sync', 'now', '--trigger', 'manual', '--cwd', root], root)))
     return
   }
+  if (request.method === 'GET' && url.pathname === '/api/history') {
+    const root = requireProject(runtime)
+    await backfillHistory(root)
+    const path = url.searchParams.get('page')
+    const limit = historyLimit(url.searchParams.get('limit'))
+    const available = await historyAvailable()
+    if (path) {
+      sendJson(response, 200, { available, entries: await pageHistory(root, path, limit) })
+      return
+    }
+    const requests = await listRequests(root, limit)
+    const pages = await requestPages(root, requests.map((entry) => entry.id))
+    sendJson(response, 200, {
+      available,
+      requests: requests.map((entry) => ({ ...entry, pages: pages[entry.id] ?? [] })),
+    })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/history/deployments') {
+    const root = requireProject(runtime)
+    await backfillHistory(root)
+    sendJson(response, 200, {
+      available: await historyAvailable(),
+      deployments: await listDeployments(root, historyLimit(url.searchParams.get('limit'))),
+    })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/deployment/site') {
+    sendJson(response, 200, { url: await deployedSiteUrl(requireProject(runtime)) })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/proposals') {
     sendJson(response, 200, await listSyncRuns(requireProject(runtime)))
     return
@@ -634,6 +673,26 @@ async function accountState(project: DoxloopProject): Promise<Record<string, unk
       apiUrl: isFailure(config) ? 'https://app.doxbrix.com' : config.apiUrl,
       detail: error instanceof Error ? error.message : String(error),
     }
+  }
+}
+
+/**
+ * The rendered reader site lives on a host Doxbrix provisions (`hostedSlug`), so
+ * it cannot be derived locally from the project slug. Ask Doxbrix for it, and
+ * report nothing rather than failing when signed out or not yet deployed.
+ */
+async function deployedSiteUrl(root: string): Promise<string | null> {
+  try {
+    const project = await loadProject(root)
+    const deployment = effectiveDeployment(project)
+    const found = await authenticatedRequestOptional<{ project: { hostedUrl?: string | null } }>(
+      `/api/v1/projects/${encodeURIComponent(deployment.slug)}`,
+      { method: 'GET' },
+      deployment.apiUrl,
+    )
+    return found?.project?.hostedUrl ?? null
+  } catch {
+    return null
   }
 }
 
@@ -1372,6 +1431,16 @@ async function optionalProjectRoot(cwd: string): Promise<string | undefined> {
   } catch {
     return undefined
   }
+}
+
+/** History pages are read on demand, so the page size stays small and bounded. */
+function historyLimit(raw: string | null): number {
+  // `Number(null)` and `Number('')` are both 0, so an absent parameter has to be
+  // rejected before the numeric check or it would clamp the page down to 1 row.
+  if (raw === null || raw.trim() === '') return 20
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return 20
+  return Math.min(200, Math.max(1, Math.trunc(parsed)))
 }
 
 function requireProject(runtime: UiRuntime): string {

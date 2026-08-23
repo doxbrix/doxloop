@@ -22,8 +22,15 @@ import {
 } from './author.js'
 import { DoxloopError } from './errors.js'
 import { assertInside, pathExists, readJson } from './fs.js'
+import {
+  recordSourceSyncs,
+  recordSyncRun,
+  syncPageRegistry,
+  type SyncRunContext,
+} from './history.js'
 import { pageExtensions as documentationPageExtensions, readPage } from './project.js'
 import { formatSourceChanges } from './sync.js'
+import { lineHunks, textLines } from './text-diff.js'
 import { formatValidation, validateProject } from './validation.js'
 import type {
   AgentName,
@@ -31,7 +38,6 @@ import type {
   DriftResult,
   SourceChange,
   SyncChangeCategory,
-  SyncChangeHunk,
   SyncFileChange,
   SyncRun,
   SyncRunTrigger,
@@ -52,6 +58,11 @@ const EXCLUDED_PREFIXES = [
   '.doxloop/sync.log',
   '.doxloop/ui-jobs.json',
   '.doxloop/ui-job-logs',
+  // History is a derived local index. Copying it into a proposal workspace would
+  // offer the database back as a binary documentation change.
+  '.doxloop/doxloop.db',
+  '.doxloop/doxloop.db-wal',
+  '.doxloop/doxloop.db-shm',
   'build',
   'dist',
   'out',
@@ -130,6 +141,14 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
     changes: [],
   }
   await writeRun(options.root, run)
+  const history: SyncRunContext = {
+    requestText: options.authoring?.request,
+    agent: options.authoring?.agent ?? options.project.defaultAgent,
+    model: options.authoring?.model,
+    reasoningEffort: options.authoring?.reasoning ?? options.authoring?.effort,
+    runDir: join(SYNC_RUNS_DIRECTORY, id),
+  }
+  await recordSyncRun(options.root, run, history)
 
   try {
     const originalProjectText = await readFile(
@@ -146,6 +165,7 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
       root: workspace,
       mode: 'update',
       nonInteractive: true,
+      recordHistory: false,
       ...(options.sourceChanges.length > 0
         ? {
             changeSummary: formatSourceChanges(
@@ -202,6 +222,7 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
       },
     }
     await writeRun(options.root, run)
+    await recordSyncRun(options.root, run, history)
     return run
   } catch (error) {
     run = {
@@ -212,6 +233,7 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
       summary: 'Proposal generation failed',
     }
     await writeRun(options.root, run)
+    await recordSyncRun(options.root, run, history)
     return run
   }
 }
@@ -279,6 +301,7 @@ export async function rejectSyncRun(root: string, id: string): Promise<SyncRun> 
     })),
   }
   await writeRun(root, next)
+  await recordSyncRun(root, next)
   return next
 }
 
@@ -378,6 +401,13 @@ export async function acceptSyncChanges(
       },
     }
     await writeRun(root, next)
+    await recordSyncRun(root, next)
+    // Accepted hunks are now real files. Refresh the registry so page history
+    // and the external-edit check both start from what is actually on disk.
+    await syncPageRegistry(root, undefined, next.id)
+    if (complete) {
+      await recordSourceSyncs(root, await readOptionalSyncState(root), next.id)
+    }
     return next
   } catch (error) {
     for (const [path, content] of originals) await writeAtomic(safeRunPath(root, path), content)
@@ -389,7 +419,18 @@ export async function acceptSyncChanges(
       error: error instanceof Error ? error.message : String(error),
     }
     await writeRun(root, conflicted)
+    await recordSyncRun(root, conflicted)
     throw error
+  }
+}
+
+async function readOptionalSyncState(root: string): Promise<SyncState | undefined> {
+  const path = join(root, '.doxloop', 'sync-state.json')
+  if (!(await pathExists(path))) return undefined
+  try {
+    return await readJson<SyncState>(path)
+  } catch {
+    return undefined
   }
 }
 
@@ -623,53 +664,6 @@ function isExcluded(path: string): boolean {
   )
 }
 
-function lineHunks(before: string, after: string, prefix: string): SyncChangeHunk[] {
-  if (before === after) return []
-  const oldLines = textLines(before)
-  const newLines = textLines(after)
-  if (oldLines.length * newLines.length > 2_000_000) {
-    return [{ id: `${prefix}-1`, oldStart: 0, oldLines, newStart: 0, newLines }]
-  }
-  const table = Array.from({ length: oldLines.length + 1 }, () =>
-    new Uint32Array(newLines.length + 1),
-  )
-  for (let old = oldLines.length - 1; old >= 0; old -= 1) {
-    for (let next = newLines.length - 1; next >= 0; next -= 1) {
-      table[old]![next] = oldLines[old] === newLines[next]
-        ? table[old + 1]![next + 1]! + 1
-        : Math.max(table[old + 1]![next]!, table[old]![next + 1]!)
-    }
-  }
-  const hunks: SyncChangeHunk[] = []
-  let old = 0
-  let next = 0
-  let current: SyncChangeHunk | undefined
-  const flush = (): void => {
-    if (!current) return
-    current.id = `${prefix}-${hunks.length + 1}`
-    hunks.push(current)
-    current = undefined
-  }
-  while (old < oldLines.length || next < newLines.length) {
-    if (old < oldLines.length && next < newLines.length && oldLines[old] === newLines[next]) {
-      flush()
-      old += 1
-      next += 1
-      continue
-    }
-    current ??= { id: '', oldStart: old, oldLines: [], newStart: next, newLines: [] }
-    if (next < newLines.length && (old >= oldLines.length || table[old]![next + 1]! >= table[old + 1]![next]!)) {
-      current.newLines.push(newLines[next]!)
-      next += 1
-    } else if (old < oldLines.length) {
-      current.oldLines.push(oldLines[old]!)
-      old += 1
-    }
-  }
-  flush()
-  return hunks
-}
-
 async function materializeChange(
   before: Buffer | undefined,
   change: SyncFileChange,
@@ -771,11 +765,6 @@ function buffersEqual(left: Buffer | undefined, right: Buffer | undefined): bool
   return left.equals(right)
 }
 
-function textLines(text: string): string[] {
-  if (text === '') return []
-  const normalized = text.replace(/\r\n/g, '\n')
-  return normalized.endsWith('\n') ? normalized.slice(0, -1).split('\n') : normalized.split('\n')
-}
 
 function isBinary(path: string, before: Buffer | undefined, after: Buffer | undefined): boolean {
   if (BINARY_EXTENSIONS.has(extname(path).toLowerCase())) return true

@@ -6,6 +6,7 @@ import {
 } from './auth.js'
 import { DoxloopError } from './errors.js'
 import { listFiles, resolveContainedDirectory } from './fs.js'
+import { recordDeployment } from './history.js'
 import { deployGeneratedSite } from './artifact-deploy.js'
 import {
   deploymentVisibility,
@@ -57,6 +58,8 @@ interface ProjectSummary {
   name: string
   slug: string
   visibility?: DeploymentVisibility
+  /** Origin of the rendered reader site Doxbrix serves this project at. */
+  hostedUrl?: string | null
 }
 
 interface PushReport {
@@ -89,6 +92,7 @@ export async function deploy(options: {
     return deployGeneratedSite({ ...options, name, slug })
   }
   const steps = createStepList()
+  const startedAt = new Date().toISOString()
   process.stdout.write(
     `Deploying "${name}" as ${visibility} → ${apiUrl(options.apiUrl)}\n\n`,
   )
@@ -165,11 +169,38 @@ export async function deploy(options: {
     for (const warning of report.warnings ?? []) {
       process.stdout.write(`warning: ${warning}\n`)
     }
-    process.stdout.write(
-      `\n${apiUrl(options.apiUrl)}/editor?project=${encodeURIComponent(target.slug)}\n`,
-    )
+    // Doxbrix serves every project's rendered documentation on its own host and
+    // reports it as `hostedUrl`. Link readers there, not at the editor; the
+    // editor link is only a fallback for a Doxbrix that does not report one.
+    const siteUrl = target.hostedUrl
+      || `${apiUrl(options.apiUrl)}/editor?project=${encodeURIComponent(target.slug)}`
+    process.stdout.write(`\n${siteUrl}\n`)
+    await recordDeployment(options.root, {
+      target: 'doxbrix',
+      status: 'succeeded',
+      startedAt,
+      name: target.name,
+      slug: target.slug,
+      visibility,
+      url: siteUrl,
+      pagesCount: bundle.pages.length,
+      mediaCount: bundle.media.length,
+      bytes,
+      pagesCreated: report.pagesCreated,
+      pagesUpdated: report.pagesUpdated,
+      ...(report.pagesDeleted === undefined ? {} : { pagesDeleted: report.pagesDeleted }),
+    })
   } catch (error) {
     steps.failActive()
+    await recordDeployment(options.root, {
+      target: 'doxbrix',
+      status: 'failed',
+      startedAt,
+      name,
+      slug,
+      visibility,
+      error: error instanceof Error ? error.message : String(error),
+    })
     throw error
   }
 }
