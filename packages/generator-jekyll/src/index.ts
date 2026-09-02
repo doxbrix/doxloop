@@ -41,6 +41,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-jekyll',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-jekyll', import.meta.url)),
   },
+  planning: { navigationFiles: ['_config.yml', '_data/navigation.yml'] },
   project: {
     defaultContentDir: '_docs',
     pageExtensions: ['.md'],

@@ -12,6 +12,8 @@ Export a default adapter created with `defineGenerator` from
 - package identity and version;
 - authoring skill name and directory;
 - content root, page extensions, ignored output, and content format;
+- native navigation files used to translate a generator-neutral documentation
+  plan into the framework's own sidebar, menu, or index;
 - native build command and output directory;
 - scaffold, preview, and validation implementations;
 - an optional local-asset resolver for root-relative public assets outside the
@@ -30,6 +32,20 @@ Package metadata should include:
   }
 }
 ```
+
+Adapters declare planning boundaries without implementing a second plan
+schema:
+
+```ts
+planning: {
+  navigationFiles: ['framework.config.js', 'sidebar.json'],
+}
+```
+
+`navigationFiles` are project-relative and identify files an approved plan may
+require the authoring agent to update. Page grouping and ordering remain in the
+core generator-neutral plan; the format skill translates them into native
+syntax.
 
 ## Responsibilities
 

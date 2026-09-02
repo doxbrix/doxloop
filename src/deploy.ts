@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import {
   apiUrl,
   authenticatedRequest,
@@ -18,9 +19,13 @@ import {
   loadProject,
   loadSiteConfig,
   relativePath,
+  ROOT_CONTENT_IGNORED_DIRECTORIES,
 } from './project.js'
 import { createStepList, formatDuration } from './progress.js'
 import { validateProject } from './validation.js'
+import { loadQualityConfig } from './quality-config.js'
+import { readVerificationMetadata } from './quality-claims.js'
+import type { ReaderVerificationMetadata } from './types.js'
 
 const MEDIA_EXTENSIONS = new Set([
   '.avif',
@@ -51,6 +56,7 @@ interface DeploymentBundle {
   basePath: string
   pages: Array<{ path: string; markdown: string }>
   media: Array<{ path: string; base64: string }>
+  verification?: ReaderVerificationMetadata
 }
 
 interface ProjectSummary {
@@ -210,6 +216,7 @@ export async function buildDeploymentBundle(
   contentDir: string,
 ): Promise<DeploymentBundle> {
   const project = await loadProject(root)
+  const qualityConfig = await loadQualityConfig(root)
   if (contentDir !== project.contentDir) {
     throw new DoxloopError(
       'Deployment content directory must match .doxloop/project.json.',
@@ -219,6 +226,7 @@ export async function buildDeploymentBundle(
     root,
     project.contentDir,
     'Deployment content directory',
+    { allowRoot: project.generator === 'doxbrix' },
   )
   const pages: DeploymentBundle['pages'] = []
   for (const path of await loadPages(root, project)) {
@@ -228,14 +236,19 @@ export async function buildDeploymentBundle(
     })
   }
   const media: DeploymentBundle['media'] = []
-  for (const path of await listFiles(contentRoot, MEDIA_EXTENSIONS)) {
+  for (const path of await listFiles(contentRoot, MEDIA_EXTENSIONS, {
+    ...(contentRoot === resolve(root)
+      ? { ignoredDirectories: ROOT_CONTENT_IGNORED_DIRECTORIES }
+      : {}),
+  })) {
     media.push({
       path: relativePath(contentRoot, path),
       base64: (await readFile(path)).toString('base64'),
     })
   }
   const manifest = await loadSiteConfig(root, project)
-  return { manifest, basePath: contentDir, pages, media }
+  const verification = qualityConfig.readerVerification?.enabled ? await readVerificationMetadata(root) : undefined
+  return { manifest, basePath: contentDir, pages, media, ...(verification ? { verification } : {}) }
 }
 
 function slugify(value: string): string {

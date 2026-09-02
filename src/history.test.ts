@@ -60,21 +60,21 @@ async function fixture(): Promise<{ root: string; product: string }> {
     sources: [{ name: 'product', path: '../product' }],
   })
   await writeFile(
-    join(root, 'docs', 'index.mdx'),
+    join(root, 'index.mdx'),
     '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is 10.\n',
   )
   await writeFile(
-    join(root, 'docs', 'quickstart.mdx'),
+    join(root, 'quickstart.mdx'),
     '---\ntitle: Quickstart\ndescription: Start using the product safely.\n---\n\nFollow the documented setup.\n',
   )
   await writeEvidenceMap(root, {
     schemaVersion: 1,
     pages: {
-      'docs/index.mdx': {
+      'index.mdx': {
         sources: [{ source: 'product', paths: ['src/limits.ts'] }],
         confidence: 'verified',
       },
-      'docs/quickstart.mdx': { sources: [{ source: 'product', paths: ['src/limits.ts'] }] },
+      'quickstart.mdx': { sources: [{ source: 'product', paths: ['src/limits.ts'] }] },
     },
   })
   await recordSyncState(root, (await loadProject(root)).sources)
@@ -83,7 +83,7 @@ async function fixture(): Promise<{ root: string; product: string }> {
   return { root, product }
 }
 
-async function proposal(root: string, request?: string): Promise<SyncRun> {
+async function proposal(root: string, request?: string, mode?: 'create' | 'update', historyRequest?: string): Promise<SyncRun> {
   const loaded = await loadProject(root)
   const project = { ...loaded, sync: { ...loaded.sync, mode: 'propose' as const } }
   return createSyncRun({
@@ -91,10 +91,15 @@ async function proposal(root: string, request?: string): Promise<SyncRun> {
     project,
     drift: await computeDrift(root, project),
     sourceChanges: await collectSourceChanges(root, project.sources),
-    ...(request ? { authoring: { request, agent: 'codex' as const } } : {}),
+    ...(request || mode || historyRequest ? { authoring: {
+      ...(request ? { request } : {}),
+      ...(mode ? { mode } : {}),
+      ...(historyRequest ? { historyRequest } : {}),
+      agent: 'codex' as const,
+    } } : {}),
     author: async (options) => {
       await writeFile(
-        join(options.root, 'docs', 'index.mdx'),
+        join(options.root, 'index.mdx'),
         '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is now 20.\n',
       )
       await recordSyncState(options.root, (await loadProject(options.root)).sources)
@@ -104,7 +109,7 @@ async function proposal(root: string, request?: string): Promise<SyncRun> {
 }
 
 async function indexPage(root: string) {
-  return (await listPages(root)).find((page) => page.path === 'docs/index.mdx')
+  return (await listPages(root)).find((page) => page.path === 'index.mdx')
 }
 
 withSqlite('history storage', () => {
@@ -123,10 +128,19 @@ withSqlite('history storage', () => {
     expect(request?.linesAdded).toBeGreaterThan(0)
   })
 
+  test('records create proposals as create actions', async () => {
+    const { root } = await fixture()
+    await proposal(root, 'Internal implementation prompt', 'create', 'Create the initial documentation')
+
+    const [request] = await listRequests(root)
+    expect(request?.kind).toBe('create')
+    expect(request?.requestText).toBe('Create the initial documentation')
+  })
+
   test('follows a proposal through to applied and records the page decision', async () => {
     const { root } = await fixture()
     const created = await proposal(root)
-    const change = created.changes.find((entry) => entry.path === 'docs/index.mdx')
+    const change = created.changes.find((entry) => entry.path === 'index.mdx')
     expect(change).toBeDefined()
 
     await acceptSyncChanges(root, created.id, [{ changeId: change!.id }])
@@ -135,7 +149,7 @@ withSqlite('history storage', () => {
     expect(request?.status).toBe('applied')
     expect(request?.finishedAt).toBeDefined()
 
-    const entries = await pageHistory(root, 'docs/index.mdx')
+    const entries = await pageHistory(root, 'index.mdx')
     expect(entries).toHaveLength(1)
     expect(entries[0]?.decision).toBe('accepted')
     expect(entries[0]?.changeKind).toBe('modified')
@@ -145,13 +159,13 @@ withSqlite('history storage', () => {
   test('groups the changed pages by request for the workspace table', async () => {
     const { root } = await fixture()
     const created = await proposal(root, 'Document the new limit')
-    const change = created.changes.find((entry) => entry.path === 'docs/index.mdx')
+    const change = created.changes.find((entry) => entry.path === 'index.mdx')
     await acceptSyncChanges(root, created.id, [{ changeId: change!.id }])
 
     const grouped = await requestPages(root, [created.id])
     const pages = grouped[created.id] ?? []
     expect(pages.length).toBeGreaterThan(0)
-    const index = pages.find((page) => page.path === 'docs/index.mdx')
+    const index = pages.find((page) => page.path === 'index.mdx')
     expect(index?.decision).toBe('accepted')
     expect(index?.changeKind).toBe('modified')
     expect(index?.linesAdded).toBeGreaterThan(0)
@@ -165,14 +179,14 @@ withSqlite('history storage', () => {
   test('records a rejected proposal without touching documentation', async () => {
     const { root } = await fixture()
     const created = await proposal(root)
-    const before = await readFile(join(root, 'docs', 'index.mdx'), 'utf8')
+    const before = await readFile(join(root, 'index.mdx'), 'utf8')
 
     await rejectSyncRun(root, created.id)
 
     const [request] = await listRequests(root)
     expect(request?.status).toBe('rejected')
-    expect((await pageHistory(root, 'docs/index.mdx'))[0]?.decision).toBe('rejected')
-    expect(await readFile(join(root, 'docs', 'index.mdx'), 'utf8')).toBe(before)
+    expect((await pageHistory(root, 'index.mdx'))[0]?.decision).toBe('rejected')
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toBe(before)
   })
 
   test('keeps history after the run directory is pruned', async () => {
@@ -193,7 +207,7 @@ withSqlite('history storage', () => {
     expect(initial?.changeCount).toBe(1)
 
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nEdited by hand.\n',
     )
     await syncPageRegistry(root)
@@ -211,10 +225,10 @@ withSqlite('history storage', () => {
   test('marks a removed page as deleted instead of forgetting it', async () => {
     const { root } = await fixture()
     await syncPageRegistry(root)
-    await rm(join(root, 'docs', 'index.mdx'))
+    await rm(join(root, 'index.mdx'))
     await syncPageRegistry(root)
 
-    const page = (await listPages(root)).find((entry) => entry.path === 'docs/index.mdx')
+    const page = (await listPages(root)).find((entry) => entry.path === 'index.mdx')
     expect(page?.status).toBe('deleted')
   })
 
@@ -281,18 +295,18 @@ withSqlite('history storage', () => {
     const before = await snapshotPages(root)
 
     await writeFile(
-      join(root, 'docs', 'limits.mdx'),
+      join(root, 'limits.mdx'),
       '---\ntitle: Limits\ndescription: The documented limit.\n---\n\nThe limit is 20.\n',
     )
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is now 20.\n',
     )
-    await rm(join(root, 'docs', 'quickstart.mdx'))
+    await rm(join(root, 'quickstart.mdx'))
 
     const authored = await recordAuthoredPages(root, id, before)
     expect(authored.paths).toEqual(
-      new Set(['docs/index.mdx', 'docs/limits.mdx', 'docs/quickstart.mdx']),
+      new Set(['index.mdx', 'limits.mdx', 'quickstart.mdx']),
     )
     expect(authored.linesAdded).toBeGreaterThan(0)
     expect(authored.linesRemoved).toBeGreaterThan(0)
@@ -309,11 +323,11 @@ withSqlite('history storage', () => {
     expect(request?.linesAdded).toBe(authored.linesAdded)
 
     const pages = (await requestPages(root, [id!]))[id!] ?? []
-    expect(pages.find((page) => page.path === 'docs/limits.mdx')?.changeKind).toBe('added')
-    expect(pages.find((page) => page.path === 'docs/index.mdx')?.changeKind).toBe('modified')
-    expect(pages.find((page) => page.path === 'docs/quickstart.mdx')?.changeKind).toBe('deleted')
+    expect(pages.find((page) => page.path === 'limits.mdx')?.changeKind).toBe('added')
+    expect(pages.find((page) => page.path === 'index.mdx')?.changeKind).toBe('modified')
+    expect(pages.find((page) => page.path === 'quickstart.mdx')?.changeKind).toBe('deleted')
 
-    const entry = (await pageHistory(root, 'docs/limits.mdx'))[0]
+    const entry = (await pageHistory(root, 'limits.mdx'))[0]
     expect(entry?.decision).toBe('accepted')
     expect(entry?.requestText).toBe('Document the limits')
     expect(entry?.linesAdded).toBeGreaterThan(0)
@@ -334,7 +348,7 @@ withSqlite('history storage', () => {
     const id = await startRequest(root, { kind: 'create' })
     const before = await snapshotPages(root)
     await writeFile(
-      join(root, 'docs', 'limits.mdx'),
+      join(root, 'limits.mdx'),
       '---\ntitle: Limits\ndescription: The documented limit.\n---\n\nThe limit is 20.\n',
     )
     // The workspace server backfills history on startup, which can land between
@@ -349,10 +363,10 @@ withSqlite('history storage', () => {
       (database
         ?.prepare('SELECT path, last_request_id FROM pages ORDER BY path')
         .all() as Array<{ path: string; last_request_id: string | null }>) ?? []
-    const written = rows.find((row) => row.path === 'docs/limits.mdx')
+    const written = rows.find((row) => row.path === 'limits.mdx')
     expect(written?.last_request_id).toBe(id)
     // A page the run never touched keeps its own attribution.
-    expect(rows.find((row) => row.path === 'docs/quickstart.mdx')?.last_request_id).toBeNull()
+    expect(rows.find((row) => row.path === 'quickstart.mdx')?.last_request_id).toBeNull()
   })
 
   test('imports existing run manifests once', async () => {

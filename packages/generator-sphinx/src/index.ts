@@ -39,6 +39,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-sphinx',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-sphinx', import.meta.url)),
   },
+  planning: { navigationFiles: ['docs/index.rst', 'docs/conf.py'] },
   project: {
     defaultContentDir: 'docs',
     pageExtensions: ['.rst'],

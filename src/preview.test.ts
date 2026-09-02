@@ -19,6 +19,15 @@ afterEach(async () => {
 })
 
 describe('generator preview', () => {
+  test('renders evidence-derived verification metadata only when supplied', () => {
+    const site = { version: 1 as const, spaces: [{ name: 'Docs', nav: [{ type: 'page' as const, file: 'index' }] }] }
+    const without = doxbrixDocument({ site, title: 'Overview', current: 'index', rendered: { html: '<p>Content</p>', toc: [] } })
+    const withBadge = doxbrixDocument({ site, title: 'Overview', current: 'index', rendered: { html: '<p>Content</p>', toc: [] }, verification: { state: 'needs-human', verifiedOn: '2026-08-26T00:00:00.000Z', revisions: { product: 'abcdef1234567890' }, locale: 'en-US' } })
+    expect(without).not.toContain('Documentation verification')
+    expect(withBadge).toContain('Documentation verification')
+    expect(withBadge).toContain('Needs review')
+    expect(withBadge).toContain('abcdef123456')
+  })
   test('installs Docusaurus dependencies with the package manager the lockfile selects', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doxloop-preview-'))
     roots.push(root)

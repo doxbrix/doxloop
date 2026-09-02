@@ -4,6 +4,7 @@ import { lstat, readFile, readlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathExists, readJson } from './fs.js'
+import { diffOpenApi, loadOpenApiSource, openApiChangedIdentifiers } from './openapi.js'
 import { isSpecUrl, sourceKind } from './project.js'
 import { remoteHead } from './remote-source.js'
 import type { SourceBinding, SourceChange, SyncState } from './types.js'
@@ -33,14 +34,18 @@ export async function recordSyncState(
   const state: SyncState = { schemaVersion: 1, sources: {} }
   for (const source of sources) {
     if (sourceKind(source) === 'openapi') {
-      if (isSpecUrl(source.path)) continue
-      const fingerprint = await specFileFingerprint(resolve(root, source.path))
-      if (fingerprint) {
-        state.sources[source.name] = {
-          commit: SPEC_BASELINE,
-          recordedAt: new Date().toISOString(),
-          contentFingerprint: fingerprint,
-        }
+      const loaded = await loadOpenApiSource(root, source)
+      state.sources[source.name] = {
+        commit: SPEC_BASELINE,
+        recordedAt: new Date().toISOString(),
+        contentFingerprint: loaded.hash,
+        connector: {
+          id: 'openapi',
+          version: 1,
+          ...(loaded.etag ? { etag: loaded.etag } : {}),
+          ...(loaded.lastModified ? { lastModified: loaded.lastModified } : {}),
+          openapi: loaded.snapshot,
+        },
       }
       continue
     }
@@ -122,27 +127,57 @@ export async function collectSourceChanges(
   return changes
 }
 
+/** Stable content fingerprints used to invalidate an approved planning checkpoint. */
+export async function sourceSnapshotFingerprints(
+  root: string,
+  sources: SourceBinding[],
+): Promise<Record<string, string | null>> {
+  const fingerprints: Record<string, string | null> = {}
+  for (const source of sources) {
+    if (sourceKind(source) === 'openapi') {
+      try { fingerprints[source.name] = (await loadOpenApiSource(root, source)).hash }
+      catch { fingerprints[source.name] = null }
+      continue
+    }
+    try {
+      fingerprints[source.name] = await sourceContentFingerprint(resolve(root, source.path))
+    } catch {
+      fingerprints[source.name] = null
+    }
+  }
+  return fingerprints
+}
+
 async function collectSpecChange(
   root: string,
   source: SourceBinding,
   state: SyncState,
 ): Promise<SourceChange> {
-  if (isSpecUrl(source.path)) return { ...source, kind: 'spec-remote' }
-  const fingerprint = await specFileFingerprint(resolve(root, source.path))
-  if (!fingerprint) return { ...source, kind: 'missing-path' }
   const record = state.sources[source.name]
-  if (record?.contentFingerprint === fingerprint) {
-    return { ...source, kind: 'spec-unchanged' }
-  }
-  return { ...source, kind: 'spec-changed' }
-}
-
-async function specFileFingerprint(path: string): Promise<string | undefined> {
+  let loaded
   try {
-    const content = await readFile(path)
-    return createHash('sha256').update(content).digest('hex')
-  } catch {
-    return undefined
+    loaded = await loadOpenApiSource(root, source, record?.connector ? {
+      ...(record.connector.etag ? { etag: record.connector.etag } : {}),
+      ...(record.connector.lastModified ? { lastModified: record.connector.lastModified } : {}),
+    } : undefined)
+  } catch (error) {
+    if (!isSpecUrl(source.path) && !(await pathExists(resolve(root, source.path)))) {
+      return { ...source, kind: 'missing-path' }
+    }
+    throw error
+  }
+  if (record?.contentFingerprint === loaded.hash || loaded.notModified) {
+    return { ...source, kind: 'spec-unchanged', head: loaded.hash, summary: loaded.summary }
+  }
+  const apiDiff = diffOpenApi(record?.connector?.openapi, loaded.snapshot)
+  return {
+    ...source,
+    kind: 'spec-changed',
+    ...(record?.contentFingerprint ? { baseline: record.contentFingerprint } : {}),
+    head: loaded.hash,
+    summary: loaded.summary,
+    apiDiff,
+    changedIdentifiers: openApiChangedIdentifiers(apiDiff),
   }
 }
 
@@ -152,6 +187,7 @@ async function specFileFingerprint(path: string): Promise<string | undefined> {
  * both the old and the new path so either one can match documented evidence.
  */
 export function changedSourcePaths(change: SourceChange): string[] {
+  if (change.kind === 'spec-changed') return change.changedIdentifiers
   if (change.kind !== 'changed' && change.kind !== 'no-baseline' && change.kind !== 'baseline-lost') {
     return []
   }
@@ -205,7 +241,9 @@ export function formatSourceChanges(changes: SourceChange[]): string {
       case 'spec-unchanged':
         return `${heading}: the API specification is unchanged since the last documentation sync.`
       case 'spec-changed':
-        return `${heading}: the API specification changed since the last documentation sync, or no baseline is recorded yet. Compare it with the documented endpoints and update every affected page; the baseline is recorded when this task completes.`
+        return `${heading}: the API specification changed${change.baseline ? ` (${short(change.baseline)} -> ${short(change.head)})` : ' and has no recorded baseline'}.
+${formatApiDelta(change.apiDiff)}
+Update only documentation affected by this structural delta; the new baseline is recorded after acceptance.`
       case 'not-git':
         return `${heading}: not a Git repository, so no change baseline is available. Inspect the source directly.`
       case 'no-baseline':
@@ -238,6 +276,20 @@ export function formatSourceChanges(changes: SourceChange[]): string {
     }
   })
   return `Source changes since the last documentation sync:\n\n${sections.join('\n\n')}`
+}
+
+function formatApiDelta(diff: import('./types.js').ApiStructuralDiff): string {
+  const lines: string[] = ['Structural API delta:']
+  for (const item of diff.operations.added) lines.push(`- operation added: ${item}`)
+  for (const item of diff.operations.removed) lines.push(`- operation removed: ${item}`)
+  for (const item of diff.operations.changed) lines.push(`- operation changed: ${item.id} (${item.facets.join(', ')})`)
+  for (const item of diff.schemas.added) lines.push(`- schema added: ${item}`)
+  for (const item of diff.schemas.removed) lines.push(`- schema removed: ${item}`)
+  for (const item of diff.schemas.changed) lines.push(`- schema changed: ${item.id}`)
+  for (const item of diff.securitySchemes.added) lines.push(`- authentication added: ${item}`)
+  for (const item of diff.securitySchemes.removed) lines.push(`- authentication removed: ${item}`)
+  for (const item of diff.securitySchemes.changed) lines.push(`- authentication changed: ${item.id}`)
+  return lines.length === 1 ? `${lines[0]} no public structural changes detected.` : lines.join('\n')
 }
 
 function withUncommitted(text: string, uncommittedFiles: string[]): string {

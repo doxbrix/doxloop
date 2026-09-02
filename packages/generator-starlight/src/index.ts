@@ -41,6 +41,7 @@ const adapter = defineGenerator({
       new URL('../skills/doxloop-starlight', import.meta.url),
     ),
   },
+  planning: { navigationFiles: ['astro.config.mjs'] },
   project: {
     defaultContentDir: 'src/content/docs',
     pageExtensions: ['.md', '.mdx'],

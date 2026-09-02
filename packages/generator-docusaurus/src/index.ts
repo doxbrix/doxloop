@@ -31,6 +31,7 @@ const adapter = defineGenerator({
       new URL('../skills/doxloop-docusaurus', import.meta.url),
     ),
   },
+  planning: { navigationFiles: ['sidebars.js', 'docusaurus.config.js'] },
   project: {
     defaultContentDir: 'docs',
     pageExtensions: ['.md', '.mdx'],

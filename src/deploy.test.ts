@@ -19,7 +19,7 @@ describe('deployment', () => {
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: List projects
 description: List accessible projects.
@@ -33,7 +33,7 @@ description: List accessible projects.
 `,
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
     )
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
@@ -50,11 +50,11 @@ description: List accessible projects.
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
     )
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
@@ -67,16 +67,16 @@ description: List accessible projects.
     expect(output).toHaveBeenCalledWith(expect.stringContaining('No data was uploaded.'))
   })
 
-  test('bundles pages, media, and the manifest with docs-relative paths', async () => {
+  test('bundles pages, media, and the manifest with root-relative paths', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-deploy-'))
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
-    await mkdir(join(root, 'docs', 'assets'), { recursive: true })
-    await writeFile(join(root, 'docs', 'assets', 'logo.svg'), '<svg></svg>')
+    await mkdir(join(root, 'assets'), { recursive: true })
+    await writeFile(join(root, 'assets', 'logo.svg'), '<svg></svg>')
 
-    const bundle = await buildDeploymentBundle(root, 'docs')
+    const bundle = await buildDeploymentBundle(root, '')
 
-    expect(bundle.basePath).toBe('docs')
+    expect(bundle.basePath).toBe('')
     expect(bundle.pages.map((page) => page.path).sort()).toEqual([
       'index.mdx',
       'quickstart.mdx',
@@ -101,7 +101,9 @@ description: List accessible projects.
     })
     const outside = join(parent, 'outside')
     await mkdir(outside)
-    await rm(join(root, 'docs'), { recursive: true })
+    const projectPath = join(root, '.doxloop', 'project.json')
+    const project = JSON.parse(await readFile(projectPath, 'utf8')) as Record<string, unknown>
+    await writeFile(projectPath, `${JSON.stringify({ ...project, contentDir: 'docs' }, null, 2)}\n`)
     await symlink(outside, join(root, 'docs'))
 
     await expect(buildDeploymentBundle(root, 'docs')).rejects.toThrow(
@@ -127,11 +129,11 @@ description: List accessible projects.
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
     )
     vi.stubEnv('DOXLOOP_TOKEN', 'dxb_test')
@@ -185,11 +187,11 @@ description: List accessible projects.
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
     )
     vi.stubEnv('DOXLOOP_TOKEN', 'dxb_test')
@@ -270,11 +272,11 @@ description: List accessible projects.
     roots.push(parent)
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify its result.\n',
     )
     vi.stubEnv('DOXLOOP_TOKEN', 'dxb_test')

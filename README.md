@@ -10,7 +10,7 @@
 
 <p align="center">
   Turn source code or an API specification into a polished, validated documentation site<br>
-  with Codex, Claude Code, or Gemini.
+  with Codex, Claude Code, or Gemini, from one local control center.
 </p>
 
 <p align="center">
@@ -22,70 +22,100 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
   <a href="#real-examples">Real examples</a> ·
-  <a href="#use-doxloop-in-vs-code-codex-or-claude">Editor and agent apps</a> ·
-  <a href="#automatic-documentation-sync">Automatic sync</a> ·
-  <a href="#everyday-workflow">Commands</a> ·
+  <a href="#the-workspace">The workspace</a> ·
+  <a href="#keep-documentation-current">Monitoring</a> ·
+  <a href="#review-what-changed-and-why">Review</a> ·
   <a href="#guides">Guides</a>
 </p>
 
 ```mermaid
 flowchart LR
     A["Source code<br>or OpenAPI"] --> B["Doxloop +<br>your coding agent"]
-    B --> C["Structured<br>documentation"]
-    C --> D["Preview, validate,<br>and publish"]
+    B --> C["Plan, write,<br>and review"]
+    C --> D["Preview, validate,<br>and deploy"]
 ```
 
-Doxloop gives your coding agent a repeatable documentation workflow: inspect
-the source, identify the audience, plan the content, write generator-native
-pages, build navigation, and validate the result. Your product source stays
-separate from the generated documentation project.
+Doxloop is a local, browser-based control center for documentation. You connect
+the sources that describe your product, describe what readers should be able to
+do, and approve a documentation plan. Your coding agent researches the evidence
+and writes generator-native pages into an isolated proposal. You review every
+change, accept what is right, preview the site, and deploy it, all from the same
+window. Product source stays read-only and separate from the documentation
+project.
 
 ## Quickstart
 
 ### 1. Install
 
-Requires Node.js 20.12 or later.
+Doxloop requires Node.js 22.13 or later.
 
 ```bash
 npm install --global @doxbrix/doxloop
 ```
 
-### 2. Set up the documentation project
+### 2. Open the control center
 
-Run this from your product directory:
-
-```bash
-doxloop init
-```
-
-Doxloop detects the product repository and guides you through the project
-location, product evidence, site title, and generator. It shows a complete
-summary before creating anything. Product code and documentation are kept in
-separate sibling directories.
-
-Documenting an API without a product checkout? Run the same command in the
-directory where you want to work, then choose **API specification** and enter
-the OpenAPI file or URL when asked.
-
-### 3. Create the documentation
+Open a terminal in the folder where you want the documentation project to be
+created. That is usually the parent folder of your product checkout, so the
+product and its documentation become sibling directories. Then start Doxloop:
 
 ```bash
-cd ../my-product-docs
-doxloop create
+doxloop ui
 ```
 
-`create` asks what readers need and which agent to use, shows all supported
-choices, and automatically installs Codex, Claude Code, or Gemini with npm when
-you select a missing agent. It shows an authoring summary and starts the agent
-only after confirmation. Press Enter at the documentation request to let the
-agent recommend a complete, evidence-backed plan.
+This is the only command you need. It starts a loopback-only server on
+`http://127.0.0.1:4317` and opens your browser. Everything else happens in the
+browser. When no documentation project exists yet, Doxloop opens the setup
+wizard. When one exists, it opens the workspace for that project.
 
-### 4. Preview and validate
+### 3. Set up the workspace
 
-```bash
-doxloop preview --open
-doxloop test
-```
+The wizard walks through five steps and creates nothing until the last one.
+
+1. **Workspace.** Enter a folder name for the documentation project and the
+   title readers will see.
+2. **Sources.** Choose **Add source**, then **Source code** for a local folder
+   or a Git repository, or **OpenAPI spec** to upload a file or paste a public
+   URL. Private repositories accept a username and a personal access token that
+   is held in memory for the session and never written to the project.
+3. **Tools.** Pick the documentation generator (Doxbrix is recommended and
+   needs no installation), the coding assistant (Codex, Claude Code, or
+   Gemini), and optionally the model. If the assistant is not installed,
+   Doxloop installs it for you. Answer **Add product screenshots?** to let
+   Doxloop capture images from a running local or test application.
+4. **Guidance.** Describe what readers should be able to do, choose the
+   documentation depth (Comprehensive is recommended; the page count comes
+   from your sources, not from the depth), add audiences, and open **Advanced
+   planning preferences** for examples, locale, terminology, exclusions,
+   accessibility target, and how the planner should handle questions.
+5. **Review.** Check the summary and choose **Create documentation plan**.
+
+Doxloop then downloads read-only snapshots of any remote sources, installs the
+project-local authoring skills for the selected assistant, and starts a
+read-only planning run. The planner researches your sources and proposes a
+page structure. Nothing is written until you approve it.
+
+### 4. Approve the plan and generate
+
+The plan opens on the **Create** page. Answer anything under **Needs your
+decision**, adjust the **Documentation brief**, and edit the **Documentation
+structure**: add, reorder, remove, or defer pages, and open any page to change
+its purpose, priority, section, or screenshot treatment. Ask for changes in
+plain language under **Want to change the plan?** and a new plan version comes
+back. When it looks right, choose **Approve & generate**.
+
+Generation runs in an isolated workspace while **Live activity** shows each
+stage. You can stop it at any time. When it finishes, the result is a proposal
+and the documentation project is still unchanged.
+
+### 5. Review, preview, and deploy
+
+1. Open **Review** to compare the current and proposed versions of every file.
+   Accept one change, one file, or everything, edit a page directly, or ask
+   the agent to revise a specific file.
+2. Choose **Preview docs** in the top bar to open the rendered site locally.
+3. Open **Deploy**, sign in with your browser, run a **Dry run** if you want to
+   validate and build without uploading, and choose **Deploy to Doxbrix**.
 
 Your source and docs remain separate:
 
@@ -95,450 +125,197 @@ workspace/
 └── my-product-docs/  ← editable and deployable documentation
 ```
 
-From then on, the everyday workflow is deliberately short:
-
-```bash
-doxloop update
-doxloop deploy
-doxloop settings
-```
-
-No configuration flags are required for interactive use. Advanced flags remain
-available as optional one-run overrides for scripts and CI.
+From then on, every update follows the same loop: describe the change on the
+**Update** page, approve the plan, review the proposal, preview, and deploy.
 
 ## Real examples
 
-### Lodash developer docs from the CLI
+### Lodash developer docs from a local checkout
 
-From the [Lodash](https://github.com/lodash/lodash) source directory:
+With the [Lodash](https://github.com/lodash/lodash) repository checked out,
+open a terminal in its parent folder and run `doxloop ui`. In the wizard:
 
-```bash
-doxloop init
-cd ../lodash-docs
-doxloop create
-```
-
-At the `create` prompt, request developer documentation with a quickstart,
-class and function reference, and a simple example for every function. Choose
-Claude Code when Doxloop asks which agent to use. If it is missing, Doxloop
-installs it before the run. That choice can be remembered for later updates.
+1. Name the workspace `lodash-docs`.
+2. Add a **Source code** source, choose **Local folder**, and browse to the
+   Lodash checkout.
+3. Choose **Doxbrix** as the generator and **Claude Code** as the coding
+   assistant. Doxloop installs it if it is missing.
+4. Under **Guidance**, ask for developer documentation with a quickstart, a
+   class and function reference, and a simple example for every function.
+5. Choose **Create documentation plan**, approve the plan, and review the
+   proposal.
 
 **Generated documentation:** <https://apps-lodash-docs.sites.doxbrix.com/>
 
-### Petstore API docs from VS Code with Codex
+### Petstore API docs from an OpenAPI URL
 
-First, initialize a documentation project. Use `petstore-docs` as the project
-directory, choose **API specification**, and enter
-`https://petstore3.swagger.io/api/v3/openapi.json` when asked:
+No product checkout is needed. Run `doxloop ui` in any folder and, in the
+wizard:
 
-```bash
-doxloop init
-cd petstore-docs
-code .
-```
-
-Then give Codex this prompt:
-
-> Using Doxloop authoring, create API documentation for this OpenAPI document:
-> https://petstore3.swagger.io/api/v3/openapi.json
-
-Because `doxloop init` installs the Doxloop authoring skills inside the project,
-Codex can inspect the OpenAPI document and create the pages, endpoint reference,
-examples, and navigation directly in the opened folder.
+1. Name the workspace `petstore-docs`.
+2. Add an **OpenAPI spec** source, choose **From URL**, and enter
+   `https://petstore3.swagger.io/api/v3/openapi.json`.
+3. Choose **Codex** as the coding assistant.
+4. Under **Guidance**, ask for API documentation with an endpoint reference and
+   request examples.
+5. Choose **Create documentation plan**, approve the plan, review the proposal,
+   and open **Preview docs**.
 
 **Generated documentation:** <https://apps-pet-store.sites.doxbrix.com/>
-
-When it finishes:
-
-Run `doxloop preview --open` and `doxloop test` when it finishes.
-
-## Use Doxloop in VS Code, Codex, or Claude
-
-Prefer working in Visual Studio Code, the Codex app, Claude Code, or another
-local agent experience? Initialize the project first:
-
-```bash
-doxloop init
-```
-
-Then open the generated folder where you want to work:
-
-| Where | Open the project |
-| --- | --- |
-| VS Code with Codex | `code ../my-product-docs` |
-| Codex app | Open the generated documentation folder |
-| Claude Code | `cd ../my-product-docs && claude` |
-
-Ask the agent to use Doxloop authoring:
-
-```text
-Use Doxloop authoring to create developer documentation for this project.
-Start with a five-minute quickstart, then add task guides and API reference.
-```
-
-`doxloop init` installs project-local skills for the supported agent
-ecosystems:
-
-| Agent experience | Installed skills |
-| --- | --- |
-| Codex and Gemini | `.agents/skills/` |
-| Claude Code | `.claude/skills/` |
-
-If an editor does not load project skills automatically, prepare a complete
-prompt and paste it into the agent session:
-
-```bash
-doxloop create --print \
-  "Create developer documentation with a quickstart and API reference."
-```
-
-> `--print` cannot record when the external agent finishes. Use a
-> Doxloop-launched CLI agent when automatic source-change tracking is important.
 
 ## What Doxloop handles
 
 | Capability | What you get |
 | --- | --- |
-| 🔎 **Source-grounded research** | Uses code, public interfaces, tests, examples, and configuration as evidence. |
-| 🧭 **Documentation planning** | Identifies readers, important workflows, page coverage, and navigation before writing. |
+| 🔎 **Source-grounded research** | Uses code, public interfaces, tests, examples, configuration, and OpenAPI documents as evidence. |
+| 🧭 **Plan before writing** | Proposes readers, page coverage, and navigation as an editable plan that you approve before anything is written. |
 | ✍️ **Generator-native output** | Creates the right Markdown, MDX, configuration, components, and theme for the selected generator. |
-| ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, and generator conventions. |
-| 🔄 **Focused updates** | Tracks the source revision and directs the agent to documentation affected by product changes. |
-| 🚨 **Drift detection** | `doxloop check` names the pages a source change made stale, without starting an agent or using a model. |
-| ⚙️ **Automatic sync** | Polls source-provider APIs on a local schedule, generates isolated validated proposals, then applies only what a user accepts. |
-| 🖥️ **Local control center** | Runs project setup, sources, authoring, monitoring, review, validation, preview, and publishing from one loopback-only UI. |
-| 🔐 **Local-first control** | Keeps authoring, validation, and preview local; publishing is always a separate command. |
+| ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, page depth, and generator conventions on every proposal and before every deploy. |
+| 🔍 **Reviewable proposals** | Every run lands in an isolated proposal with rendered and source comparisons, per-change acceptance, rationale, and evidence. |
+| 📊 **Coverage by surface** | Shows which discovered product surfaces have documentation evidence and lets you resolve gaps. |
+| ⚙️ **Monitoring** | Polls the source repository on a local schedule and drafts a proposal when documentation goes stale. |
+| 📸 **Guide screenshots** | Gives the agent a scoped browser, verifies every PNG, and embeds images beside the steps they explain. |
+| 🔐 **Local-first control** | Keeps authoring, validation, and preview on your machine. Deploying is a separate confirmed action and credentials never reach the browser. |
 
-## Everyday workflow
+## The workspace
 
-| Goal | Command |
+Every page has a stable URL, so browser back and forward work as expected. The
+left navigation shows:
+
+| Page | What you do there |
 | --- | --- |
-| Open the complete local UI | `doxloop ui` |
-| Create a docs project | `doxloop init` |
-| Generate documentation | `doxloop create` |
-| See which pages the product outgrew | `doxloop check` |
-| Configure automatic documentation sync | `doxloop sync setup` |
-| Verify automatic sync is ready | `doxloop sync status` |
-| Run one synchronization cycle | `doxloop sync now` |
-| List every generated review run | `doxloop sync history` |
-| Compare current and proposed pages side by side | `doxloop sync review --open` |
-| Disable automatic sync cleanly | `doxloop sync off` |
-| Update docs after code changes | `doxloop update` |
-| View or change project settings | `doxloop settings` |
-| Run a read-only quality review | `doxloop review` |
-| Preview locally | `doxloop preview --open` |
-| Validate the project | `doxloop test` |
-| Check setup and agent readiness | `doxloop doctor` |
-| See project status | `doxloop status` |
-| See past requests and page changes | `doxloop history` |
-| Deploy using saved settings | `doxloop deploy` |
+| **Overview** | Follow the loop from sources through plan, write, review, and deploy. See what needs your review, overall coverage, the published address, and recent activity. |
+| **Sources** | Connect and test local folders, Git repositories, and OpenAPI specifications. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
+| **Create** or **Update** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
+| **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, edit pages, ask the agent to revise, and optionally prepare a pull request branch. |
+| **Deploy** | Sign in to Doxbrix, set visibility, run a dry run, deploy, open the published site, and see the **Deployment history**. |
+| **Settings** | Change the site title, default agent, audience and voice, application screenshot settings, and see the active generator. |
 
-Run `doxloop <command> --help` for every option.
-
-### Use the local control center
-
-Run this from a Doxloop project—or from the parent directory where you want to
-create one:
-
-```bash
-doxloop ui
-```
-
-The command opens a loopback-only server on `http://127.0.0.1:4317`. Use
-`--no-open` to start it without opening a browser, `--port` to choose another
-local port, or `--page` to deep-link to `sources`, `authoring`, `sync`,
-`proposals`, `quality`, `preview`, `publish`, or `settings`.
-
-The control center provides the same safeguards as the CLI: product evidence is
-read-only, authoring jobs are cancellable, proposals remain isolated until
-accepted, deployment is a separate confirmed action, and credentials are never
-sent to the browser. It covers:
-
-- new-project setup and generator selection;
-- local directories, OpenAPI specifications, and tested GitHub remotes;
-- create, update, and review runs with agent, model, reasoning, and screenshot controls;
-- source-monitoring schedules, scope, budgets, live status, and manual runs;
-- rendered and source proposal diffs with hunk, page, and whole-proposal acceptance;
-- validation, environment diagnostics, preview, account sign-in, dry runs, and deployment; and
-- documentation standards, design references, application capture settings, agents, skills, and generator packages.
-
-`doxloop sync review --open` remains a convenient deep link: it opens the same
-server directly on the Proposals page.
+**Preview docs** in the top bar starts a local preview of the current
+documentation and opens it in a new tab. **New documentation project** in the
+sidebar explains how to start another workspace.
 
 ### Change project settings
 
-Use one settings command instead of editing `.doxloop/project.json` or
-remembering configuration flags:
+Open **Settings** instead of editing `.doxloop/project.json` by hand. Its four
+sections manage:
 
-```bash
-doxloop settings
-```
-
-The interactive settings menu manages:
-
-- product source directories and OpenAPI specifications;
-- the site title and default authoring agent;
-- audience, locale, tone, and reader outcomes;
-- design references and application screenshot behavior; and
-- hosted project name, slug, visibility, and Doxbrix destination.
+- **General**: site title and the default documentation agent;
+- **Audience and voice**: primary audience, audiences, experience level,
+  locale, accessibility target, tone, priority outcomes, preferred examples,
+  design direction, terminology, exclusions, and standing instructions;
+- **Visual evidence**: the safe application URL, ready path, starting route,
+  screenshot policy, viewport, capture workflow guidance, and a **Test
+  application** check; and
+- **Generator**: the generator selected for this workspace.
 
 Generator changes are intentionally not performed in place because changing
-frameworks can overwrite generator-native files. Create a new project with
-`doxloop init` when migrating generators.
-
-### Optional automation overrides
-
-Interactive users do not need flags. Scripts can still override saved settings
-for one run:
-
-```bash
-doxloop create --agent codex --reasoning high
-doxloop create --agent claude --model <model-name>
-doxloop create --agent gemini
-```
+frameworks can overwrite generator-native files. Start a new documentation
+project when migrating generators.
 
 ### Ask for exactly what you need
 
-```bash
-doxloop create \
-  "Write for platform engineers. Include installation, Kubernetes deployment, authentication, a production-readiness checklist, and troubleshooting."
-```
+The request box on the **Create** and **Update** pages accepts plain language.
+Describe the audience, desired outcomes, required pages, tone, priorities, or
+exclusions, for example:
 
-```bash
-doxloop update \
-  "Document webhook retries and remove the legacy import workflow."
-```
+> Write for platform engineers. Include installation, Kubernetes deployment,
+> authentication, a production-readiness checklist, and troubleshooting.
 
-You can describe the audience, desired outcomes, required pages, tone,
-priorities, or exclusions in plain language.
+> Document webhook retries and remove the legacy import workflow.
+
+Choose a starting scope, optionally set **Minimum pages to write** when the
+existing documentation is thin, and decide whether the planner should ask you
+questions in review, use recommendations, or always wait for answers.
 
 ## Keep documentation current
 
-Documentation goes stale because nothing reports it. `doxloop check` answers
-that question in milliseconds:
+Documentation goes stale because nothing reports it. Doxloop records the
+sources behind every page in `.doxloop/evidence-map.json`, so it can name the
+individual pages a later change made stale rather than only reporting that a
+source changed.
 
-```bash
-doxloop check
-```
+Open **Sources** and choose **Monitoring** to configure it:
 
-```text
-Documentation drift: 2 pages stale
+1. Enter the **Product branch** to follow.
+2. Choose a **Schedule**: daily, weekdays, weekly, monthly, or a custom
+   interval in minutes or hours. Times use your device timezone.
+3. Optionally open **Advanced watch scope and budgets** to set watched and
+   ignored paths, the maximum agent minutes and runs per day, and how old
+   verified evidence may become before it is re-verified.
+4. Choose **Save and install**.
 
-  guides/authentication.md
-    stale because  src/auth.ts changed (9f2c1ab)
-    last verified  2026-06-14
-
-  reference/payments.md
-    stale because  src/routes/pay.ts changed (9f2c1ab)
-
-  18 other tracked pages current
-
-Fix with: doxloop update
-```
-
-It names individual pages because each authoring run records the sources behind
-every page in `.doxloop/evidence-map.json`. No agent starts, no model is used,
-and no credentials are needed, so `check` is safe to run on every commit or in
-continuous integration. It exits `1` when pages are stale.
-
-Tune what counts as a documentation-relevant change in `.doxloop/project.json`:
-
-```json
-"sync": {
-  "watch": ["src/**", "openapi.yaml"],
-  "ignore": ["**/*.test.ts", "pnpm-lock.yaml"]
-}
-```
-
-Lock files and snapshots are ignored by default. Test files are not: the
-authoring workflow reads tests as evidence of supported behavior, so a changed
-test can legitimately change documentation.
-
-## Automatic documentation sync
-
-Automatic sync polls the source repository through a read-only provider API,
-then uses the coding agent already signed in on your machine when documentation
-needs a proposal. It never installs source-repository hooks, needs a model API
-key, writes to the source repository, or publishes documentation.
-
-The complete lifecycle is six commands:
-
-| Command | Purpose |
-| --- | --- |
-| `doxloop sync setup` | Ask three questions, save the policy, and install a local scheduled API check. |
-| `doxloop sync status` | Verify the remote source, scheduler health, agent sign-in, evidence map, last run, and current drift. |
-| `doxloop sync now` | Check immediately and generate an isolated proposal when documentation is stale. Current documentation is a no-op. |
-| `doxloop sync history` | List every run with its trigger, status, file count, and accepted-change count. |
-| `doxloop sync review --open` | Open the unified local control center directly on Proposals, with rendered and source comparisons. |
-| `doxloop sync off` | Remove the schedule while keeping the saved settings for later reuse. |
-
-### Set it up
-
-First add a read-only `remote` to each directory source in
-`.doxloop/project.json`; see the [project format](docs/project-format.md).
-Private GitHub repositories use the environment variable named by `tokenEnv`
-(default `GITHUB_TOKEN`). The token is read at runtime and never saved by
-Doxloop.
-
-```bash
-doxloop sync setup
-```
-
-Three questions — which product branch to follow, when to look for drift, and
-what to do when pages are stale — then Doxloop shows a summary before changing
-anything.
-
-For scripts or repeatable setup, provide all three answers directly:
-
-```bash
-doxloop sync setup \
-  --branch main \
-  --on every@15m \
-  --mode propose
-```
-
-Choose what happens when drift is found:
-
-| Mode | Behavior when documentation is stale |
-| --- | --- |
-| `check` | Report the affected pages. No agent, model, credentials, documentation writes, or commits. |
-| `propose` | Run the signed-in coding agent in an isolated workspace and create a validated review run. |
-| `auto` | Automatically generate the same isolated review run whenever a configured trigger finds drift. |
-
-Neither authoring mode changes the real documentation before approval. The
-documentation directory does not need to be a Git repository.
-
-Choose when the policy runs:
-
-| Trigger | Installed behavior |
-| --- | --- |
-| `every@Nm` | Poll the provider API every N minutes, for example `every@15m`. |
-| `every@Nh` | Poll the provider API every N hours, for example `every@2h`. |
-| `daily@HH:MM` | A local OS job using launchd, systemd/cron, or Windows Task Scheduler. |
-| `manual` | No automatic trigger; run `doxloop sync now` yourself. |
-
-Scheduled checks compare the documented commit with the provider's branch head.
-When it changed, Doxloop asks the provider for the changed-file list and
-downloads that exact commit into `.doxloop/cache` as isolated evidence. It never
-clones, fetches, commits, pushes, or changes hooks in the user's source checkout.
-
-Scheduled authoring uses the coding agent already signed in on the local
-machine. On macOS, setup smoke-tests a new LaunchAgent in the real scheduler
-context before reporting success, including whether the background process can
-find the agent. Other platforms verify that their native schedule was installed.
-
-### Verify it before depending on it
-
-```bash
-doxloop sync status
-```
-
-Status checks more than whether files exist. It verifies each configured remote,
-the native scheduler registration, the followed source branch, agent
-authentication when needed, evidence-map coverage, the last sync log entry, and
-live drift. On macOS it also reports the LaunchAgent's running state and last
-exit result, so a failed or never-verified schedule is not presented as ready.
-
-### Run one cycle or turn it off
-
-```bash
-doxloop sync now
-doxloop sync history
-doxloop sync review --open
-doxloop sync off
-```
-
-Every cycle checks first. If the documentation is current, it records a quiet
-no-op and does not start an agent. If it is stale, the agent edits a staged copy
-and the actual documentation remains unchanged.
-
-The Proposals page keeps the full review in one workspace:
-
-1. The run list shows what is waiting, why it was drafted, and its decision status.
-2. Page tabs switch between every documentation and supporting-file change.
-3. Rendered comparison supports side-by-side or stacked layouts and can fold
-   unchanged content; source comparison shows line-level context and per-hunk acceptance.
-4. Actions accept one hunk, one page, or the whole proposal, or reject the proposal.
-
-The main UI sections have stable URLs for direct links. Proposal view controls
-switch the comparison between side by side and stacked, hide everything except
-the changes, or open the **source diff** — the line-by-line change with
-surrounding context, differing words emphasized, and an Accept button on each
-individual change.
-
-Acceptance works at three levels: one highlighted change in the source diff,
-every change on one page, or the complete proposal. Supporting files such as the
-evidence map are written automatically once every page has been accepted.
-
-Every accepted selection is checked against the original file fingerprint and
-validated before it is written. A local edit made while review is pending causes
-a visible conflict instead of an overwrite. Partial acceptance applies only the
-selected hunks and keeps the run pending; the synchronization baseline advances
-only after the complete proposal is accepted. Rejected proposals never change
-the documentation.
-
-Authoring also skips when the optional daily run budget is exhausted. Advanced guardrails such as
-`sync.budget.maxRunsPerDay` and `sync.budget.maxMinutes` can be set in
-`.doxloop/project.json`; setup manages the common branch, mode, and trigger
+Doxloop installs a local scheduled job that checks the configured branch
+through the provider's read-only API. When the commit changed, it downloads
+that exact commit as isolated evidence and drafts a proposal under **Review**.
+Monitoring never modifies the product source, never installs repository hooks,
+never needs a model API key, and never publishes. Choose **Check now** to run a
+cycle immediately and **Disable** to remove the schedule while keeping the
 settings.
 
-`sync off` removes the registered schedule but retains the rest of the sync
-policy and remote configuration so setup can be run again.
+Scheduled monitoring needs a Git repository source so the check can run without
+a local checkout. Lock files and snapshots are ignored by default. Test files
+are not, because the authoring workflow reads tests as evidence of supported
+behaviour.
 
 ## Review what changed and why
 
-Doxloop keeps a local record of what it was asked to do and what happened, so a
-page change can be traced back to the request behind it.
+The **Review** page keeps the full review in one place:
 
-```bash
-doxloop history
-doxloop history --page docs/quickstart.mdx
-doxloop history --deployments
-```
+1. The proposal list shows what is waiting, why it was drafted, and its status.
+2. **Changed files** switches between every documentation and supporting-file
+   change, with search.
+3. **Diff layout** switches between side-by-side and stacked comparisons of the
+   rendered pages, and the source view shows line-level context with an
+   **Accept change** button on each individual change.
+4. **Why this change** shows the supporting evidence, reader-facing claims,
+   affected public interfaces, assumptions to verify, and validation results.
+5. **Accept change**, **Accept file**, and **Accept all** apply the selection.
+   **Edit page** lets you change a page directly and record whether the
+   evidence still applies. **Ask agent to revise** regenerates only the
+   selected scope and supersedes the earlier proposal.
+6. **Preview documentation** renders the proposal, **Prepare PR branch**
+   stages the accepted result in a Git branch, and **Push & create PR** opens
+   a pull request.
 
-Each entry stores the request, its outcome, the pages it touched, and whether
-each page was accepted or rejected in review. Pages edited by hand are picked up
-too, so the record matches what is actually on disk.
+Every accepted selection is checked against the original file fingerprint and
+validated before it is written. A local edit made while review is pending
+causes a visible conflict instead of an overwrite. Partial acceptance applies
+only the selected changes and keeps the proposal pending. Rejected proposals
+never change the documentation.
 
-Agent transcripts are **not** recorded—those stay in `.doxloop/ui-job-logs/`,
-and diffs stay in `.doxloop/runs/`. Documentation itself lives in git; the
-history file is a local index that can be deleted and rebuilt at any time.
+Doxloop also keeps a local record of what it was asked to do and what happened.
+**Update history** on the Create and Update pages lists each request, its
+outcome, and the pages it touched. **Deployment history** on the Deploy page
+lists every deployment, including the ones that failed. The record lives in
+`.doxloop/doxloop.db`, which is added to `.gitignore` automatically and is
+readable only by its owner. Agent transcripts are not recorded.
 
-The record is stored in `.doxloop/doxloop.db`, which is added to `.gitignore`
-automatically and readable only by its owner. It needs no installation: Doxloop
-uses the SQLite built into Node.js 22.13 and newer. On older runtimes every
-command works normally and no history is kept. Set `DOXLOOP_NO_HISTORY=1` to
-turn recording off.
+## Preview, validate, and deploy
 
-## Preview, test, and publish
+Doxloop validates pages, navigation, links, metadata, code fences, and page
+depth every time it creates a proposal, and again before every dry run and
+deployment. Validation errors stop a deployment; warnings are reported.
 
-Authoring never publishes automatically.
+Choose **Preview docs** at any time to open the local site. Then open
+**Deploy**:
 
-```bash
-doxloop status
-doxloop test
-doxloop preview --open
-```
+1. Choose **Sign in with browser**. Doxloop uses a device sign-in flow and
+   keeps the token on your machine.
+2. Check the project name, address, destination, and **Visibility**.
+   Deployments are private by default; **Public** means anyone with the URL
+   can open the documentation.
+3. Choose **Dry run** to validate and build the bundle without uploading.
+4. Choose **Deploy to Doxbrix**, then **View deployed docs** when it finishes.
 
-To deploy through [Doxbrix](https://www.doxbrix.com/):
-
-```bash
-doxloop deploy
-```
-
-`deploy` validates the documentation, shows the exact name, slug, destination,
-visibility, page count, and warnings, then asks once before uploading. It offers
-sign-in after you approve the summary. Deployments are private by default.
-
-Use `doxloop settings` to change visibility or the hosted address. A public
-deployment always shows a default-no warning in an interactive terminal. For
-CI, the explicit combination `doxloop deploy --public --yes` runs without
-prompts.
+Authoring never publishes automatically, and configured product sources are
+never included in a deployment.
 
 ## Supported generators
 
 Doxbrix is built in and selected by default. External generators use a separate
-adapter package, so each documentation project installs only what it needs.
+adapter package that Doxloop installs into the documentation project when you
+choose the generator in the setup wizard.
 
 | Generator | Package | Source format | Build output |
 | --- | --- | --- | --- |
@@ -554,11 +331,9 @@ adapter package, so each documentation project installs only what it needs.
 | Jekyll | `@doxbrix/doxloop-generator-jekyll` | Markdown and Liquid | `_site/` |
 | Static HTML | `@doxbrix/doxloop-generator-static` | HTML | `site/` |
 
-Choose a generator during `doxloop init`. Doxbrix is the recommended first
-choice and needs no extra installation. Selecting another framework opens a
-second list and Doxloop offers to install its adapter package. The
+Doxbrix is the recommended first choice. The
 [public generator guide](https://doxloop.sites.doxbrix.com/generators) covers
-installation, selection, inspection, removal, and migration.
+selection, native build requirements, and migration.
 
 ## Guides
 
@@ -566,8 +341,8 @@ installation, selection, inspection, removal, and migration.
 | --- | --- | --- |
 | [Create documentation](https://doxloop.sites.doxbrix.com/create) | [Project configuration](https://doxloop.sites.doxbrix.com/project-configuration) | [Troubleshooting](https://doxloop.sites.doxbrix.com/troubleshooting) |
 | [Update documentation](https://doxloop.sites.doxbrix.com/update) | [Generators](https://doxloop.sites.doxbrix.com/generators) | [Security](https://doxloop.sites.doxbrix.com/security) |
-| [Agent compatibility](https://doxloop.sites.doxbrix.com/agent-compatibility) | [CLI reference](https://doxloop.sites.doxbrix.com/cli) | [CI and automation](https://doxloop.sites.doxbrix.com/ci-automation) |
-| [Review documentation](https://doxloop.sites.doxbrix.com/review) | [Guide screenshots](https://doxloop.sites.doxbrix.com/guide-screenshots) | [Publish documentation](https://doxloop.sites.doxbrix.com/publish) |
+| [Review documentation](https://doxloop.sites.doxbrix.com/review) | [Agent compatibility](https://doxloop.sites.doxbrix.com/agent-compatibility) | [Automation and CI](https://doxloop.sites.doxbrix.com/ci-automation) |
+| [Guide screenshots](https://doxloop.sites.doxbrix.com/guide-screenshots) | [Publish documentation](https://doxloop.sites.doxbrix.com/publish) | |
 
 Browse all documentation at <https://doxloop.sites.doxbrix.com/>.
 

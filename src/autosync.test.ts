@@ -62,18 +62,18 @@ async function makeFixture(): Promise<Fixture> {
     sources: [{ name: 'product', path: '../product' }],
   })
   await writeFile(
-    join(root, 'docs', 'index.mdx'),
+    join(root, 'index.mdx'),
     '---\ntitle: Authentication\ndescription: Understand the current authentication lifetime.\n---\n\nTokens last 3600 seconds.\n',
   )
   await writeFile(
-    join(root, 'docs', 'quickstart.mdx'),
+    join(root, 'quickstart.mdx'),
     '---\ntitle: Quickstart\ndescription: Start the product with its supported command.\n---\n\nRun the start command.\n',
   )
   await writeEvidenceMap(root, {
     schemaVersion: 1,
     pages: {
-      'docs/index.mdx': { sources: [{ source: 'product', paths: ['src/auth.ts'] }] },
-      'docs/quickstart.mdx': {
+      'index.mdx': { sources: [{ source: 'product', paths: ['src/auth.ts'] }] },
+      'quickstart.mdx': {
         sources: [{ source: 'product', paths: ['src/quickstart.ts'] }],
       },
     },
@@ -170,7 +170,7 @@ describe('runSyncNow', () => {
 
   test('manual workspace updates create a review proposal even when automatic sync is check-only', async () => {
     const { root, project } = await makeFixture()
-    const path = join(root, 'docs', 'quickstart.mdx')
+    const path = join(root, 'quickstart.mdx')
     const before = await readFile(path, 'utf8')
 
     const exitCode = await runSyncNow({
@@ -193,7 +193,7 @@ describe('runSyncNow', () => {
           screenshots: 'disabled',
         })
         await writeFile(
-          join(options.root, 'docs', 'quickstart.mdx'),
+          join(options.root, 'quickstart.mdx'),
           '---\ntitle: Quickstart\ndescription: Start the product with a clearer supported command.\n---\n\nRun the supported start command, then verify the service is ready.\n',
         )
         return 0
@@ -242,7 +242,7 @@ describe('runSyncNow', () => {
     const { root, product, project } = await makeFixture()
     await changeSource(product)
     const automatic = { ...project, sync: { ...checkManual, mode: 'auto' as const } }
-    const path = join(root, 'docs', 'index.mdx')
+    const path = join(root, 'index.mdx')
     const before = await readFile(path, 'utf8')
 
     const exitCode = await runSyncNow({
@@ -251,7 +251,7 @@ describe('runSyncNow', () => {
       quiet: true,
       author: async (options) => {
         await writeFile(
-          join(options.root, 'docs', 'index.mdx'),
+          join(options.root, 'index.mdx'),
           '---\ntitle: Updated\ndescription: Understand the updated authentication lifetime.\n---\n\nTokens last 900 seconds.\n',
         )
         const staged = await loadProject(options.root)
@@ -281,7 +281,7 @@ describe('runSyncNow', () => {
       trigger: 'schedule',
       author: async (options) => {
         await writeFile(
-          join(options.root, 'docs', 'index.mdx'),
+          join(options.root, 'index.mdx'),
           '---\ntitle: Proposed\ndescription: Review the proposed authentication lifetime.\n---\n\nTokens last 900 seconds.\n',
         )
         const staged = await loadProject(options.root)
@@ -313,7 +313,7 @@ describe('runSyncNow', () => {
         quiet: true,
         author: async (options) => {
           await writeFile(
-            join(options.root, 'docs', 'index.mdx'),
+            join(options.root, 'index.mdx'),
             '---\ntitle: Safe\ndescription: Review a safe authentication update.\n---\n\nTokens last 900 seconds.\n',
           )
           const staged = await loadProject(options.root)

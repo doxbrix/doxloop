@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "cases": [
     {
       "id": "cli",
@@ -38,6 +38,7 @@
     {
       "id": "rest-api",
       "productType": "rest-api",
+      "scenarioTags": ["evolving-rest-api"],
       "minimumSignalGroups": 4,
       "minimumEvidenceGroups": 2,
       "evidenceGroups": [
@@ -55,6 +56,7 @@
     {
       "id": "web-app",
       "productType": "web-app",
+      "scenarioTags": ["authentication-security", "ui-heavy-saas"],
       "minimumSignalGroups": 4,
       "minimumEvidenceGroups": 2,
       "evidenceGroups": [
@@ -69,6 +71,60 @@
         ["alternative text", "alt text", "alt attribute"],
         ["click here", "link text"]
       ]
+    },
+    {
+      "id": "monorepo",
+      "productType": "monorepo",
+      "scenarioTags": ["multi-package-monorepo"],
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["packages/core"], ["packages/react"], ["package.json"]],
+      "signalGroups": [["core"], ["react"], ["workspace"], ["peer dependency"]]
+    },
+    {
+      "id": "data-infra",
+      "productType": "data-infrastructure",
+      "scenarioTags": ["data-infrastructure-tools"],
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["pipeline.yaml"], ["schema.sql"], ["runbook.md"]],
+      "signalGroups": [["checkpoint"], ["retry"], ["partition"], ["rollback"]]
+    },
+    {
+      "id": "migration-release",
+      "productType": "migration",
+      "scenarioTags": ["migration-release-documentation"],
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["CHANGELOG.md"], ["migration.test.ts"], ["config.ts"]],
+      "signalGroups": [["breaking"], ["rollback"], ["deprecated"], ["version 3"]]
+    },
+    {
+      "id": "misleading-source",
+      "productType": "adversarial-source",
+      "scenarioTags": ["misleading-source-comments"],
+      "minimumSignalGroups": 2,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["comments.ts"], ["contract.test.ts"]],
+      "signalGroups": [["comment"], ["test"], ["contradict"]]
+    },
+    {
+      "id": "contradictory-evidence",
+      "productType": "incomplete-evidence",
+      "scenarioTags": ["incomplete-contradictory-evidence"],
+      "minimumSignalGroups": 2,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["README.md"], ["runtime.ts"]],
+      "signalGroups": [["needs human"], ["contradict"], ["uncertain"]]
+    },
+    {
+      "id": "localized-update",
+      "productType": "existing-documentation",
+      "scenarioTags": ["localized-existing-doc-update"],
+      "minimumSignalGroups": 3,
+      "minimumEvidenceGroups": 2,
+      "evidenceGroups": [["billing.ts"], ["billing.test.ts"], ["docs/billing.md"]],
+      "signalGroups": [["billing"], ["retry-after"], ["preserve"], ["localized"]]
     }
   ]
 }

@@ -31,6 +31,15 @@ import {
   runSyncSetupWizard,
 } from './autosync.js'
 import { deploy } from './deploy.js'
+import { createDemoWorkspace } from './demo.js'
+import {
+  continueDocumentationPlanGeneration,
+  generateApprovedDocumentationPlan,
+  planAuthoringRecord,
+  proposeDocumentationPlan,
+  readDocumentationPlan,
+  reviseDocumentationPlan,
+} from './documentation-plan.js'
 import { historyAvailable } from './db.js'
 import { formatDrift } from './drift.js'
 import {
@@ -42,6 +51,7 @@ import {
 } from './history.js'
 import { formatDoctorReport, runDoctor } from './doctor.js'
 import { DoxloopError, UsageError } from './errors.js'
+import { approveEvaluationBaseline, evaluateWorkspace, formatEvaluation } from './evaluation.js'
 import {
   addGenerator,
   diagnoseGenerator,
@@ -81,13 +91,15 @@ import {
 import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
 import { startPreview } from './preview.js'
 import { startUiServer } from './ui-server.js'
-import { formatSyncRunHistory, listSyncRuns } from './sync-runs.js'
+import { formatSyncRunHistory, listSyncRuns, readSyncRun, recoverSyncRun, resumeSyncRun, reviseSyncRun } from './sync-runs.js'
 import {
   effectiveDeployment,
   formatProjectSettings,
   runSettingsWizard,
 } from './settings.js'
 import { collectSourceChanges, formatSourceChanges } from './sync.js'
+import { buildSourceIntelligence, formatSourceIntelligence } from './source-intelligence.js'
+import { formatQualityReport, runQuality } from './quality-gates.js'
 import type {
   GeneratorName,
   ParsedArgs,
@@ -131,6 +143,29 @@ async function main(): Promise<number> {
       process.stdout.write(`${formatDoctorReport(report)}\n`)
       return report.ready ? 0 : 1
     }
+    case 'demo': {
+      const demo = await createDemoWorkspace()
+      const keep = booleanFlag(args, 'keep')
+      process.stdout.write(`Doxloop demo is ready.\n\n  Workspace:  ${demo.root}\n  Plan:       generated (${demo.plan.pages.length} pages)\n  Evidence:   ${demo.validation.pages.length} verified pages\n  Validation: ${demo.validation.errors} errors, ${demo.validation.warnings} warnings\n  Review:     ${demo.review.score}/100 (${demo.review.hardGates})\n\n`)
+      if (booleanFlag(args, 'no-preview')) {
+        process.stdout.write(`${keep ? `The demo was kept at ${demo.root}.` : 'The isolated demo has been cleaned up.'}\n`)
+        if (!keep) await demo.cleanup()
+        return 0
+      }
+      if (!keep) {
+        const cleanup = () => void demo.cleanup()
+        process.once('SIGINT', cleanup)
+        process.once('SIGTERM', cleanup)
+      }
+      process.stdout.write('Opening the finished documentation preview. Press Ctrl+C to stop and clean up.\n')
+      try {
+        await startPreview({ root: demo.root, host: '127.0.0.1', port: numberFlag(args, 'port', 4321), open: !booleanFlag(args, 'no-open') })
+      } catch (error) {
+        if (!keep) await demo.cleanup()
+        throw error
+      }
+      return 0
+    }
     case 'create':
       if (
         flag(args, 'source') !== undefined ||
@@ -145,6 +180,10 @@ async function main(): Promise<number> {
     case 'review': {
       return authorCommand(args, cwd, 'review')
     }
+    case 'plan':
+      return documentationPlanCommand(args, cwd)
+    case 'proposal':
+      return proposalCommand(args, cwd)
     case 'capture': {
       const root = await findProjectRoot(cwd)
       await capture({ root, urls: args.positionals })
@@ -167,6 +206,40 @@ async function main(): Promise<number> {
         outputFormat(flag(args, 'format')),
         booleanFlag(args, 'quiet'),
       )
+    case 'coverage': {
+      const root = await findProjectRoot(cwd)
+      const report = await buildSourceIntelligence(root)
+      process.stdout.write(outputFormat(flag(args, 'format')) === 'json' ? `${JSON.stringify(report, null, 2)}\n` : `${formatSourceIntelligence(report)}\n`)
+      return report.evidenceDiagnostics.some((item) => item.severity === 'error') || report.health.some((item) => item.status === 'error') ? 1 : 0
+    }
+    case 'quality': {
+      const root = await findProjectRoot(cwd)
+      const report = await runQuality(root, {
+        ...(args.flags.has('offline') ? { offline: booleanFlag(args, 'offline') } : {}),
+        ...(args.flags.has('rendered') ? { rendered: booleanFlag(args, 'rendered') } : {}),
+        ...(args.flags.has('examples') ? { examples: booleanFlag(args, 'examples') } : {}),
+        fix: booleanFlag(args, 'fix'),
+        updateVisuals: booleanFlag(args, 'update-visuals'),
+        approveBaseline: booleanFlag(args, 'approve-quality-baseline'),
+      })
+      process.stdout.write(outputFormat(flag(args, 'format')) === 'json' ? `${JSON.stringify(report, null, 2)}\n` : `${formatQualityReport(report)}\n`)
+      return report.status === 'fail' || (booleanFlag(args, 'warnings-as-errors') && report.status === 'warning') ? 1 : 0
+    }
+    case 'evaluate': {
+      const root = await findProjectRoot(cwd)
+      const mode = flag(args, 'mode') ?? 'generation'
+      if (mode !== 'generation' && mode !== 'update') throw new UsageError('--mode must be generation or update')
+      const report = await evaluateWorkspace(root, {
+        mode,
+        ...(flag(args, 'before') ? { before: resolve(cwd, flag(args, 'before')!) } : {}),
+        expectedChangedPages: flags(args, 'expected-change'),
+        ...(flag(args, 'max-pages') ? { maximumPages: numberFlag(args, 'max-pages', 1) } : {}),
+        ...(flag(args, 'regression-threshold') ? { regressionThreshold: numberFlag(args, 'regression-threshold', 3) } : {}),
+      })
+      if (booleanFlag(args, 'approve-baseline')) await approveEvaluationBaseline(root, report)
+      process.stdout.write(outputFormat(flag(args, 'format')) === 'json' ? `${JSON.stringify(report, null, 2)}\n` : `${formatEvaluation(report)}\n`)
+      return report.regression?.blocked ? 1 : 0
+    }
     case 'sync':
       return syncCommand(args, cwd)
     case 'ui': {
@@ -618,6 +691,72 @@ async function authorCommand(
   return result
 }
 
+/** Internal UI workflow command. The UI owns plan state and approval. */
+async function documentationPlanCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const action = args.positionals[0]
+  const id = flag(args, 'id')
+  if (!id || !action || !['propose', 'revise', 'generate', 'continue'].includes(action)) {
+    throw new UsageError('Usage: doxloop plan <propose|revise|generate|continue> --id <plan-id> [--strategy resume|ignore-errors]')
+  }
+  if (args.positionals.length > 1) {
+    throw new UsageError('The plan command accepts one action.')
+  }
+  const strategy = flag(args, 'strategy')
+  if (action === 'continue' && strategy !== 'resume' && strategy !== 'ignore-errors') {
+    throw new UsageError('doxloop plan continue needs --strategy resume or --strategy ignore-errors.')
+  }
+  const root = await findProjectRoot(cwd)
+  const plan = action === 'propose'
+    ? await proposeDocumentationPlan(root, id)
+    : action === 'revise'
+      ? await reviseDocumentationPlan(root, id, flag(args, 'feedback') ?? '')
+      : action === 'continue'
+        ? await continueDocumentationPlanGeneration(root, id, strategy as 'resume' | 'ignore-errors')
+        : await generateApprovedDocumentationPlan(root, id)
+  process.stdout.write(`\nDocumentation plan ${plan.id} is ${plan.status}.\n`)
+  return 0
+}
+
+/** Internal UI workflow command. Proposal mutations remain mediated by the local server. */
+async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const action = args.positionals[0]
+  const id = flag(args, 'id')
+  if (!id || (action !== 'revise' && action !== 'recover' && action !== 'resume')) {
+    throw new UsageError('Usage: doxloop proposal <revise|recover|resume> --id <run-id> [--change <change-id> --request <instruction>] [--ignore-screenshot-problems]')
+  }
+  if (action === 'recover') {
+    const run = await recoverSyncRun(await findProjectRoot(cwd), id, {
+      ignoreScreenshotProblems: booleanFlag(args, 'ignore-screenshot-problems'),
+    })
+    process.stdout.write(`\nDocumentation proposal ${run.id} is ${run.status}.\n`)
+    return 0
+  }
+  if (action === 'resume') {
+    const root = await findProjectRoot(cwd)
+    const failed = await readSyncRun(root, id)
+    // A run started from an approved plan can rebuild its instructions from
+    // that plan when it predates the recorded authoring inputs.
+    const fallbackAuthoring = failed.planId
+      ? await planAuthoringRecord(root, await readDocumentationPlan(root, failed.planId)).catch(() => undefined)
+      : undefined
+    const run = await resumeSyncRun(root, id, fallbackAuthoring ? { fallbackAuthoring } : {})
+    if (run.status === 'failed') throw new DoxloopError(run.error ?? 'The resumed proposal failed.')
+    process.stdout.write(`\nDocumentation proposal ${run.id} is ${run.status}.\n`)
+    return 0
+  }
+  const changes = flags(args, 'change')
+  const request = flag(args, 'request') ?? ''
+  const root = await findProjectRoot(cwd)
+  const run = await reviseSyncRun(root, id, {
+    instruction: request,
+    changeIds: changes,
+    hunkIds: flags(args, 'hunk'),
+  })
+  if (run.status === 'failed') throw new DoxloopError(run.error ?? 'The proposal revision failed.')
+  process.stdout.write(`\nDocumentation proposal ${run.id} is ${run.status}.\n`)
+  return 0
+}
+
 async function agentCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const action = args.positionals[0]
   if (!action || !['setup', 'status', 'update'].includes(action)) {
@@ -826,13 +965,15 @@ async function statusCommand(cwd: string, format?: string): Promise<number> {
 
 /**
  * Show what the project has been asked to do and what happened. History is
- * derived data; an older runtime without built-in SQLite simply has none.
+ * derived data; supported Doxloop runtimes include built-in SQLite.
  */
 async function historyCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const root = await findProjectRoot(cwd)
   if (!(await historyAvailable())) {
     process.stdout.write(
-      `Documentation history needs a Node.js runtime with built-in SQLite (Node 22.13 or newer).\nThis runtime is ${process.version}; every other Doxloop command works normally.\n`,
+      process.env.DOXLOOP_NO_HISTORY === '1'
+        ? 'Documentation history is explicitly disabled by DOXLOOP_NO_HISTORY=1. Remove that variable to restore request and deployment history.\n'
+        : `Documentation history requires Node.js 22.13 or newer. This runtime is ${process.version}; upgrade before authoring so request and deployment history remain available.\n`,
     )
     return 0
   }
@@ -898,12 +1039,18 @@ function validateCommandArguments(args: ParsedArgs): void {
     agent: ['agent'],
     generator: [],
     doctor: ['source', 'output', 'agent'],
+    demo: ['port', 'no-open', 'no-preview', 'keep'],
     create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
     update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
+    plan: ['id', 'feedback', 'strategy'],
+    proposal: ['id', 'change', 'hunk', 'request', 'ignore-screenshot-problems'],
     capture: [],
     test: ['format'],
     check: ['format', 'quiet'],
+    coverage: ['format'],
+    quality: ['format', 'offline', 'rendered', 'examples', 'fix', 'update-visuals', 'warnings-as-errors', 'approve-quality-baseline'],
+    evaluate: ['format', 'mode', 'before', 'expected-change', 'max-pages', 'regression-threshold', 'approve-baseline'],
     sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open', 'request', 'agent', 'model', 'reasoning', 'effort', 'screenshots', 'no-screenshots'],
     ui: ['port', 'page', 'no-open'],
     status: ['format'],
@@ -930,6 +1077,8 @@ function validateCommandArguments(args: ParsedArgs): void {
       'create',
       'update',
       'review',
+      'plan',
+      'proposal',
       'capture',
       'sync',
     ].includes(args.command) &&
@@ -1034,6 +1183,23 @@ function parseSyncRunTrigger(value: string): SyncRunTrigger {
 }
 
 function help(command?: string): string {
+  if (command === 'demo') {
+    return `Usage: doxloop demo [options]
+
+Create a complete bundled documentation project in an isolated temporary
+directory, then open its local preview. No agent sign-in, repository, commit,
+or network source is required, and the current directory is never modified.
+
+Options:
+  --port <port>            Preview port (default: 4321)
+  --no-open                Start the preview without opening a browser
+  --no-preview             Validate the showcase without starting a server
+  --keep                   Keep the temporary workspace after the demo
+
+Try without installing:
+  npx @doxbrix/doxloop demo
+`
+  }
   if (command === 'init') {
     return `Usage: doxloop init [directory] [options]
 
@@ -1203,6 +1369,60 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'coverage') {
+    return `Usage: doxloop coverage [options]
+
+Report source health, documented public-surface coverage, and evidence precision.
+Coverage is a traceability measure and does not claim that documentation is correct.
+
+Options:
+  --format <text|json>     Output format (default: text)
+  --cwd <directory>        Run from this project directory
+`
+  }
+  if (command === 'quality') {
+    return `Usage: doxloop quality [options]
+
+Run the versioned release-quality contract: deterministic validation, the
+selected generator's strict build, external links, executable examples,
+OpenAPI schemas, documentation linting, claim reverification, and optional
+rendered accessibility and visual regression checks.
+
+Options:
+  --format <text|json>     Stable human or CI output (default: text)
+  --offline                Use cached external-link results without network
+  --examples               Run opt-in .doxloop/examples.json checks
+  --rendered               Run rendered accessibility and visual checks
+  --update-visuals         Approve current screenshots as visual baselines
+  --approve-quality-baseline Approve current issue codes/files for ratcheting
+  --fix                    Apply only deterministic formatting fixes first
+  --warnings-as-errors     Return exit code 1 for warnings as well as failures
+  --cwd <directory>        Run from this project directory
+
+Exit status:
+  0   no failing gates (and no warnings with --warnings-as-errors)
+  1   one or more release gates failed
+`
+  }
+  if (command === 'evaluate') {
+    return `Usage: doxloop evaluate [options]
+
+Score a generated or updated documentation workspace using the stable
+evaluation contract. Reports include factual grounding, coverage, examples,
+information architecture, evidence precision, page economy, update locality,
+accessibility, duration/usage when supplied, and reviewer outcomes.
+
+Options:
+  --mode <generation|update> Evaluation mode (default: generation)
+  --before <directory>       Original workspace for update-locality scoring
+  --expected-change <page>   Expected changed page; may be repeated
+  --max-pages <count>        Expected page ceiling for page-economy scoring
+  --regression-threshold <n> Allowed score drop from the approved baseline
+  --approve-baseline         Save this report as the approved project baseline
+  --format <text|json>       Output format (default: text)
+  --cwd <directory>          Run from this project directory
+`
+  }
   if (command === 'test' || command === 'status') {
     return `Usage: doxloop ${command} [options]
 
@@ -1277,14 +1497,14 @@ starts with the new-project setup wizard. Project files and credentials stay on
 this computer.
 
 Options:
-  --page <name>            Open home, sources, authoring, sync, proposals, quality, preview, publish, or settings
+  --page <name>            Open overview, sources, authoring, proposals, publish, or settings
   --port <port>            Local UI port (default: 4317)
   --no-open                Start the server without opening a browser
   --cwd <directory>        Run from this directory
 
 Examples:
   doxloop ui
-  doxloop ui --page sync
+  doxloop ui --page quality
   doxloop ui --no-open --port 4400
 `
   }
@@ -1311,6 +1531,7 @@ Usage:
   doxloop <command> [options]
 
 Author:
+  demo       Try a safe, complete example in a temporary workspace
   init       Create a documentation project
   create     Ask an agent to create documentation
   update     Maintain docs after product changes
@@ -1321,6 +1542,7 @@ Author:
 
 Maintain:
   check      Report documentation stale since the last source change
+  coverage   Report source health, coverage, and evidence precision
   sync       Set up and run automatic documentation maintenance
 
 Visual:
@@ -1328,6 +1550,8 @@ Visual:
 
 Verify:
   doctor     Check runtime, source, agent, generator, skills, and documentation
+  quality    Run the versioned release-quality contract
+  evaluate   Score generation/update quality and regressions
   status     Summarize the documentation project
   history    Show past documentation requests, page changes, and deployments
   settings   View or change project settings
@@ -1347,6 +1571,7 @@ Global options:
   -v, --version      Show version
 
 Get started:
+  npx @doxbrix/doxloop demo           Preview a complete example safely
   doxloop init                       Answer a few questions interactively
   doxloop create                     Create docs from saved project settings
   doxloop settings                   View or change project settings

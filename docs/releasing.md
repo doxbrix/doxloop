@@ -58,3 +58,41 @@ peer range is updated when necessary, and they are built and published after
 the root package. Unchanged generators keep their existing versions and are
 skipped. A dry run lists the exact package set without changing versions or
 publishing.
+
+## Evaluations
+
+Model-backed evaluations are maintainer tooling, not part of the reader
+workflow. Keep the deterministic typecheck, tests, skill validation, build, and
+package checks on every pull request, and run evaluations from a scheduled or
+manually approved job on a developer machine or self-hosted worker where a
+coding agent is signed in.
+
+```bash
+doxloop evaluate --mode generation --max-pages 12
+doxloop evaluate --mode update --before ../docs-before \
+  --expected-change guides/billing.md --approve-baseline
+pnpm eval:agents -- --agent codex --case cli
+pnpm eval:agents -- --agent codex --model codex=<model> --case localized-update
+pnpm eval:agents -- --mode generation --agent codex --case rest-api
+pnpm eval:agents -- --mode update --agent codex --case localized-update
+```
+
+Review evaluations run the agent read-only. A review case must exit
+successfully, identify the required behaviour signals, cite enough configured
+source evidence, prioritize findings, report a score out of 100, and leave the
+fixture project byte-for-byte unchanged.
+
+Generation and update evaluations instead exercise the same plan-first
+control-center contract as a user: wait for the proposed plan, approve it,
+generate into an isolated proposal, accept that proposal, and score the
+resulting documentation. They mutate only the temporary fixture copy.
+
+Workspace evaluations score factual grounding, unsupported claims, coverage,
+information architecture, executable examples, evidence precision, page
+economy, update locality and preservation, accessibility, and reviewer
+outcomes. Reports compare with `.doxloop/evaluation-baseline.json` and can
+block on a configured regression threshold. The agent matrix runs identical
+fixtures across agents and models, records duration and scores, and compares
+with the reviewed `evals/baseline.json`. Output is written below the
+Git-ignored `evals/results/` directory. Use `--approve-baseline` only after
+reviewing a deliberate improvement or model change.

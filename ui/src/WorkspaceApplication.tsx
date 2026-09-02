@@ -6,25 +6,50 @@ import {
   Panel, Segmented, Select, Stat, Table, Tabs, Textarea, Toggle, parseTerms, splitComma, termText, timeText,
 } from './components'
 import { Icon } from './icons'
+import { settledPlanJobs } from './job-transitions'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
-import type { DeploymentRecord, DiffRow, GeneratorEntry, HistoryChangedPage, HistoryRequest, Proposal, ProposalChange, Source, SourceDiff, SyncConfig, UiJob, UiState } from './types'
+import { countPlanPages, groupPlanPages, planActionLabel, planApprovalControls, type PlanPageFilter } from './plan-review'
+import { workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceRoute } from './routes'
+import { screenshotIntentFromChoice } from './setup-plan'
+import type { CoverageItem, DeploymentRecord, DiffRow, DocumentationPlan, DocumentationPlanPage, GeneratorEntry, HistoryChangedPage, HistoryRequest, Proposal, ProposalChange, Source, SourceDiff, SourceIntelligence, SyncConfig, UiJob, UiState } from './types'
+
+type PlanDiscoverySummary = {
+  suggestedPages: { starter: number; standard: number; comprehensive: number }
+  publicSignals: number
+  generatedAt: string
+  cacheHit: boolean
+}
+
+type ApplicationReadiness = {
+  configured: boolean
+  reachable: boolean
+  status: 'not-configured' | 'ready' | 'authentication-required' | 'unreachable'
+  url?: string
+  message: string
+}
 
 const NAV = [
-  ['sources', 'Sources'],
-  ['authoring', 'Update'],
-  ['proposals', 'Review'],
-  ['publish', 'Deploy'],
-  ['settings', 'Settings'],
+  ['overview', 'Overview', 'overview'],
+  ['sources', 'Sources', 'sources'],
+  ['authoring', 'Update', 'update'],
+  ['proposals', 'Review', 'review'],
+  ['publish', 'Deploy', 'deploy'],
+  ['settings', 'Settings', 'settings'],
 ] as const
+
+const PAGE_TITLES: Record<Page, string> = {
+  overview: 'Overview',
+  sources: 'Sources',
+  authoring: 'Update documentation',
+  proposals: 'Review changes',
+  publish: 'Deploy',
+  settings: 'Settings',
+  'not-found': 'Not found',
+}
 
 const DOXLOOP_LOGO = new URL('../../assets/brand/doxloop-logo-light.png', import.meta.url).href
 
-type Page = typeof NAV[number][0]
-
-function currentPage(): Page {
-  const segment = location.pathname.split('/').filter(Boolean)[0]
-  return NAV.some(([id]) => id === segment) ? segment as Page : 'authoring'
-}
+type Page = ResolvedWorkspaceRoute
 
 type WorkspaceApplicationProps = {
   state: UiState
@@ -48,20 +73,14 @@ export function WorkspaceApplication({
   onErrorDismiss,
 }: WorkspaceApplicationProps) {
   const project = state.project!
-  const [page, setPage] = useState<Page>(currentPage())
+  const [page, setPage] = useState<Page>(() => workspaceRoute(location.pathname))
   const [navOpen, setNavOpen] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem('doxloop.sidebarCollapsed') === 'true'
-    } catch {
-      return false
-    }
-  })
   const [jobStreamConnected, setJobStreamConnected] = useState(false)
   const [readyProposal, setReadyProposal] = useState<Proposal | null>(null)
   const runningJobIds = useRef(new Set(state.jobs.filter((job) => job.status === 'running').map((job) => job.id)))
   const announcedJobIds = useRef(new Set<string>())
   const pendingProposalCount = validRuns(state.runs).filter((run) => OPEN_STATUSES.includes(run.status)).length
+  const authoringNavigationLabel = documentationExists(state) || state.documentationPlan?.status === 'generated' ? 'Update' : 'Create'
 
   const receiveJobs = (jobs: UiJob[]) => {
     const previouslyRunning = runningJobIds.current
@@ -71,8 +90,43 @@ export function WorkspaceApplication({
       previouslyRunning.has(job.id) &&
       !announcedJobIds.current.has(job.id),
     )
+    const settledPlans = settledPlanJobs(jobs, previouslyRunning, announcedJobIds.current)
+    const settledRevisions = jobs.filter((job) =>
+      (job.type.startsWith('proposal:revise:') || job.type.startsWith('proposal:resume:')) &&
+      job.status !== 'running' &&
+      previouslyRunning.has(job.id) &&
+      !announcedJobIds.current.has(job.id),
+    )
+    // Any plan job that stopped running must refresh the persisted plan, even
+    // if this client already handled it once. The announce guard exists to stop
+    // duplicate navigation, and letting it also suppress the refresh is what
+    // leaves the screen stuck on "researching" after the plan is ready.
+    const stoppedPlan = jobs.some((job) =>
+      job.type.startsWith('plan:') && job.status !== 'running' && previouslyRunning.has(job.id),
+    )
     runningJobIds.current = new Set(jobs.filter((job) => job.status === 'running').map((job) => job.id))
     onJobsUpdate(jobs)
+    if (stoppedPlan && settledPlans.length === 0) void reload()
+    for (const job of settledPlans) {
+      announcedJobIds.current.add(job.id)
+      if ((job.type !== 'plan:generate' && job.type !== 'plan:continue') || job.status !== 'succeeded') {
+        void reload()
+        continue
+      }
+      void (async () => {
+        await reload()
+        try {
+          const proposals = await api<Proposal[]>('/api/proposals')
+          const proposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
+          if (!proposal) return
+          setReadyProposal(proposal)
+          history.pushState({}, '', '/proposals')
+          setPage('proposals')
+        } catch (cause) {
+          onError(message(cause))
+        }
+      })()
+    }
     for (const job of completedUpdates) {
       announcedJobIds.current.add(job.id)
       void (async () => {
@@ -80,6 +134,26 @@ export function WorkspaceApplication({
         try {
           const proposals = await api<Proposal[]>('/api/proposals')
           const proposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
+          if (!proposal) return
+          setReadyProposal(proposal)
+          history.pushState({}, '', '/proposals')
+          setPage('proposals')
+        } catch (cause) {
+          onError(message(cause))
+        }
+      })()
+    }
+    for (const job of settledRevisions) {
+      announcedJobIds.current.add(job.id)
+      void (async () => {
+        await reload()
+        if (job.status !== 'succeeded') return
+        try {
+          const resumed = job.type.startsWith('proposal:resume:')
+          const previousId = job.type.slice((resumed ? 'proposal:resume:' : 'proposal:revise:').length)
+          const proposals = await api<Proposal[]>('/api/proposals')
+          // A resumed run keeps its id; a revision replaces the run it revises.
+          const proposal = proposals.find((run) => (resumed ? run.id === previousId : run.revisionOf === previousId) && run.status === 'awaiting-review')
           if (!proposal) return
           setReadyProposal(proposal)
           history.pushState({}, '', '/proposals')
@@ -110,18 +184,10 @@ export function WorkspaceApplication({
   }, [])
 
   useEffect(() => {
-    const listener = () => setPage(currentPage())
+    const listener = () => setPage(workspaceRoute(location.pathname))
     addEventListener('popstate', listener)
     return () => removeEventListener('popstate', listener)
   }, [])
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('doxloop.sidebarCollapsed', String(sidebarCollapsed))
-    } catch {
-      // The preference remains available for this session when storage is unavailable.
-    }
-  }, [sidebarCollapsed])
 
   const jobsRunning = state.jobs.some((job) => job.status === 'running')
   useEffect(() => {
@@ -138,8 +204,8 @@ export function WorkspaceApplication({
     return () => clearInterval(timer)
   }, [jobsRunning])
 
-  const navigate = (next: Page) => {
-    history.pushState({}, '', `/${next}`)
+  const navigate = (next: WorkspaceRoute) => {
+    history.pushState({}, '', workspacePath(next))
     setPage(next)
     setNavOpen(false)
   }
@@ -157,23 +223,8 @@ export function WorkspaceApplication({
     }
   }
 
-  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
-
-    <header class="workspace-navbar">
-      <div class="workspace-navbar-left">
-        <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
-        <div class="workspace-identity" aria-label={`Current workspace: ${project.title}`}>
-          <span class="workspace-identity-mark">{project.title.slice(0, 1).toUpperCase()}</span>
-          <span class="workspace-identity-copy"><strong>{project.title}</strong><small>Local workspace</small></span>
-        </div>
-      </div>
-      <div class="workspace-navbar-actions">
-        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer"><Icon name="help" size={16} />Support</a>
-        <span class="mode-flag navbar-mode-flag"><i />Local</span>
-        <button type="button" class="workspace-preview-primary" onClick={() => void openPreview()}><span><Icon name="preview" size={16} /></span><strong>Preview docs</strong><Icon name="external" size={14} /></button>
-      </div>
-    </header>
 
     {readyProposal && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-ready-title">
@@ -186,31 +237,127 @@ export function WorkspaceApplication({
     </div>}
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
-      <span class="sidebar-section-label">Workspace</span>
+      <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
+      <div class="workspace-identity" aria-label={`Current workspace: ${project.title}`}>
+        <span class="workspace-identity-mark">{project.title.slice(0, 1).toUpperCase()}</span>
+        <span class="workspace-identity-copy"><strong>{project.title}</strong><small>Local workspace</small></span>
+      </div>
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {NAV.slice(0, 4).map(([id, label]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={id} size={17} /><span>{label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
+        {NAV.map(([id, label, icon]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{id === 'authoring' ? authoringNavigationLabel : label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
       </nav>
-      <span class="sidebar-section-label settings-label">Settings</span>
-      <nav class="reference-sidebar-nav settings-sidebar-nav" aria-label="Settings navigation">
-        <button class={page === 'settings' ? 'active' : ''} aria-current={page === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}><Icon name="settings" size={17} /><span>Settings</span></button>
-      </nav>
-      <button type="button" class="sidebar-collapse-button" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
-        <Icon name="chevronRight" size={15} /><span>{sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span>
+      <button type="button" class="new-project-button" onClick={() => alert('Open Doxloop from the product folder you want to document to start a new project.')}>
+        <Icon name="plus" size={16} />
+        <span><strong>New documentation project</strong><small>Open the setup wizard</small></span>
       </button>
     </aside>
 
-    <div class="main">
-      <div class="page">
+    <main class="workspace-main">
+      <header class="workspace-navbar">
+        <button class="workspace-mobile-menu" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="menu" size={18} /></button>
+        <strong class="workspace-screen-title">{PAGE_TITLES[page]}</strong>
+        <span class="workspace-navbar-spacer" />
+        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer"><Icon name="help" size={15} />Support</a>
+        <button type="button" class="workspace-preview-primary" onClick={() => void openPreview()}><Icon name="preview" size={15} /><strong>Preview docs</strong><Icon name="external" size={12} /></button>
+      </header>
+      <div class="main">
+        <div class="page">
         {loading && <div class="loading-bar" />}
         {error && <Banner title="Action failed" detail={error} onClose={onErrorDismiss} />}
-        {page === 'sources' && <SourcesReference state={state} act={act} />}
+        {page === 'overview' && <Overview state={state} navigate={navigate} openPreview={openPreview} />}
+        {page === 'sources' && <SourcesReference state={state} act={act} navigate={navigate} />}
         {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
         {page === 'proposals' && <Proposals state={state} act={act} onError={onError} />}
         {page === 'publish' && <Publish state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
         {page === 'settings' && <Settings state={state} act={act} />}
+        {page === 'not-found' && <NotFound navigate={navigate} />}
+        </div>
       </div>
-    </div>
+    </main>
   </div>
+}
+
+function Overview({ state, navigate, openPreview }: { state: UiState; navigate: (page: WorkspaceRoute) => void; openPreview: () => Promise<void> }) {
+  const project = state.project!
+  const [intelligence, setIntelligence] = useState<SourceIntelligence>()
+  useEffect(() => {
+    let active = true
+    void api<SourceIntelligence>('/api/source-intelligence')
+      .then((report) => { if (active) setIntelligence(report) })
+      .catch(() => undefined)
+    return () => { active = false }
+  }, [project.sources.map((source) => `${source.name}:${source.path}`).join('|')])
+
+  const proposals = validRuns(state.runs)
+  const openProposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
+  const measuredCoverage = intelligence?.coverage.metrics.filter((metric) => metric.status !== 'unknown') ?? []
+  const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
+  const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
+  const coverage = discoveredItems > 0 ? Math.round((documentedItems / discoveredItems) * 100) : 0
+  const hasDocs = documentationExists(state)
+  const plan = state.documentationPlan
+  const deployedSlug = state.effectiveDeployment?.slug ?? project.deployment?.slug
+  const deployedAddress = deployedSlug ? (deployedSlug.includes('.') ? deployedSlug : `${deployedSlug}.doxbrix.site`) : 'Not deployed yet'
+  const latestTimestamp = state.jobs[0]?.finishedAt ?? state.jobs[0]?.startedAt ?? plan?.updatedAt
+  const changed = openProposal?.changes ?? []
+  const added = changed.filter((change) => change.kind === 'added').length
+  const modified = changed.filter((change) => change.kind !== 'added' && change.kind !== 'deleted').length
+  const recentJobs = state.jobs.slice(0, 3)
+  const planPages = plan?.pages.filter((page) => page.priority !== 'later').length ?? 0
+  const pipeline = [
+    { label: 'Sources', sub: `${project.sources.length} connected`, icon: 'sources', route: 'sources' as const, state: project.sources.length ? 'done' : 'idle' },
+    { label: 'Plan', sub: plan ? `Version ${plan.version}` : 'Not started', icon: 'list', route: 'authoring' as const, state: plan ? 'done' : 'idle' },
+    { label: 'Write', sub: hasDocs ? `${state.validation?.pages.length ?? planPages} pages ready` : plan?.status === 'generating' ? 'In progress' : 'Waiting', icon: 'update', route: 'authoring' as const, state: hasDocs ? 'done' : plan?.status === 'generating' ? 'active' : 'idle' },
+    { label: 'Review', sub: openProposal ? 'Awaiting you' : 'No pending changes', icon: 'review', route: 'proposals' as const, state: openProposal ? 'active' : hasDocs ? 'done' : 'idle' },
+    { label: 'Deploy', sub: deployedSlug ? 'Destination ready' : 'Not configured', icon: 'deploy', route: 'publish' as const, state: deployedSlug ? 'done' : 'idle' },
+  ]
+
+  return <section class="overview-page">
+    <div class="overview-heading">
+      <div><h2>Your documentation loop</h2><p>Everything between your source code and the published docs, in one pass.</p></div>
+      <span>{latestTimestamp ? `Last checked ${timeText(latestTimestamp)}` : 'Ready to begin'}</span>
+    </div>
+
+    <section class="pipeline-card" aria-label="Documentation workflow">
+      <div class="pipeline-track"><i /></div>
+      {pipeline.map((step) => <button type="button" key={step.label} class={step.state} onClick={() => navigate(step.route)}>
+        <span><Icon name={step.icon} size={17} /></span>
+        <strong>{step.label}</strong>
+        <small>{step.sub}</small>
+      </button>)}
+    </section>
+
+    <div class="overview-card-grid">
+      <section class={`overview-review-card ${openProposal ? 'attention' : ''}`}>
+        <header><i />{openProposal ? 'Needs your review' : 'Documentation is current'}</header>
+        <div><h3>{openProposal?.summary || (hasDocs ? 'No changes are waiting' : 'Create your first documentation plan')}</h3><p>{openProposal ? `${changed.length} file change${changed.length === 1 ? '' : 's'} · ${added} added · ${modified} modified` : hasDocs ? 'The latest accepted documentation is ready to preview.' : 'Connect sources and let the planning agent propose the right pages.'}</p></div>
+        <footer>
+          <button type="button" class="primary" onClick={() => navigate(openProposal ? 'proposals' : 'authoring')}>{openProposal ? 'Review changes' : hasDocs ? 'Plan an update' : 'Create documentation'}</button>
+          {hasDocs && <button type="button" onClick={() => void openPreview()}>Preview</button>}
+        </footer>
+      </section>
+
+      <section class="overview-metric-card">
+        <header>Coverage</header>
+        <div class="overview-coverage"><span style={{ '--overview-coverage': `${coverage}%` }}><b>{intelligence ? `${coverage}%` : '—'}</b></span><div><h3>{!intelligence ? 'Checking evidence' : coverage >= 90 ? 'Strong coverage' : coverage >= 70 ? 'Good foundation' : coverage >= 40 ? 'Coverage gaps remain' : 'Needs attention'}</h3><p>{intelligence ? `${documentedItems} of ${discoveredItems} discovered items documented` : 'Coverage appears after source discovery completes'}</p></div></div>
+        <button type="button" class="overview-link" onClick={() => navigate('sources')}>See coverage by surface →</button>
+      </section>
+
+      <section class="overview-metric-card">
+        <header>Published site</header>
+        <div class="overview-published"><span><Icon name={deployedSlug ? 'check' : 'publish'} size={16} /></span><div><h3>{deployedSlug ? 'Deployment destination ready' : 'No deployment yet'}</h3><code>{deployedAddress}</code></div></div>
+        <button type="button" class="overview-link" onClick={() => navigate('publish')}>Deployment history →</button>
+      </section>
+    </div>
+
+    <section class="overview-activity-card">
+      <header><strong>Recent activity</strong><span>Agents run quietly in the background</span></header>
+      {recentJobs.length ? recentJobs.map((job) => <div class="overview-activity-row" key={job.id}>
+        <span class={job.status}><Icon name={job.type.startsWith('deploy') ? 'deploy' : job.type.startsWith('plan') ? 'list' : job.type.includes('proposal') ? 'review' : 'update'} size={14} /></span>
+        <p><strong>{workflowActivityLabel(job.type)}</strong>{job.status === 'running' ? ' is running' : job.status === 'succeeded' ? ' completed successfully' : job.status === 'failed' ? ' needs attention' : ` was ${job.status}`}</p>
+        <time>{timeText(job.finishedAt ?? job.startedAt)}</time>
+      </div>) : <div class="overview-activity-row empty"><span><Icon name="check" size={14} /></span><p>Your workspace is ready. Activity will appear here after the first run.</p><time>Now</time></div>}
+    </section>
+  </section>
 }
 
 function Banner({ title, detail, onClose }: { title: string; detail: string; onClose: () => void }) {
@@ -219,6 +366,10 @@ function Banner({ title, detail, onClose }: { title: string; detail: string; onC
     <div><strong>{title}</strong><span>{detail}</span></div>
     <button aria-label="Dismiss" onClick={onClose}><Icon name="close" size={14} /></button>
   </div>
+}
+
+function NotFound({ navigate }: { navigate: (page: WorkspaceRoute) => void }) {
+  return <div class="workspace-not-found"><span><Icon name="alert" size={24} /></span><h1>Workspace page not found</h1><p>This URL does not match an available Doxloop workspace.</p><Button tone="primary" onClick={() => navigate('authoring')}>Open documentation update</Button></div>
 }
 
 function repositoryProvider(repository: string): 'github' | 'gitlab' | 'git' {
@@ -267,24 +418,28 @@ function RepositoryFolderSelect({ value, directories, loading, connected, onChan
 }
 
 
-function SourcesReference({ state, act }: { state: UiState; act: Action }) {
+function SourcesReference({ state, act, navigate }: { state: UiState; act: Action; navigate: (page: WorkspaceRoute) => void }) {
   const project = state.project!
   const [menuOpen, setMenuOpen] = useState(false)
   const [dialog, setDialog] = useState<'source' | 'openapi' | null>(null)
-  const [monitoringSource, setMonitoringSource] = useState<Source | null>(null)
+  const [monitoringOpen, setMonitoringOpen] = useState(false)
+  const [scopeSource, setScopeSource] = useState<Source | null>(null)
   const [sourceMode, setSourceMode] = useState<'git' | 'local'>('git')
   const [openapiMode, setOpenapiMode] = useState<'file' | 'url'>('file')
-  const [add, setAdd] = useState({ repository: '', branch: 'main', subdirectory: '', path: '', authMethod: 'automatic', gitUsername: '', gitSecret: '', specContent: '', fileName: '' })
+  const [add, setAdd] = useState({ repository: '', branch: 'main', subdirectory: '', path: '', authMethod: 'automatic', gitUsername: '', gitSecret: '', specContent: '', fileName: '', space: '', routePrefix: '', navigationGroup: '', sharedPages: '' })
+  const [intelligence, setIntelligence] = useState<SourceIntelligence>()
   const [branches, setBranches] = useState<string[]>([])
   const [directories, setDirectories] = useState<string[]>([])
   const [head, setHead] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [foldersLoading, setFoldersLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [checkingSource, setCheckingSource] = useState('')
+  const [coverageMetricId, setCoverageMetricId] = useState<string>()
   const fileInput = useRef<HTMLInputElement>(null)
   const filtered = project.sources
   const resetAdd = () => {
-    setAdd({ repository: '', branch: 'main', subdirectory: '', path: '', authMethod: 'automatic', gitUsername: '', gitSecret: '', specContent: '', fileName: '' })
+    setAdd({ repository: '', branch: 'main', subdirectory: '', path: '', authMethod: 'automatic', gitUsername: '', gitSecret: '', specContent: '', fileName: '', space: '', routePrefix: '', navigationGroup: '', sharedPages: '' })
     setBranches([])
     setDirectories([])
     setHead('')
@@ -296,6 +451,12 @@ function SourcesReference({ state, act }: { state: UiState; act: Action }) {
     setMenuOpen(false)
     setDialog(next)
   }
+  const loadIntelligence = async () => setIntelligence(await api<SourceIntelligence>('/api/source-intelligence'))
+  useEffect(() => {
+    let active = true
+    void api<SourceIntelligence>('/api/source-intelligence').then((report) => { if (active) setIntelligence(report) }).catch(() => undefined)
+    return () => { active = false }
+  }, [project.sources.map((source) => `${source.name}:${source.path}`).join('|')])
   const closeDialog = () => setDialog(null)
   const connectRepository = async () => {
     if (!add.repository.trim() || connecting) return
@@ -337,11 +498,12 @@ function SourcesReference({ state, act }: { state: UiState; act: Action }) {
     const name = rawName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
     setSaving(true)
     try {
+      const scope = add.space.trim() || add.routePrefix.trim() || add.navigationGroup.trim() || add.sharedPages.trim() ? { space: add.space.trim() || undefined, routePrefix: add.routePrefix.trim() || undefined, navigationGroup: add.navigationGroup.trim() || undefined, sharedPages: splitComma(add.sharedPages) } : undefined
       const body = dialog === 'openapi'
-        ? { kind: 'openapi', name, path: openapiMode === 'url' ? add.path : undefined, specContent: openapiMode === 'file' ? add.specContent : undefined }
+        ? { kind: 'openapi', name, path: openapiMode === 'url' ? add.path : undefined, specContent: openapiMode === 'file' ? add.specContent : undefined, scope }
         : sourceMode === 'git'
-          ? { kind: 'git', name, ...add }
-          : { kind: 'directory', name, path: add.path }
+          ? { kind: 'git', name, ...add, scope }
+          : { kind: 'directory', name, path: add.path, scope }
       const result = await act(() => post('/api/sources', body), 'Source added')
       if (result !== undefined) closeDialog()
     } finally {
@@ -350,291 +512,850 @@ function SourcesReference({ state, act }: { state: UiState; act: Action }) {
   }
   const remoteSourceCount = filtered.filter((source) => Boolean(source.remote)).length
   const openapiSourceCount = filtered.filter((source) => source.kind === 'openapi').length
+  const measuredCoverage = intelligence?.coverage.metrics.filter((metric) => metric.status !== 'unknown') ?? []
+  const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
+  const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
+  const overallCoverage = discoveredItems > 0 ? Math.round((documentedItems / discoveredItems) * 100) : null
+  const unknownCoverageCount = intelligence?.coverage.metrics.filter((metric) => metric.status === 'unknown').length ?? 0
+  const coverageAssessment = overallCoverage === null ? 'Awaiting discovery' : overallCoverage >= 90 ? 'Strong coverage' : overallCoverage >= 70 ? 'Good foundation' : overallCoverage >= 40 ? 'Coverage gaps remain' : 'Needs attention'
+  const selectedCoverageMetric = intelligence?.coverage.metrics.find((metric) => metric.id === coverageMetricId)
   return <div class="sources-reference-page">
-    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div>} />
+    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<><Button icon="bell" onClick={() => setMonitoringOpen(true)}>Monitoring</Button><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div></>} />
     <section class="sources-library">
       <header class="sources-library-header">
         <div><h2>Connected sources</h2><p>Evidence Doxloop can read when it creates and updates your documentation.</p></div>
         <div class="sources-library-summary"><span><strong>{filtered.length}</strong> connected</span><i /><span><strong>{remoteSourceCount}</strong> remote</span><i /><span><strong>{openapiSourceCount}</strong> API</span></div>
       </header>
-      {filtered.length ? <div class="sources-card-grid">{filtered.map((source) => <article class="source-card" key={source.name}>
-        <div class="source-card-top"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'}</em></div>
-        <div class="source-card-copy"><strong>{source.name}</strong><small>{source.remote ? source.remote.repository : source.path}</small></div>
-        <footer><span class="source-connection-status"><i />Available</span><span class="source-row-menu"><button type="button" class={`monitoring-button ${project.sync.on.length ? 'monitoring-active' : ''}`} aria-label={`Configure monitoring for ${source.name}`} title="Configure monitoring" onClick={() => setMonitoringSource(source)}><Icon name="bell" size={17} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={17} /></button></span></footer>
-      </article>)}<button type="button" class="sources-add-card" onClick={() => openDialog('source')}><span><Icon name="plus" size={18} /></span><strong>Add another source</strong><small>Connect source code or an API specification.</small></button></div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
+      {filtered.length ? <div class="sources-library-table" role="table" aria-label="Connected sources">
+        <div class="sources-library-table-head" role="row">
+          <span role="columnheader">Source</span><span role="columnheader">Type</span><span role="columnheader">Details</span><span role="columnheader">Status</span><span role="columnheader"><span class="sr-only">Actions</span></span>
+        </div>
+        <div class="sources-library-table-body" role="rowgroup">{filtered.map((source) => {
+          const health = intelligence?.health.find((item) => item.name === source.name)
+          const type = source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'
+          const detail = health?.openapi
+            ? `v${health.openapi.version} · ${health.openapi.operationCount} operations · ${health.openapi.schemas.length} schemas`
+            : health?.branch
+              ? `${health.branch}${health.subdirectory ? ` / ${health.subdirectory}` : ''}${health.revision ? ` · ${health.revision.slice(0, 10)}` : ''}`
+              : source.scope?.routePrefix
+                ? `Owns /${source.scope.routePrefix.replace(/^\//, '')}`
+                : 'Project-wide evidence'
+          const status = health ? health.status === 'healthy' ? 'Available' : health.status === 'warning' ? 'Needs attention' : 'Unavailable' : 'Checking…'
+          return <div class="sources-library-row" role="row" key={source.name}>
+            <div class="sources-library-name" role="cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small title={source.remote ? source.remote.repository : source.path}>{source.remote ? source.remote.repository : source.path}</small></span></div>
+            <div role="cell"><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{type}</em></div>
+            <div class="sources-library-detail" role="cell"><strong>{detail}</strong>{source.scope?.routePrefix && health?.openapi && <small>Owns /{source.scope.routePrefix.replace(/^\//, '')}</small>}{health?.status === 'error' && <small class="source-health-error">{health.summary}</small>}</div>
+            <div class="sources-library-status" role="cell"><span class={`source-connection-status ${health?.status ?? ''}`} title={health ? `Checked ${new Date(health.checkedAt).toLocaleString()}${health.lastMonitoringAt ? ` · Last monitoring check ${new Date(health.lastMonitoringAt).toLocaleString()}` : ''}` : ''}><i />{status}</span>{health && <small>Checked {new Date(health.checkedAt).toLocaleDateString()}</small>}</div>
+            <span class="source-row-menu" role="cell"><button type="button" aria-label={`Test ${source.name}`} title="Test connection" disabled={checkingSource === source.name} onClick={() => { setCheckingSource(source.name); void act(() => post(`/api/sources/${encodeURIComponent(source.name)}/test`), 'Source connection checked').then(() => loadIntelligence()).finally(() => setCheckingSource('')) }}><Icon name="refresh" size={18} /></button><button type="button" aria-label={`Configure documentation ownership for ${source.name}`} title="Documentation ownership" onClick={() => setScopeSource(source)}><Icon name="map" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span>
+          </div>
+        })}</div>
+      </div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
     </section>
-    {monitoringSource && <MonitoringDialog state={state} source={monitoringSource} act={act} onClose={() => setMonitoringSource(null)} />}
+    {intelligence && <section class="source-intelligence-panel">
+      <header><div><h2>Documentation coverage</h2><p>See which discovered product surfaces are supported by documentation evidence.</p></div><span class={intelligence.evidenceDiagnostics.length ? 'attention' : 'precise'}>{intelligence.evidenceDiagnostics.length ? `${intelligence.evidenceDiagnostics.length} evidence notes` : 'Evidence looks precise'}</span></header>
+      <div class="coverage-overview">
+        <aside class="coverage-summary-card">
+          <div class="coverage-score" style={{ '--coverage': `${overallCoverage ?? 0}%` }} aria-label={overallCoverage === null ? 'Coverage unavailable' : `${overallCoverage}% overall documentation coverage`}><span><strong>{overallCoverage === null ? '—' : `${overallCoverage}%`}</strong><small>overall</small></span></div>
+          <div class="coverage-summary-copy"><span class={`coverage-assessment ${overallCoverage !== null && overallCoverage < 70 ? 'attention' : ''}`}>{coverageAssessment}</span><h3>{documentedItems} of {discoveredItems} discovered items are documented</h3><p>Coverage measures traceable evidence across all connected sources.</p></div>
+          <dl class="coverage-summary-stats"><div><dt>Documented</dt><dd>{documentedItems}</dd></div><div><dt>Not covered</dt><dd>{Math.max(discoveredItems - documentedItems, 0)}</dd></div><div><dt>No items found</dt><dd>{unknownCoverageCount}</dd></div></dl>
+          <p class="source-coverage-disclaimer">{intelligence.coverage.disclaimer}</p>
+        </aside>
+        <div class="coverage-breakdown">
+          <div class="coverage-breakdown-heading"><div><h3>Coverage by surface</h3><p>Each percentage is based on items found during source discovery.</p></div><span>{measuredCoverage.length} measured</span></div>
+          <div class="source-coverage-list">{intelligence.coverage.metrics.map((metric) => {
+            const measured = metric.status !== 'unknown'
+            const discoveryTitle = 'Discovery completed, but no items in this category were found in the connected sources.'
+            const gaps = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human').length
+            return <div class={`source-coverage-row ${measured ? '' : 'unknown'}`} key={metric.id} title={measured ? metric.denominator : `${discoveryTitle} ${metric.denominator}`}>
+              <div class="source-coverage-row-heading"><span>{metric.label}</span>{measured ? <span><strong>{metric.percent}%</strong><small>{metric.documented} of {metric.total}</small></span> : <em>No items discovered</em>}</div>
+              <div class="source-coverage-track" role="progressbar" aria-label={`${metric.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={measured ? metric.percent : undefined}><i style={{ width: measured ? `${metric.percent}%` : '0%' }} /></div>
+              {(gaps > 0 || metric.excluded > 0) && <button type="button" class="coverage-review-action" onClick={() => setCoverageMetricId(metric.id)}>{gaps > 0 ? `Review ${gaps} ${gaps === 1 ? 'gap' : 'gaps'}` : `Review ${metric.excluded} excluded`}</button>}
+            </div>
+          })}</div>
+        </div>
+      </div>
+      {intelligence.evidenceDiagnostics.length > 0 && <details class="source-evidence-notes"><summary>Review evidence precision</summary>{intelligence.evidenceDiagnostics.slice(0, 8).map((item) => <div key={`${item.code}:${item.page}:${item.identifier}`}><strong>{item.page}</strong><p>{item.message}</p><small>{item.suggestion}</small></div>)}</details>}
+    </section>}
+    {monitoringOpen && <MonitoringDialog state={state} act={act} onClose={() => setMonitoringOpen(false)} />}
+    {selectedCoverageMetric && <CoverageResolutionDialog
+      metric={selectedCoverageMetric}
+      pages={intelligence?.coverage.pages ?? []}
+      act={act}
+      onClose={() => setCoverageMetricId(undefined)}
+      onReport={setIntelligence}
+      onCreateUpdate={async (items) => {
+        const selectedGaps = items.map((item) => `- ${item.label}${item.source ? ` — source: ${item.source}` : ''}${item.path ? `, path: ${item.path}` : ''}`).join('\n')
+        const result = await act(() => post('/api/plans', {
+          mode: 'update',
+          scope: 'custom',
+          clarificationMode: 'review',
+          request: `Create one focused documentation update plan that resolves these ${items.length} selected coverage ${items.length === 1 ? 'gap' : 'gaps'}:\n${selectedGaps}\nMap each public surface or reader outcome to the most appropriate reader-facing page and preserve unrelated documentation.`,
+        }), 'Coverage update planning started')
+        if (result !== undefined) navigate('authoring')
+        return result !== undefined
+      }}
+    />}
+    {scopeSource && <SourceScopeDialog source={scopeSource} act={act} onClose={() => setScopeSource(null)} />}
     {dialog && <div class="sources-modal-scrim" onClick={closeDialog}><section class={`sources-reference-dialog ${dialog}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
       <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
       {dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><Input value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
+      <details class="source-scope-fields"><summary>Documentation ownership (optional)</summary><div><Field label="Route prefix"><Input value={add.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setAdd({ ...add, routePrefix: event.currentTarget.value })} /></Field><Field label="Navigation group"><Input value={add.navigationGroup} placeholder="API reference" onInput={(event) => setAdd({ ...add, navigationGroup: event.currentTarget.value })} /></Field><Field label="Space"><Input value={add.space} placeholder="Developers" onInput={(event) => setAdd({ ...add, space: event.currentTarget.value })} /></Field><Field label="Shared pages" hint="Comma-separated page paths or globs"><Input value={add.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setAdd({ ...add, sharedPages: event.currentTarget.value })} /></Field></div></details>
       <footer><Button onClick={closeDialog}>Cancel</Button><Button tone="primary" busy={saving} disabled={dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()} onClick={() => void addSource()}>Add source</Button></footer>
     </section></div>}
   </div>
 }
 
-function Sources({ state, act }: { state: UiState; act: Action }) {
-  const project = state.project!
-  const [selected, setSelected] = useState(project.sources[0]?.name ?? '')
-  const [adding, setAdding] = useState(project.sources.length === 0)
-  const [add, setAdd] = useState({ kind: 'directory', name: 'product', path: '', repository: '', branch: 'main', subdirectory: '', authMethod: 'automatic', gitUsername: '', gitSecret: '' })
-  const [addBranches, setAddBranches] = useState<string[]>([])
-  const [addDirectories, setAddDirectories] = useState<string[]>([])
-  const [addHead, setAddHead] = useState('')
-  const [testingAdd, setTestingAdd] = useState(false)
-  const [loadingAddFolders, setLoadingAddFolders] = useState(false)
-  const source = project.sources.find((item) => item.name === selected) ?? project.sources[0]
-  const connectAddRepository = async () => {
-    setTestingAdd(true)
-    try {
-      const result = await act(() => post<{ repository: string; branch: string; head: string; branches: string[] }>('/api/setup/git/test', add), 'Repository connected', false)
-      if (result) {
-        setAdd((current) => ({ ...current, repository: result.repository, branch: result.branch }))
-        setAddBranches(result.branches)
-        setAddHead(result.head)
-        setLoadingAddFolders(true)
-        const folders = await act(() => post<{ directories: string[] }>('/api/setup/git/folders', { ...add, repository: result.repository, branch: result.branch, subdirectory: '' }), undefined, false)
-        setAddDirectories(folders?.directories ?? [])
-      }
-    } finally {
-      setLoadingAddFolders(false)
-      setTestingAdd(false)
-    }
-  }
-  const selectAddBranch = async (branch: string) => {
-    setAdd((current) => ({ ...current, branch, subdirectory: '' }))
-    setLoadingAddFolders(true)
-    try {
-      const folders = await act(() => post<{ directories: string[] }>('/api/setup/git/folders', { ...add, branch, subdirectory: '' }), undefined, false)
-      setAddDirectories(folders?.directories ?? [])
-    } finally {
-      setLoadingAddFolders(false)
-    }
-  }
-  return <>
-    <PageHeader
-      title="Sources"
-      description="Connect the read-only sources Doxloop uses to create and maintain documentation."
-      actions={<Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add source</Button>}
-    />
-    <div class="stat-row three">
-      <Stat label="Connected sources" value={project.sources.length} detail="Read-only access" />
-      <Stat label="Remote monitored" value={project.sources.filter((item) => item.remote).length} detail="Git connections" />
-      <Stat label="API specifications" value={project.sources.filter((item) => item.kind === 'openapi').length} detail="OpenAPI documents" />
-    </div>
+function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCreateUpdate }: {
+  metric: SourceIntelligence['coverage']['metrics'][number]
+  pages: string[]
+  act: Action
+  onClose: () => void
+  onReport: (report: SourceIntelligence) => void
+  onCreateUpdate: (items: CoverageItem[]) => Promise<boolean>
+}) {
+  const attentionItems = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human')
+  const resolvedItems = metric.items.filter((item) => item.state !== 'uncovered' && item.state !== 'needs-human')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [planning, setPlanning] = useState(false)
+  const selectedItems = attentionItems.filter((item) => selectedIds.includes(item.id))
+  const allSelected = attentionItems.length > 0 && selectedItems.length === attentionItems.length
 
-    {adding && <Panel title="Add a source" description="Source paths are validated to stay outside the documentation content directory." actions={<Button size="sm" onClick={() => setAdding(false)}>Cancel</Button>}>
-      <div class="form-grid">
-        <Field label="Type"><Select value={add.kind} onChange={(event) => setAdd({ ...add, kind: event.currentTarget.value })}><option value="directory">Source directory</option><option value="git">Git repository</option><option value="openapi">OpenAPI specification</option></Select></Field>
-        <Field label="Source"><Input value={add.name} onInput={(event) => setAdd({ ...add, name: event.currentTarget.value })} /></Field>
-        {add.kind !== 'git' && <Field label={add.kind === 'openapi' ? 'File path or URL' : 'Directory path'} wide><Input value={add.path} placeholder={add.kind === 'openapi' ? 'openapi.yaml or https://…' : '../product'} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /></Field>}
-        {add.kind === 'git' && <>
-          <Field label="Repository address"><div class="path-input"><Input value={add.repository} placeholder="https://git.example.com/team/product.git" onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setAddHead(''); setAddBranches([]); setAddDirectories([]) }} /><Button icon="key" busy={testingAdd} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && !add.gitSecret)} onClick={() => void connectAddRepository()}>Connect</Button></div></Field>
-          <Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setAddHead('') }}><option value="automatic">Public or already connected</option><option value="credentials">Private repository</option></Select></Field>
-          {add.authMethod === 'credentials' && <><Field label="Account username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => setAdd({ ...add, gitUsername: event.currentTarget.value })} /></Field><Field label="Password or access key"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setAddHead('') }} /></Field></>}
-          <Field label="Branch" hint={addBranches.length ? `${addBranches.length} available` : 'Connect the repository first.'}><Select value={add.branch} disabled={!addBranches.length || loadingAddFolders} onChange={(event) => void selectAddBranch(event.currentTarget.value)}>{addBranches.length ? addBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>) : <option>Connect repository first</option>}</Select></Field>
-          <RepositoryFolderSelect value={add.subdirectory} directories={addDirectories} loading={loadingAddFolders} connected={Boolean(addHead)} onChange={(subdirectory) => setAdd({ ...add, subdirectory })} />
-        </>}
+  useEffect(() => {
+    const availableIds = new Set(attentionItems.map((item) => item.id))
+    setSelectedIds((current) => current.filter((id) => availableIds.has(id)))
+  }, [metric])
+
+  const resolve = async (item: CoverageItem, action: string, page?: string, reason?: string) => {
+    const report = await act(() => post<SourceIntelligence>('/api/coverage/resolve', { id: item.id, action, page, reason }), 'Coverage updated')
+    if (report) onReport(report)
+  }
+  const toggleSelected = (item: CoverageItem, selected: boolean) => {
+    setSelectedIds((current) => selected ? [...new Set([...current, item.id])] : current.filter((id) => id !== item.id))
+  }
+  const createPlan = async () => {
+    if (!selectedItems.length) return
+    setPlanning(true)
+    try { await onCreateUpdate(selectedItems) } finally { setPlanning(false) }
+  }
+  return <div class="sources-modal-scrim coverage-resolution-scrim" onClick={onClose}>
+    <section class="coverage-resolution-dialog" role="dialog" aria-modal="true" aria-labelledby="coverage-resolution-title" onClick={(event) => event.stopPropagation()}>
+      <header><div><span class="coverage-dialog-eyebrow">Review documentation gaps</span><h2 id="coverage-resolution-title">{metric.label}</h2><p>Choose everything you want to document, then create one update plan.</p></div><button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button></header>
+      {attentionItems.length > 0 && <div class="coverage-selection-toolbar">
+        <label><input type="checkbox" checked={allSelected} onChange={(event) => setSelectedIds(event.currentTarget.checked ? attentionItems.map((item) => item.id) : [])} /><span>Select all {attentionItems.length} {attentionItems.length === 1 ? 'gap' : 'gaps'}</span></label>
+        <strong>{selectedItems.length} selected</strong>
+      </div>}
+      <div class="coverage-resolution-list">
+        {attentionItems.length > 0 ? <section class="coverage-gap-section" aria-label="Gaps needing attention"><div class="coverage-list-heading"><strong>Needs attention</strong><small>Select gaps to add to this update</small></div>{attentionItems.map((item) => <CoverageResolutionItem key={item.id} item={item} pages={pages} selected={selectedIds.includes(item.id)} onSelectedChange={(selected) => toggleSelected(item, selected)} onResolve={resolve} />)}</section> : <div class="coverage-gaps-empty"><Icon name="check" size={22} /><strong>Everything is resolved</strong><small>There are no documentation gaps in this category.</small></div>}
+        {resolvedItems.length > 0 && <details class="coverage-resolved-items"><summary>{resolvedItems.length} already resolved</summary><div>{resolvedItems.map((item) => <CoverageResolutionItem key={item.id} item={item} pages={pages} selected={false} onSelectedChange={() => undefined} onResolve={resolve} />)}</div></details>}
       </div>
-      <div class="form-actions"><Button tone="primary" disabled={add.kind === 'git' ? !add.repository.trim() || !add.branch.trim() || !addHead || loadingAddFolders : !add.path.trim()} onClick={() => void act(() => post('/api/sources', add), 'Source added').then(() => setAdding(false))}>Add source</Button></div>
-    </Panel>}
-
-    {project.sources.length === 0
-      ? <Panel flush><Empty icon="sources" title="No sources connected" detail="Add a directory, Git repository, or OpenAPI specification." action={<Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add source</Button>} /></Panel>
-      : <>
-        <Panel title="Connected sources" flush>
-          <Table head={<><th>Name</th><th>Type</th><th>Location</th><th>Monitoring</th><th class="right" /></>}>
-            {project.sources.map((item) => <tr key={item.name} class={`selectable ${item.name === source?.name ? 'selected' : ''}`} onClick={() => setSelected(item.name)}>
-              <td><div class="cell-lead"><Icon name={item.kind === 'openapi' ? 'api' : 'folder'} size={15} /><strong>{item.name}</strong></div></td>
-              <td class="muted-cell">{item.kind === 'openapi' ? 'OpenAPI' : item.remote ? 'Git repository' : 'Directory'}</td>
-              <td><code class="mono">{item.remote ? `${item.remote.repository}@${item.remote.branch}${item.remote.subdirectory ? `/${item.remote.subdirectory}` : ''}` : item.path}</code></td>
-              <td>{item.remote ? <Badge tone="info" icon="cloud">{gitServiceLabel(item.remote.repository, item.remote.provider)}</Badge> : <span class="muted-cell">Local only</span>}</td>
-              <td class="right"><Button size="sm" tone="ghost" onClick={(event) => { event.stopPropagation(); if (confirm(`Remove ${item.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(item.name)}`), 'Source removed') }}><Icon name="trash" size={14} /></Button></td>
-            </tr>)}
-          </Table>
-        </Panel>
-        {source && <SourceDetail key={source.name} source={source} act={act} />}
-      </>}
-  </>
+      <footer><div class="coverage-plan-summary"><strong>{selectedItems.length ? `${selectedItems.length} ${selectedItems.length === 1 ? 'gap' : 'gaps'} ready to plan` : 'No gaps selected'}</strong><small>{selectedItems.length ? 'One plan will cover your full selection.' : 'Select one or more gaps to continue.'}</small></div><div><Button onClick={onClose}>Close</Button><Button tone="primary" busy={planning} disabled={!selectedItems.length} onClick={() => void createPlan()}>Create update plan{selectedItems.length ? ` (${selectedItems.length})` : ''}</Button></div></footer>
+    </section>
+  </div>
 }
 
-function SourceDetail({ source, act }: { source: Source; act: Action }) {
-  const [remote, setRemote] = useState(() => ({
-    provider: 'git' as const,
-    repository: source.remote?.provider === 'github' ? `https://github.com/${source.remote.repository}.git` : source.remote?.repository ?? '',
-    branch: source.remote?.branch ?? 'main',
-    subdirectory: source.remote?.subdirectory ?? '',
-    authMethod: 'automatic',
-    gitUsername: '',
-    gitSecret: '',
-  }))
-  const [remoteBranches, setRemoteBranches] = useState<string[]>([])
-  const [remoteDirectories, setRemoteDirectories] = useState<string[]>([])
-  const [remoteHead, setRemoteHead] = useState('')
-  const [remoteTesting, setRemoteTesting] = useState(false)
-  const [remoteFoldersLoading, setRemoteFoldersLoading] = useState(false)
-  const [location, setLocation] = useState({ kind: source.kind ?? 'directory', path: source.path })
-  const [tab, setTab] = useState<'location' | 'remote'>(source.remote ? 'remote' : 'location')
-  const connectRemote = async () => {
-    setRemoteTesting(true)
+function CoverageResolutionItem({ item, pages, selected, onSelectedChange, onResolve }: {
+  item: CoverageItem
+  pages: string[]
+  selected: boolean
+  onSelectedChange: (selected: boolean) => void
+  onResolve: (item: CoverageItem, action: string, page?: string, reason?: string) => Promise<void>
+}) {
+  const [page, setPage] = useState(item.page ?? item.suggestedPage ?? pages[0] ?? '')
+  const [reason, setReason] = useState(item.reason ?? '')
+  const [busy, setBusy] = useState(false)
+  const [resolutionMode, setResolutionMode] = useState<'link' | 'exclude' | null>(null)
+  const run = async (action: string) => {
+    setBusy(true)
     try {
-      const result = await act(() => post<{ repository: string; branch: string; head: string; branches: string[] }>('/api/setup/git/test', remote), 'Repository connected', false)
-      if (result) {
-        setRemote((current) => ({ ...current, repository: result.repository, branch: result.branch }))
-        setRemoteBranches(result.branches)
-        setRemoteHead(result.head)
-        setRemoteFoldersLoading(true)
-        const folders = await act(() => post<{ directories: string[] }>('/api/setup/git/folders', { ...remote, repository: result.repository, branch: result.branch, subdirectory: '' }), undefined, false)
-        setRemoteDirectories(folders?.directories ?? [])
-      }
-    } finally {
-      setRemoteFoldersLoading(false)
-      setRemoteTesting(false)
-    }
+      await onResolve(item, action, page, reason)
+      setResolutionMode(null)
+    } finally { setBusy(false) }
   }
-  const selectRemoteBranch = async (branch: string) => {
-    setRemote((current) => ({ ...current, branch, subdirectory: '' }))
-    setRemoteFoldersLoading(true)
+  const needsAttention = item.state === 'uncovered' || item.state === 'needs-human'
+  return <article class={`coverage-resolution-item ${item.state} ${selected ? 'selected' : ''}`}>
+    <div class="coverage-resolution-item-heading"><span><strong>{item.label}</strong><small>{[item.source, item.path].filter(Boolean).join(' · ') || item.page || 'Priority reader outcome'}</small></span>{needsAttention ? <label class="coverage-update-choice"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.currentTarget.checked)} /><span>{selected ? 'Added' : 'Add to update'}</span></label> : <Badge tone={item.state === 'documented' ? 'good' : 'neutral'}>{item.state}</Badge>}</div>
+    {needsAttention && <div class="coverage-resolution-controls">
+      <div class="coverage-alternative-actions"><small>Or resolve without an update</small><span>{pages.length > 0 && <button type="button" aria-expanded={resolutionMode === 'link'} onClick={() => setResolutionMode(resolutionMode === 'link' ? null : 'link')}>Link existing page</button>}{item.surface === 'reader-journeys' ? <button type="button" disabled={busy} onClick={() => void run('remove-priority')}>No longer a priority</button> : <button type="button" aria-expanded={resolutionMode === 'exclude'} onClick={() => setResolutionMode(resolutionMode === 'exclude' ? null : 'exclude')}>Mark as internal</button>}<button type="button" disabled={busy} onClick={() => void run('needs-human')}>Decide later</button></span></div>
+      {resolutionMode === 'link' && <div class="coverage-inline-resolution"><Select aria-label={`Page for ${item.label}`} value={page} onChange={(event) => setPage(event.currentTarget.value)}>{pages.map((candidate) => <option key={candidate} value={candidate}>{candidate}{candidate === item.suggestedPage ? ' — suggested' : ''}</option>)}</Select><Button size="sm" disabled={!page || busy} onClick={() => void run('link')}>Link page</Button><button type="button" aria-label="Cancel linking page" onClick={() => setResolutionMode(null)}><Icon name="close" size={14} /></button></div>}
+      {resolutionMode === 'exclude' && <div class="coverage-inline-resolution"><Input value={reason} aria-label={`Reason ${item.label} is internal`} placeholder="Why is this not part of the public documentation?" onInput={(event) => setReason(event.currentTarget.value)} /><Button size="sm" disabled={!reason.trim() || busy} onClick={() => void run('exclude')}>Mark internal</Button><button type="button" aria-label="Cancel marking internal" onClick={() => setResolutionMode(null)}><Icon name="close" size={14} /></button></div>}
+    </div>}
+    {item.state === 'excluded' && <div class="coverage-resolution-actions"><small>{item.reason}</small><Button size="sm" disabled={busy} onClick={() => void run('reset')}>Restore</Button></div>}
+  </article>
+}
+
+function SourceScopeDialog({ source, act, onClose }: { source: Source; act: Action; onClose: () => void }) {
+  const [scope, setScope] = useState({ space: source.scope?.space ?? '', routePrefix: source.scope?.routePrefix ?? '', navigationGroup: source.scope?.navigationGroup ?? '', sharedPages: (source.scope?.sharedPages ?? []).join(', ') })
+  const [saving, setSaving] = useState(false)
+  const save = async () => {
+    setSaving(true)
     try {
-      const folders = await act(() => post<{ directories: string[] }>('/api/setup/git/folders', { ...remote, branch, subdirectory: '' }), undefined, false)
-      setRemoteDirectories(folders?.directories ?? [])
-    } finally {
-      setRemoteFoldersLoading(false)
-    }
+      const result = await act(() => patch(`/api/sources/${encodeURIComponent(source.name)}`, { scope: scope.space.trim() || scope.routePrefix.trim() || scope.navigationGroup.trim() || scope.sharedPages.trim() ? { space: scope.space.trim() || undefined, routePrefix: scope.routePrefix.trim() || undefined, navigationGroup: scope.navigationGroup.trim() || undefined, sharedPages: splitComma(scope.sharedPages) } : null }), 'Documentation ownership saved')
+      if (result !== undefined) onClose()
+    } finally { setSaving(false) }
   }
-  return <Panel title={source.name} description={source.remote ? `${gitServiceLabel(source.remote.repository, source.remote.provider)} repository · ${source.remote.repository}@${source.remote.branch}` : `${source.kind === 'openapi' ? 'OpenAPI specification' : 'Source directory'} · ${source.path}`}>
-    {(source.kind ?? 'directory') === 'directory' && <Tabs value={tab} onChange={setTab} items={[['location', 'Location'], ['remote', 'Remote monitoring']] as const} />}
-    {tab === 'location' || (source.kind ?? 'directory') !== 'directory'
-      ? <>
-        <div class="form-grid">
-          <Field label="Source type"><Select disabled={Boolean(source.remote)} value={location.kind} onChange={(event) => setLocation({ ...location, kind: event.currentTarget.value as 'directory' | 'openapi' })}><option value="directory">Source directory</option><option value="openapi">OpenAPI specification</option></Select></Field>
-          <Field label={source.remote ? 'Managed snapshot' : 'Path or URL'}><Input disabled={Boolean(source.remote)} value={location.path} onInput={(event) => setLocation({ ...location, path: event.currentTarget.value })} /></Field>
-        </div>
-        {source.remote && <Note>The snapshot is managed by Doxloop and refreshed from the configured branch.</Note>}
-        <div class="form-actions"><Button tone="primary" disabled={Boolean(source.remote) || !location.path.trim()} onClick={() => void act(() => patch(`/api/sources/${encodeURIComponent(source.name)}`, location), 'Source location saved')}>Save source</Button></div>
-      </>
-      : <>
-        <div class="form-grid">
-          <Field label="Repository address"><div class="path-input"><Input value={remote.repository} placeholder="https://git.example.com/team/product.git" onInput={(event) => { setRemote({ ...remote, repository: event.currentTarget.value }); setRemoteHead(''); setRemoteBranches([]); setRemoteDirectories([]) }} /><Button icon="key" busy={remoteTesting} disabled={!remote.repository.trim() || (remote.authMethod === 'credentials' && !remote.gitSecret)} onClick={() => void connectRemote()}>Connect</Button></div></Field>
-          <Field label="Repository access"><Select value={remote.authMethod} onChange={(event) => { setRemote({ ...remote, authMethod: event.currentTarget.value }); setRemoteHead('') }}><option value="automatic">Public or already connected</option><option value="credentials">Private repository</option></Select></Field>
-          {remote.authMethod === 'credentials' && <><Field label="Account username"><Input value={remote.gitUsername} autocomplete="username" onInput={(event) => setRemote({ ...remote, gitUsername: event.currentTarget.value })} /></Field><Field label="Password or access key"><Input type="password" value={remote.gitSecret} autocomplete="off" onInput={(event) => { setRemote({ ...remote, gitSecret: event.currentTarget.value }); setRemoteHead('') }} /></Field></>}
-          <Field label="Branch" hint={remoteBranches.length ? `${remoteBranches.length} available` : 'Connect to load available branches.'}><Select value={remote.branch} disabled={!remoteBranches.length || remoteFoldersLoading} onChange={(event) => void selectRemoteBranch(event.currentTarget.value)}>{remoteBranches.length ? remoteBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>) : <option value={remote.branch}>{remote.branch}</option>}</Select></Field>
-          <RepositoryFolderSelect value={remote.subdirectory} directories={remoteDirectories} loading={remoteFoldersLoading} connected={Boolean(remoteHead)} onChange={(subdirectory) => setRemote({ ...remote, subdirectory })} />
-        </div>
-        <Note>Access details are used for this Doxloop session and are never written to the project.</Note>
-        <div class="form-actions">
-          <Button tone="danger" onClick={() => void act(() => patch(`/api/sources/${encodeURIComponent(source.name)}`, { remote: null }), 'Remote monitoring removed')}>Disconnect</Button>
-          <Button tone="primary" disabled={!remote.repository || !remote.branch || !remoteHead || remoteFoldersLoading} onClick={() => void act(() => patch(`/api/sources/${encodeURIComponent(source.name)}`, { remote }), 'Remote source saved')}>Save connection</Button>
-        </div>
-      </>}
-  </Panel>
+  return <div class="sources-modal-scrim" onClick={onClose}><section class="sources-reference-dialog source-scope-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}><header><span class="sources-dialog-icon"><Icon name="map" size={23} /></span><div><h2>Documentation ownership</h2><p>Keep changes from <strong>{source.name}</strong> inside a clear documentation boundary.</p></div><button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button></header><div class="sources-dialog-body"><div class="form-grid"><Field label="Route prefix" hint="Pages grounded in this source stay below this route."><Input value={scope.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setScope({ ...scope, routePrefix: event.currentTarget.value })} /></Field><Field label="Navigation group"><Input value={scope.navigationGroup} placeholder="API reference" onInput={(event) => setScope({ ...scope, navigationGroup: event.currentTarget.value })} /></Field><Field label="Space"><Input value={scope.space} placeholder="Developers" onInput={(event) => setScope({ ...scope, space: event.currentTarget.value })} /></Field><Field label="Shared pages" hint="Comma-separated paths or globs allowed outside the route."><Input value={scope.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setScope({ ...scope, sharedPages: event.currentTarget.value })} /></Field></div><Note>Overlapping route prefixes are rejected. Shared pages must be listed explicitly so one source cannot silently rewrite another source’s section.</Note></div><footer><Button onClick={onClose}>Cancel</Button><Button tone="primary" busy={saving} onClick={() => void save()}>Save ownership</Button></footer></section></div>
 }
 
 function Authoring({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
-  const hasCompletedRun = Boolean(state.receipt)
+  const hasCompletedRun = documentationExists(state)
   const mode = hasCompletedRun ? 'update' : 'create'
   const pendingSources = state.receipt?.pendingSources ?? []
   const defaultAgent = state.project?.defaultAgent ?? ''
   const defaultModel = defaultModelForAgent(defaultAgent)
   const defaultReasoning = preferredReasoningLevel(defaultAgent, defaultModel)
-  const [form, setForm] = useState({ request: '', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: false })
+  // A configured application means the reviewer set it up to be captured;
+  // default to screenshots rather than making them opt in on every plan.
+  const [form, setForm] = useState({ request: '', scope: 'comprehensive', targetPages: '', clarificationMode: 'review', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: (state.project?.application?.baseUrl ? 'enabled' : 'disabled') as 'auto' | 'enabled' | 'disabled' })
+  const [showNewPlan, setShowNewPlan] = useState(() => shouldShowAuthoringForm(state))
+  const [agentConfigOpen, setAgentConfigOpen] = useState(false)
   const availableAuthorModels = agentModels(form.agent)
   const supportedAuthorReasoning = modelReasoningLevels(form.agent, form.model)
   const [activityOpen, setActivityOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const runs = state.jobs.filter((job) => job.type.startsWith('author:') || job.type === 'capture')
+  const [discovery, setDiscovery] = useState<PlanDiscoverySummary>()
+  const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
+  const runs = state.jobs.filter((job) => job.type.startsWith('plan:') || job.type.startsWith('author:') || job.type === 'capture')
   const activeRun = runs.find((job) => job.status === 'running')
   const currentRun = activeRun ?? runs[0]
   const runBusy = Boolean(activeRun || submitting)
+  const visiblePlan = showNewPlan ? undefined : state.documentationPlan
+
   useEffect(() => {
-    setActivityOpen(Boolean(activeRun))
+    if (activeRun) setActivityOpen(true)
   }, [activeRun?.id, activeRun?.status])
-  const startRun = async (runMode: 'create' | 'update' | 'review') => {
+
+  useEffect(() => {
+    if (mode !== 'create') {
+      setDiscovery(undefined)
+      return
+    }
+    let active = true
+    void api<PlanDiscoverySummary>('/api/plans/discovery')
+      .then((result) => { if (active && result?.suggestedPages && typeof result.publicSignals === 'number') setDiscovery(result) })
+      .catch(() => { /* Planning still performs discovery and will show the exact estimate. */ })
+    return () => { active = false }
+  }, [mode, state.project?.sources.length])
+
+  useEffect(() => {
+    if (form.screenshots === 'disabled') { setCaptureReadiness(undefined); return }
+    let active = true
+    void api<ApplicationReadiness>('/api/application/readiness')
+      .then((result) => { if (active) setCaptureReadiness(result) })
+      .catch(() => { if (active) setCaptureReadiness(undefined) })
+    return () => { active = false }
+  }, [form.screenshots, state.project?.application?.baseUrl])
+
+  useEffect(() => {
+    setShowNewPlan(shouldShowAuthoringForm(state))
+  }, [state.documentationPlan?.id, state.documentationPlan?.status, state.documentationPlan?.proposalId, validRuns(state.runs).map((run) => `${run.id}:${run.status}`).join('|')])
+
+  const startPlan = async () => {
     if (runBusy) return
-    const label = runMode === 'review' ? 'Review started' : 'Documentation run started'
-    const { reasoning, effort, ...runForm } = form
+    if (form.screenshots === 'enabled' && captureReadiness?.status !== 'ready') {
+      onError('Screenshots are selected. Configure and start the application, then wait for the page check to succeed before planning.')
+      return
+    }
+    const { reasoning, effort, targetPages, ...planForm } = form
+    const parsedTarget = targetPages.trim() ? Number(targetPages) : undefined
+    if (parsedTarget !== undefined && (!Number.isInteger(parsedTarget) || parsedTarget < 1)) {
+      onError('Target page count must be a whole number of at least 1.')
+      return
+    }
     const request = {
-      ...runForm,
-      mode: runMode,
+      ...planForm,
+      scope: mode === 'create' ? form.scope : 'custom',
+      ...(parsedTarget !== undefined ? { targetPages: parsedTarget } : {}),
+      mode,
       ...(form.agent === 'codex' && reasoning ? { reasoning } : {}),
       ...(form.agent === 'claude' && effort ? { effort } : {}),
     }
     setSubmitting(true)
     setActivityOpen(true)
     try {
-      const started = await act(() => post<UiJob>('/api/author', request), label)
-      if (!started) setActivityOpen(false)
+      const started = await act(() => post<{ plan: DocumentationPlan; job: UiJob }>('/api/plans', request), 'Planning started')
+      if (started) setShowNewPlan(false)
+      else setActivityOpen(false)
     } finally {
       setSubmitting(false)
     }
   }
+
   return <div class="authoring-page">
-    <PageHeader title="Update documentation" description="Describe what changed and prepare a documentation update." />
+    <PageHeader
+      title={visiblePlan?.status === 'generated' ? 'Documentation proposal' : mode === 'create' ? 'Create documentation' : 'Update documentation'}
+      description={visiblePlan?.status === 'generated' ? 'Shape and approve the documentation plan before the agent writes any pages.' : 'Describe the outcome. The agent researches evidence, proposes a plan, and writes nothing until you approve.'}
+    />
     {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
       <span class="source-sync-icon"><Icon name="sources" size={18} /></span>
       <div>
         <strong>{pendingSources.length === 1 ? `New source “${pendingSources[0]}” was added` : `${pendingSources.length} new sources were added`}</strong>
-        <p>Run Update to synchronize {pendingSources.length === 1 ? 'this source' : 'these sources'} with the existing documentation. Unrelated pages, navigation, and styling will be preserved.</p>
+        <p>The planning agent will inspect {pendingSources.length === 1 ? 'this source' : 'these sources'} and show where the documentation should change.</p>
       </div>
     </div>}
-    <div class="authoring-workbench">
-      <Panel class="authoring-request">
-        <fieldset class="authoring-fields" disabled={runBusy}>
-          <div class="authoring-prompt-block">
-            <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>Describe the update</h2><p>Tell the agent what changed, what readers need, or which pages should be improved.</p></div></div>
-            <span class="authoring-textarea-wrap"><Textarea rows={6} maxlength={1000} value={form.request} placeholder="For example: Document the new API key rotation flow and update the authentication guide with a TypeScript example." onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
-          </div>
-        </fieldset>
-        <section class="authoring-run-config">
-        <fieldset class="authoring-options" disabled={runBusy}>
-          <Field label="Coding agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
-              const agent = event.currentTarget.value
-              const model = defaultModelForAgent(agent)
-              const level = preferredReasoningLevel(agent, model)
-              setForm({
-                ...form,
-                agent,
-                model,
-                reasoning: agent === 'codex' ? level : '',
-                effort: agent === 'claude' ? level : '',
-              })
-            }}><option value="">Select coding assistant</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></span></Field>
-          <Field label="Model"><span class="authoring-control-icon model"><Icon name="sparkle" size={17} /><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => setForm({ ...form, model: value })} /></span></Field>
-          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><span class="authoring-control-icon reasoning"><Icon name="brain" size={17} /><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></span></Field>
-          <div class="screenshot-option">
-            <div><span class="screenshot-camera"><Icon name="camera" size={18} /></span><span><strong>Visual evidence</strong><small>Capture application screenshots during the run.</small></span><Toggle checked={form.screenshots} disabled={runBusy} onChange={(checked) => setForm({ ...form, screenshots: checked })} label="Capture screenshots during the run" /></div>
-          </div>
-        </fieldset>
-        <footer><Button disabled={runBusy} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startRun(mode)}>Start documentation update</Button><small>The current documentation stays unchanged until you approve the proposal.</small></footer>
-        </section>
-      </Panel>
-    </div>
-    <section class={`authoring-action-card activity-card live-activity-card ${activityOpen ? 'open' : ''}`}>
+
+    {visiblePlan
+      ? <DocumentationPlanReview plan={visiblePlan} act={act} busy={runBusy} onStartAnother={() => setShowNewPlan(true)} />
+      : <div class="authoring-workbench">
+        <Panel class="authoring-request">
+          <fieldset class="authoring-fields" disabled={runBusy}>
+            <div class="authoring-prompt-block">
+              <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>What should readers be able to do?</h2><p>Describe the outcome or product change. The agent will research the evidence and propose the documentation shape first.</p></div></div>
+              <span class="authoring-textarea-wrap"><Textarea rows={6} maxlength={2000} value={form.request} placeholder={mode === 'create' ? 'For example: Help developers install the SDK, authenticate, and complete their first successful API request.' : 'For example: Document API key rotation and update the authentication journey with a TypeScript example.'} onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
+            </div>
+          </fieldset>
+          {mode === 'create' && <section class="plan-scope-section" aria-label="Documentation scope">
+            <header><span><Icon name="map" size={17} /></span><div><h2>Choose a starting scope</h2><p>You can add, remove, reorder, or defer individual pages after research.</p></div></header>
+            <div class="plan-scope-options">
+              {([
+                ['starter', 'Starter', 'First success path and essential reference'],
+                ['standard', 'Standard', 'Primary journeys, concepts, troubleshooting, and reference'],
+                ['comprehensive', 'Comprehensive', 'Complete evidence-supported public surface'],
+              ] as const).map(([value, label, detail]) => {
+                const estimate = discovery?.suggestedPages[value]
+                return <button type="button" key={value} class={form.scope === value ? 'active' : ''} aria-pressed={form.scope === value} onClick={() => setForm({ ...form, scope: value })}><span><strong>{label}</strong><small>{detail}</small></span><b>{estimate ? `About ${estimate} pages` : 'Estimating…'}</b></button>
+              })}
+            </div>
+            {discovery && <small class="plan-scope-evidence">Based on {discovery.publicSignals} public source signal{discovery.publicSignals === 1 ? '' : 's'}. Small products stay small; unsupported topics are never added as filler.</small>}
+            <div class="plan-target-pages">
+              <Field label="Minimum pages to write (optional)" hint="Leave empty to let the evidence decide. There is no upper limit — the planner splits the public surface into as many focused pages as the target needs."><Input type="number" min="1" max="500" value={form.targetPages} placeholder={discovery ? String(discovery.suggestedPages[form.scope as 'starter' | 'standard' | 'comprehensive']) : 'For example: 40'} onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
+            </div>
+          </section>}
+          {mode === 'update' && <section class="plan-scope-section" aria-label="Documentation size">
+            <div class="plan-target-pages">
+              <Field label="Minimum pages to write (optional)" hint="Ask for a larger update when the existing documentation is thin; the planner adds distinct evidence-backed pages rather than filler."><Input type="number" min="1" max="500" value={form.targetPages} placeholder="For example: 25" onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
+            </div>
+          </section>}
+          <section class="authoring-run-config">
+            <button type="button" class="agent-config-summary" aria-expanded={agentConfigOpen} onClick={() => setAgentConfigOpen(!agentConfigOpen)}>
+              <Icon name="bot" size={16} />
+              <span>Planning agent: <b>{form.agent ? agentLabel(form.agent) : 'Automatically detect'}{form.model ? ` · ${form.model}` : ''}{form.agent === 'codex' && form.reasoning ? ` · ${form.reasoning} reasoning` : form.agent === 'claude' && form.effort ? ` · ${form.effort} effort` : ''}</b></span>
+              <strong>{agentConfigOpen ? 'Hide options' : 'Change'}</strong>
+            </button>
+            {agentConfigOpen && <fieldset class="authoring-options" disabled={runBusy}>
+              <Field label="Planning agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
+                const agent = event.currentTarget.value
+                const model = defaultModelForAgent(agent)
+                const level = preferredReasoningLevel(agent, model)
+                setForm({ ...form, agent, model, reasoning: agent === 'codex' ? level : '', effort: agent === 'claude' ? level : '' })
+              }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></span></Field>
+              <Field label="Model"><span class="authoring-control-icon model"><Icon name="sparkle" size={17} /><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Default model" onValueChange={(value) => setForm({ ...form, model: value })} /></span></Field>
+              <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><span class="authoring-control-icon reasoning"><Icon name="brain" size={17} /><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Default" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></span></Field>
+              <Field label="Planner questions"><Select value={form.clarificationMode} onChange={(event) => setForm({ ...form, clarificationMode: event.currentTarget.value })}><option value="review">Ask in review</option><option value="defaults">Use recommendations</option><option value="stop">Always wait for answers</option></Select></Field>
+            </fieldset>}
+            <section class="screenshot-run-choice" aria-label="Application screenshot behavior">
+              <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
+              <div><strong>Add product screenshots?</strong><small>Optional. If you choose Yes, Doxloop must capture and verify the planned images before it can finish.</small></div>
+              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value) })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
+              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => { history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')) }}>Settings</button>.</>}</small>}
+            </section>
+            <footer><Button disabled={runBusy || (form.screenshots === 'enabled' && captureReadiness?.status !== 'ready')} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Start or configure the application before planning with screenshots.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
+          </section>
+        </Panel>
+      </div>}
+
+    {(currentRun || submitting) && <section class={`authoring-action-card activity-card live-activity-card ${activityOpen ? 'open' : ''}`}>
       <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
         <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
-        <span class="action-card-copy"><strong>Live activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}Documentation update in progress` : submitting ? 'Starting documentation update…' : currentRun ? 'Show the latest update log' : 'Logs will appear when an update starts'}</small></span>
+        <span class="action-card-copy"><strong>Live activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}${workflowActivityLabel(activeRun.type)}` : submitting ? 'Starting planning agent…' : 'Show the latest workflow log'}</small></span>
         {activeRun && <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>}
         <Icon name="chevronDown" size={17} />
       </button>
       {activityOpen && currentRun && <AuthoringLiveLog job={currentRun} act={act} />}
-      {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the documentation agent…</div>}
-    </section>
-    <Panel
-      class="history-panel"
-      title="Update history"
-      description="Every documentation request, what it changed, and how it was reviewed."
-    >
+      {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the planning agent…</div>}
+    </section>}
+    <Panel class="history-panel" title="Update history" description="A clear record of each documentation action and the instruction behind it.">
       <RequestHistory jobs={state.jobs} onError={onError} />
     </Panel>
+  </div>
+}
+
+function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: DocumentationPlan; act: Action; busy: boolean; onStartAnother: () => void }) {
+  const [draft, setDraft] = useState(plan)
+  const [revision, setRevision] = useState('')
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
+  const [pageFilter, setPageFilter] = useState<PlanPageFilter>('all')
+  const [selectedPageId, setSelectedPageId] = useState<string>()
+  const [briefOpen, setBriefOpen] = useState(false)
+  const [versions, setVersions] = useState<DocumentationPlan[]>([])
+  const revisionInput = useRef<HTMLTextAreaElement>(null)
+  const [saving, setSaving] = useState(false)
+  const [revising, setRevising] = useState(false)
+  const [approving, setApproving] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [resuming, setResuming] = useState(false)
+  const [continuing, setContinuing] = useState<'resume' | 'ignore-errors'>()
+  const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
+  const [captureCheck, setCaptureCheck] = useState<'idle' | 'checking' | 'done' | 'failed'>('idle')
+  const [captureCheckNonce, setCaptureCheckNonce] = useState(0)
+  useEffect(() => { setDraft(plan); setClarificationAnswers(plan.clarification.answers) }, [plan.id, plan.version, plan.status, plan.updatedAt])
+  useEffect(() => {
+    let active = true
+    if (plan.version <= 1) { setVersions([]); return () => { active = false } }
+    void api<DocumentationPlan[]>(`/api/plans/${plan.id}/versions`)
+      .then((result) => { if (active) setVersions(result) })
+      .catch(() => { if (active) setVersions([]) })
+    return () => { active = false }
+  }, [plan.id, plan.version, plan.updatedAt])
+  const locked = busy || ['planning', 'revising', 'generating'].includes(plan.status)
+  const editable = !locked && !['generated', 'cancelled'].includes(plan.status)
+  const stale = plan.status === 'stale'
+  const changed = editable && planEditableJson(draft) !== planEditableJson(plan)
+  const pages = draft.pages.filter((page) => page.priority !== 'later')
+  const counts = countPlanPages(pages)
+  const screenshotIntent = normalizeUiScreenshotIntent(draft.execution.screenshots)
+  const visualPages = pages.filter((page) => page.visuals && page.visuals.mode !== 'none')
+  const plannedCaptures = visualPages.reduce((total, page) => total + Math.max(1, page.visuals?.estimatedCaptures ?? 0), 0)
+  const captureRequired = screenshotIntent === 'enabled'
+  const capturePlanned = screenshotIntent !== 'disabled' && visualPages.length > 0
+  const incompleteCapturePages = visualPages.filter((page) =>
+    !page.visuals?.startPath?.trim() ||
+    !page.visuals?.workflow?.trim() ||
+    page.visuals?.captureSequence?.length !== page.visuals?.estimatedCaptures ||
+    (page.visuals?.captureSequence ?? []).some((item) => item.trim().length < 20),
+  )
+  const captureReady = !captureRequired || (captureReadiness?.reachable === true && incompleteCapturePages.length === 0)
+  // Name the single thing standing between the reviewer and approval, so a
+  // disabled button is never a dead end.
+  const approvalBlocker = draft.questions.length > 0
+    ? 'Resolve the required questions before approval.'
+    : changed
+      ? 'Save your direct edits, then approve the updated plan.'
+      : captureRequired && visualPages.length === 0
+        ? 'Screenshots are required, but no page plans one. Add a guide, or change this run to Automatic.'
+        : captureRequired && incompleteCapturePages.length > 0
+          ? `Complete the capture details for ${incompleteCapturePages.map((page) => page.title).join(', ')} before approval.`
+          : captureRequired && captureCheck === 'checking'
+            ? 'Checking that the application is reachable…'
+            : captureRequired && !captureReadiness
+              ? 'Screenshots are required, but Doxloop could not check the application. Start it, then choose Check again.'
+              : captureRequired && captureReadiness?.reachable !== true
+                ? `Screenshots are required, but the application is not reachable. ${captureReadiness?.message ?? ''}`.trim()
+                : undefined
+  const approvalControls = planApprovalControls({
+    changed,
+    busy,
+    hasPages: draft.pages.length > 0,
+    hasQuestions: draft.questions.length > 0,
+    captureRequired,
+    hasVisualPages: visualPages.length > 0,
+    captureReady,
+  })
+  const groupedPages = groupPlanPages(pages, pageFilter)
+  const selectedIndex = selectedPageId ? pages.findIndex((page) => page.id === selectedPageId) : -1
+  const selectedPage = selectedIndex >= 0 ? pages[selectedIndex] : undefined
+  const generationTarget = counts.pagesToWrite > 0
+    ? `${counts.pagesToWrite} page${counts.pagesToWrite === 1 ? '' : 's'}`
+    : 'documentation changes'
+  const previousVersion = versions.find((version) => version.version < plan.version)
+  const versionChanges = previousVersion ? comparePlanVersions(previousVersion, plan) : undefined
+  const unresolvedCapabilities = draft.capabilities.filter((capability) => capability.disposition === 'needs-human').length
+  useEffect(() => {
+    if (screenshotIntent === 'disabled') { setCaptureReadiness(undefined); setCaptureCheck('idle'); return }
+    let active = true
+    setCaptureCheck('checking')
+    void api<ApplicationReadiness>('/api/application/readiness')
+      .then((result) => { if (active) { setCaptureReadiness(result); setCaptureCheck('done') } })
+      .catch(() => { if (active) { setCaptureReadiness(undefined); setCaptureCheck('failed') } })
+    return () => { active = false }
+  }, [screenshotIntent, captureCheckNonce])
+  // The application is often started after the plan is already on screen, so
+  // re-check when the reviewer returns to the tab rather than stranding them
+  // behind a disabled button until a full reload.
+  useEffect(() => {
+    if (screenshotIntent === 'disabled') return
+    const recheck = () => { if (document.visibilityState === 'visible') setCaptureCheckNonce((value) => value + 1) }
+    addEventListener('focus', recheck)
+    document.addEventListener('visibilitychange', recheck)
+    return () => { removeEventListener('focus', recheck); document.removeEventListener('visibilitychange', recheck) }
+  }, [screenshotIntent])
+  const setPage = (index: number, value: DocumentationPlanPage) => setDraft({ ...draft, scope: 'custom', pages: pages.map((page, item) => item === index ? value : page) })
+  const movePage = (index: number, offset: -1 | 1) => {
+    const target = index + offset
+    if (target < 0 || target >= pages.length) return
+    const next = [...pages]
+    const [page] = next.splice(index, 1)
+    next.splice(target, 0, page!)
+    setDraft({ ...draft, scope: 'custom', pages: next })
+  }
+  const addPage = () => {
+    const page = newPlanPage(pages.length)
+    setDraft({ ...draft, scope: 'custom', pages: [...pages, page] })
+    setSelectedPageId(page.id)
+  }
+  const removePage = (index: number) => {
+    const removed = pages[index]
+    const capabilities = removed ? draft.capabilities.map((capability) => {
+      const pageIds = capability.pageIds.filter((id) => id !== removed.id)
+      return { ...capability, pageIds, disposition: pageIds.length === 0 && (capability.disposition === 'planned' || capability.disposition === 'existing') ? 'excluded' as const : capability.disposition }
+    }) : draft.capabilities
+    setDraft({ ...draft, scope: 'custom', pages: pages.filter((_, item) => item !== index), capabilities })
+    setSelectedPageId(undefined)
+  }
+  const continueWithClarifications = async (useRecommendations = false) => {
+    setRevising(true)
+    try {
+      await act(() => post<UiJob>(`/api/plans/${plan.id}/clarify`, { answers: clarificationAnswers, useRecommendations }), 'Continuing documentation plan')
+    } finally { setRevising(false) }
+  }
+  // Keep the proposed structure and refresh the evidence snapshot, so an
+  // unrelated code edit does not force the reviewer through planning again.
+  const resume = async () => {
+    setResuming(true)
+    try {
+      await act(() => post<DocumentationPlan>(`/api/plans/${plan.id}/resume`), 'Continuing with the current plan')
+    } finally { setResuming(false) }
+  }
+  const save = async () => {
+    setSaving(true)
+    try {
+      const updated = await act(() => patch<DocumentationPlan>(`/api/plans/${plan.id}`, planEditablePayload(draft)), 'Plan changes saved')
+      if (updated) setDraft(updated)
+    } finally { setSaving(false) }
+  }
+  const revise = async () => {
+    if (!revision.trim()) return
+    setRevising(true)
+    try {
+      const result = await act(() => post<UiJob>(`/api/plans/${plan.id}/revise`, { feedback: revision }), 'Plan revision started')
+      if (result) setRevision('')
+    } finally { setRevising(false) }
+  }
+  // Pick the failed run up where it stopped. Resuming restarts the agent in
+  // the preserved workspace with everything it already wrote and captured;
+  // ignoring problems accepts that workspace for review as it is.
+  const continueFailed = async (strategy: 'resume' | 'ignore-errors') => {
+    setContinuing(strategy)
+    try {
+      await act(
+        () => post<{ plan?: DocumentationPlan; job?: UiJob }>(`/api/plans/${plan.id}/continue`, { strategy }),
+        strategy === 'resume' ? 'Continuing the documentation run' : 'Continuing with the work already done',
+      )
+    } finally { setContinuing(undefined) }
+  }
+  const approveAndGenerate = async () => {
+    setApproving(plan.status !== 'approved')
+    try {
+      if (plan.status !== 'approved') {
+        const approved = await act(() => post<DocumentationPlan>(`/api/plans/${plan.id}/approve`), 'Plan approved')
+        if (!approved) return
+      }
+      setGenerating(true)
+      await act(() => post<UiJob>(`/api/plans/${plan.id}/generate`), 'Documentation generation started')
+    } finally {
+      setApproving(false)
+      setGenerating(false)
+    }
+  }
+  useEffect(() => {
+    if (selectedPageId && !pages.some((page) => page.id === selectedPageId)) setSelectedPageId(undefined)
+  }, [selectedPageId, pages])
+  useEffect(() => {
+    if (!selectedPageId) return
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setSelectedPageId(undefined) }
+    addEventListener('keydown', close)
+    return () => removeEventListener('keydown', close)
+  }, [selectedPageId])
+  if (plan.status === 'generated') return <Panel class="plan-complete-panel">
+    <div class="plan-complete"><span><Icon name="check" size={24} /></span><div><h2>Documentation proposal is ready</h2><p>The approved plan was generated in an isolated workspace. Reader-facing files are still unchanged until you review and accept them.</p></div></div>
+    <div class="plan-complete-actions"><Button onClick={onStartAnother}>Plan another update</Button><Button tone="primary" icon="proposals" onClick={() => { history.pushState({}, '', '/proposals'); dispatchEvent(new PopStateEvent('popstate')) }}>Review generated files</Button></div>
+  </Panel>
+  return <div class="documentation-plan-review">
+    <section class="plan-review-header">
+      <div class="plan-review-heading">
+        <span class="plan-review-summary-icon"><Icon name="map" size={18} /></span>
+        <div class="plan-review-heading-copy">
+          <small>Documentation plan · Version {plan.version}</small>
+          <h2>Review documentation structure</h2>
+          <div class="plan-review-change-summary" aria-label="Documentation changes">
+            {counts.create > 0 && <span class="create"><i />{counts.create} new</span>}
+            {counts.update > 0 && <span class="update"><i />{counts.update} updated</span>}
+            {counts.remove > 0 && <span class="remove"><i />{counts.remove} deleted</span>}
+            {counts.preserve > 0 && <span class="preserve"><i />{counts.preserve} unchanged</span>}
+            {plannedCaptures > 0 && <span class="visual"><Icon name="camera" size={12} />{plannedCaptures} screenshot{plannedCaptures === 1 ? '' : 's'}</span>}
+          </div>
+        </div>
+      </div>
+      <div class="plan-review-actions"><Badge tone={statusTone(plan.status)}>{statusLabel(plan.status)}</Badge>{editable && <Button size="sm" tone="ghost" onClick={() => setBriefOpen(!briefOpen)}>{briefOpen ? 'Close details' : 'Plan details'}</Button>}</div>
+    </section>
+    {stale && <Panel class="plan-stale-panel" title="Sources changed since this plan was proposed" description="The plan itself is unchanged and can be approved as it is; generation reads the current sources when it writes each page. Ask the agent to revise only if the change should alter which pages are written.">
+      <footer class="plan-stale-actions"><Button size="sm" icon="refresh" busy={resuming} disabled={busy} onClick={() => void resume()}>Clear this notice</Button><Button size="sm" icon="wand" disabled={busy} onClick={() => revisionInput.current?.focus()}>Ask the agent to revise</Button></footer>
+    </Panel>}
+    {plan.error && !stale && <Note tone="bad">{plan.error}</Note>}
+    {plan.status === 'failed' && plan.failure && (plan.failure.resumable || plan.failure.ignorable) && <Panel class="plan-recovery-panel" title="Continue without starting over" description={plan.failure.stage === 'generate'
+      ? 'The pages and screenshots the agent already produced are preserved in this run\u2019s workspace. Continue from there instead of paying for another full run.'
+      : 'The planner proposed a plan but could not meet every planning gate. You can review and edit that plan yourself instead of running the planner again.'}>
+      <ul class="plan-recovery-options">
+        {plan.failure.stage === 'generate' && plan.failure.resumable && <li><strong>Resume the run</strong><span>Starts the agent again in the same workspace with a brief of what is finished. Verified screenshots and completed pages are kept; only the unfinished or rejected parts are redone.</span></li>}
+        {plan.failure.stage === 'generate' && plan.failure.ignorable && <li><strong>Ignore the problems</strong><span>Accepts the generated files for review now. Each screenshot problem is recorded on its step as text-only and listed on the proposal so you can judge it before publishing.</span></li>}
+        {plan.failure.stage !== 'generate' && <li><strong>Review this plan anyway</strong><span>Opens the plan the planner left behind. The unmet gate becomes a note on the review, and approval still checks required screenshots and open questions.</span></li>}
+      </ul>
+      {plan.failure.stage === 'generate' && plan.failure.proposalId && <section class="plan-recovery-captures" aria-label="Screenshots already captured">
+        <h3>Screenshots already captured</h3>
+        <p>These images are kept by both choices below. Resume recaptures only the states that are still missing.</p>
+        <CaptureGallery live={false} run={plan.failure.proposalId} />
+      </section>}
+      <footer class="plan-recovery-actions">
+        {plan.failure.stage === 'generate' && plan.failure.resumable && <Button tone="primary" icon="play" busy={continuing === 'resume'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('resume')}>Resume generation</Button>}
+        {plan.failure.stage === 'generate' && plan.failure.ignorable && <Button icon="check" busy={continuing === 'ignore-errors'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('ignore-errors')}>Ignore problems & continue</Button>}
+        {plan.failure.stage !== 'generate' && plan.failure.ignorable && <Button tone="primary" icon="check" busy={continuing === 'ignore-errors'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('ignore-errors')}>Review this plan anyway</Button>}
+        <small>{plan.failure.stage === 'generate' ? `“Retry generating” below starts a new run from the approved plan${plan.failure.resumable ? ' only if this workspace can no longer be reused' : ''}.` : 'Or ask the agent to revise the plan below, which runs the planner again.'}</small>
+      </footer>
+    </Panel>}
+    {locked && <Panel class="plan-progress-panel"><div class="plan-progress"><span class="spinner" /><div><strong>{plan.status === 'generating' ? 'Generating the approved documentation' : plan.status === 'revising' ? 'Revising the documentation plan' : 'Researching sources and existing documentation'}</strong><p>You can follow the activity log below. The documentation project remains unchanged during planning.</p></div></div></Panel>}
+    {!locked && <>
+      {draft.questions.length > 0 && <Panel class="plan-questions" title={`Needs your decision (${draft.questions.length})`} description="Resolve these choices before approving the plan.">
+        {draft.questions.map((question) => <article key={question.id}><span><Icon name="help" size={16} /></span><div><strong>{question.question}</strong><p>{question.whyItMatters}</p>{question.recommendation && <small>Recommended: {question.recommendation}</small>}<Input value={clarificationAnswers[question.id] ?? ''} placeholder={question.recommendation ?? 'Enter your decision'} onInput={(event) => setClarificationAnswers({ ...clarificationAnswers, [question.id]: event.currentTarget.value })} /></div>{question.recommendation && (clarificationAnswers[question.id]?.trim() === question.recommendation.trim()
+          ? <Button size="sm" tone="ghost" icon="check" disabled>Recommendation applied</Button>
+          : <Button size="sm" tone="ghost" onClick={() => setClarificationAnswers({ ...clarificationAnswers, [question.id]: question.recommendation! })}>Use recommendation</Button>)}</article>)}
+        <footer><Button size="sm" disabled={busy || !draft.questions.every((question) => question.recommendation)} onClick={() => void continueWithClarifications(true)}>Use all recommendations</Button><Button size="sm" tone="primary" busy={revising} disabled={busy || !draft.questions.every((question) => clarificationAnswers[question.id]?.trim())} onClick={() => void continueWithClarifications()}>Continue planning</Button></footer>
+      </Panel>}
+      {briefOpen && <Panel class="plan-brief-panel" title="Documentation brief" description="These choices guide every page. Technical guidance stays here instead of crowding the page outline.">
+        <div class="plan-brief-summary"><strong>Agent summary</strong><p>{plan.summary || 'No additional summary was provided.'}</p></div>
+        <section class="plan-coverage-summary"><header><div><strong>Evidence coverage</strong><small>{draft.discovery.publicSignals} deterministic public signals inspected</small></div><span>{draft.capabilities.filter((capability) => capability.disposition === 'planned' || capability.disposition === 'existing').length} mapped</span></header>{draft.capabilities.length > 0 ? <ul>{draft.capabilities.map((capability, index) => <li key={capability.id}><span><b>{capability.title}</b><small>{capability.kind}</small></span>{editable ? <Select aria-label={`Coverage decision for ${capability.title}`} value={capability.disposition} onChange={(event) => setDraft({ ...draft, scope: 'custom', capabilities: draft.capabilities.map((candidate, item) => item === index ? { ...candidate, disposition: event.currentTarget.value as typeof candidate.disposition } : candidate) })}><option value="planned">Document</option><option value="existing">Existing documentation</option><option value="excluded">Exclude as internal</option><option value="needs-human">Decide later</option></Select> : <em class={capability.disposition}>{capability.disposition === 'needs-human' ? 'Needs decision' : capability.disposition}</em>}</li>)}</ul> : <p>No capability map was returned for this plan.</p>}</section>
+        {versionChanges && <section class="plan-version-summary"><header><strong>Changed since version {previousVersion!.version}</strong><small>Version {plan.version}</small></header><div>{versionChanges.added.length > 0 && <span class="create">+ {versionChanges.added.length} page{versionChanges.added.length === 1 ? '' : 's'}</span>}{versionChanges.changed.length > 0 && <span class="update">{versionChanges.changed.length} edited</span>}{versionChanges.removed.length > 0 && <span class="remove">− {versionChanges.removed.length} removed</span>}{versionChanges.briefChanged && <span>Brief updated</span>}</div><details><summary>See version changes</summary><ul>{versionChanges.added.map((title) => <li key={`add-${title}`}>Added “{title}”</li>)}{versionChanges.changed.map((title) => <li key={`change-${title}`}>Changed “{title}”</li>)}{versionChanges.removed.map((title) => <li key={`remove-${title}`}>Removed “{title}”</li>)}</ul></details></section>}
+        <div class="form-grid">
+          <Field label="Audiences" hint="Comma-separated"><Input disabled={!editable} value={draft.audiences.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', audiences: splitComma(event.currentTarget.value) })} /></Field>
+          <Field label="Reader outcomes" hint="Comma-separated"><Input disabled={!editable} value={draft.outcomes.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', outcomes: splitComma(event.currentTarget.value) })} /></Field>
+          <Field label="Reader experience"><Select disabled={!editable} value={draft.experienceLevel} onChange={(event) => setDraft({ ...draft, scope: 'custom', experienceLevel: event.currentTarget.value as DocumentationPlan['experienceLevel'] })}><option value="beginner">New to the product</option><option value="intermediate">Some experience</option><option value="advanced">Experienced</option><option value="mixed">Mixed audience</option></Select></Field>
+          <Field label="Preferred examples" hint="Comma-separated languages or tools"><Input disabled={!editable} value={draft.preferredExamples.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', preferredExamples: splitComma(event.currentTarget.value) })} /></Field>
+          <Field label="Locale"><Input disabled={!editable} value={draft.locale} onInput={(event) => setDraft({ ...draft, scope: 'custom', locale: event.currentTarget.value })} /></Field>
+          <Field label="Accessibility target"><Input disabled={!editable} value={draft.accessibilityTarget} onInput={(event) => setDraft({ ...draft, scope: 'custom', accessibilityTarget: event.currentTarget.value })} /></Field>
+          <Field label="Style guide"><Input disabled={!editable} value={draft.styleGuide} onInput={(event) => setDraft({ ...draft, scope: 'custom', styleGuide: event.currentTarget.value })} /></Field>
+          <Field label="Terminology" hint="One preferred term = guidance per line"><Textarea disabled={!editable} rows={3} value={termText(draft.terminology)} onInput={(event) => setDraft({ ...draft, scope: 'custom', terminology: parseTerms(event.currentTarget.value) })} /></Field>
+          <Field label="Exclusions" hint="Comma-separated"><Textarea disabled={!editable} rows={3} value={draft.exclusions.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', exclusions: splitComma(event.currentTarget.value) })} /></Field>
+        </div>
+        <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
+      </Panel>}
+      <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
+        <div class="plan-screenshot-summary">
+          <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
+          <div><strong>{plannedCaptures > 0 ? `${plannedCaptures} meaningful screenshot candidate${plannedCaptures === 1 ? '' : 's'} across ${visualPages.length} guide${visualPages.length === 1 ? '' : 's'}` : 'No application screenshots planned'}</strong><small>{plannedCaptures > 0 ? 'Doxloop supplies the capture browser. Automatic mode captures the useful states it can verify; required mode enforces every approved image.' : 'API, CLI, reference, and conceptual pages remain text-first.'}</small></div>
+          <Select disabled={!editable} value={screenshotIntent} onChange={(event) => { const screenshots = event.currentTarget.value as 'auto' | 'enabled' | 'disabled'; setDraft({ ...draft, execution: { ...draft.execution, screenshots }, pages: draft.pages.map((page) => !page.visuals || page.visuals.mode === 'none' ? page : { ...page, visuals: { ...page.visuals, mode: screenshots === 'enabled' ? 'required' as const : screenshots === 'auto' ? 'recommended' as const : page.visuals.mode } }) }) }}><option value="auto">Automatic</option><option value="enabled">Require screenshots</option><option value="disabled">No screenshots</option></Select>
+        </div>
+        {screenshotIntent !== 'disabled' && <div class={`plan-capture-readiness ${captureReadiness?.reachable ? 'ready' : 'missing'}`}>
+          <Icon name={captureReadiness?.reachable ? 'check' : 'info'} size={15} />
+          <span>
+            <strong>{captureCheck === 'checking' ? 'Checking the application…' : !captureReadiness ? 'Application check did not complete' : captureReadiness.status === 'authentication-required' ? 'Sign-in may be required during capture' : captureReadiness.reachable ? 'Application reachable' : 'Application setup needed'}</strong>
+            <small>{captureReadiness?.message ?? (captureCheck === 'checking' ? 'Confirming the configured application answers before capture.' : 'Doxloop could not reach the readiness check. Start the application, then check again.')}</small>
+          </span>
+          {captureReadiness?.configured === false
+            ? <Button size="sm" onClick={() => { history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')) }}>Configure application</Button>
+            : <Button size="sm" icon="refresh" busy={captureCheck === 'checking'} onClick={() => setCaptureCheckNonce((value) => value + 1)}>Check again</Button>}
+        </div>}
+        {visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? `${page.visuals.startPath} · ${page.visuals.rationale}` : `Starting route needed · ${page.visuals?.rationale}`}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : 'candidate'}</b></li>)}</ul>}
+        {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
+        {plan.advisories?.map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
+        {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
+      </Panel>
+      <Panel class="plan-pages-panel" title="Documentation structure" description={`${pages.length} pages · ${counts.activeChanges} changed`} actions={editable && <Button size="sm" icon="plus" onClick={addPage}>Add page</Button>}>
+        <div class="plan-page-filters" role="tablist" aria-label="Filter documentation pages">
+          <button type="button" role="tab" aria-selected={pageFilter === 'all'} class={pageFilter === 'all' ? 'active' : ''} onClick={() => setPageFilter('all')}>All pages</button>
+          <button type="button" role="tab" aria-selected={pageFilter === 'changes'} class={pageFilter === 'changes' ? 'active' : ''} onClick={() => setPageFilter('changes')}>Changes</button>
+          <button type="button" role="tab" aria-selected={pageFilter === 'create'} class={pageFilter === 'create' ? 'active' : ''} onClick={() => setPageFilter('create')}>New</button>
+          <button type="button" role="tab" aria-selected={pageFilter === 'update'} class={pageFilter === 'update' ? 'active' : ''} onClick={() => setPageFilter('update')}>Updated</button>
+          <button type="button" role="tab" aria-selected={pageFilter === 'preserve'} class={pageFilter === 'preserve' ? 'active' : ''} onClick={() => setPageFilter('preserve')}>Unchanged</button>
+          {counts.remove > 0 && <button type="button" role="tab" aria-selected={pageFilter === 'remove'} class={pageFilter === 'remove' ? 'active' : ''} onClick={() => setPageFilter('remove')}>Deleted</button>}
+        </div>
+        <div class="plan-page-outline">
+          {groupedPages.length > 0 && <div class="plan-tree-sections">{groupedPages.map((group) => <section class="plan-tree-section" key={group.id}>
+            <header><span class="plan-tree-folder"><Icon name="folder" size={16} /></span><div><strong>{group.title}</strong><small>{group.pages.length} page{group.pages.length === 1 ? '' : 's'}</small></div></header>
+            <div class="plan-tree-pages">{group.pages.map(({ page, index }) => <button type="button" class={`plan-tree-page ${page.action} ${page.priority}`} key={page.id} title={page.path} onClick={() => setSelectedPageId(page.id)}>
+              <span class="plan-tree-file"><Icon name="file" size={15} /></span>
+              <span class="plan-page-copy"><span class="plan-page-title-line"><strong>{page.title}</strong><span class={`plan-page-action ${page.action}`}>{planActionLabel(page.action)}</span></span></span>
+              <Icon name="chevronRight" size={15} />
+            </button>)}</div>
+          </section>)}</div>}
+          {groupedPages.length === 0 && <div class="plan-page-empty"><Icon name="file" size={20} /><strong>No pages in this view</strong><p>Choose another filter or add a page to the plan.</p></div>}
+        </div>
+      </Panel>
+      <Panel class="plan-revision-panel" title="Want to change the plan?" description="Tell the agent what you want in normal language. The revised plan will return as a new version.">
+        <Textarea ref={revisionInput} disabled={busy} rows={3} maxlength={1500} value={revision} placeholder="For example: Combine the two example pages, focus the quickstart on beginners, and add a migration guide." onInput={(event) => setRevision(event.currentTarget.value)} />
+        <div class="plan-revision-actions">{changed && <small>Save your direct edits before asking the agent to revise the plan.</small>}<Button disabled={!revision.trim() || busy || changed} busy={revising} icon="wand" onClick={() => void revise()}>Update plan</Button></div>
+      </Panel>
+      <footer class="plan-approval-bar">
+        <span><Icon name={approvalBlocker ? 'help' : 'lock'} size={16} /><small>{approvalBlocker ?? (unresolvedCapabilities > 0 ? `${unresolvedCapabilities} coverage ${unresolvedCapabilities === 1 ? 'item needs' : 'items need'} a decision; you can save and continue if intentionally deferred.` : 'Nothing will be written until you approve this exact plan.')}</small></span>
+        <div>{approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}<Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : plan.status === 'approved' ? `Generate ${generationTarget}` : plan.status === 'failed' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button></div>
+      </footer>
+      {selectedPage && <div class="plan-page-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelectedPageId(undefined) }}>
+        <aside class="plan-page-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-page-drawer-title">
+          <header><div><small>Page {selectedIndex + 1} of {pages.length}</small><h2 id="plan-page-drawer-title">Page details</h2></div><button type="button" aria-label="Close page details" onClick={() => setSelectedPageId(undefined)}><Icon name="close" size={18} /></button></header>
+          <div class="plan-page-drawer-body">
+            <div class="plan-page-drawer-name"><Input disabled={!editable} value={selectedPage.title} aria-label="Page title" onInput={(event) => setPage(selectedIndex, { ...selectedPage, title: event.currentTarget.value })} /><span class={`plan-page-action ${selectedPage.action}`}>{planActionLabel(selectedPage.action)}</span></div>
+            <Field label="Purpose"><Textarea disabled={!editable} rows={4} value={selectedPage.purpose} onInput={(event) => setPage(selectedIndex, { ...selectedPage, purpose: event.currentTarget.value })} /></Field>
+            <div class="plan-page-drawer-grid">
+              <Field label="What should happen"><Select disabled={!editable} value={selectedPage.action} onChange={(event) => setPage(selectedIndex, { ...selectedPage, action: event.currentTarget.value as DocumentationPlanPage['action'] })}><option value="create">Create this page</option><option value="update">Update this page</option><option value="preserve">Leave unchanged</option><option value="remove">Delete existing page</option></Select></Field>
+              <Field label="Priority in this generation"><Select disabled={!editable} value={selectedPage.priority} onChange={(event) => setPage(selectedIndex, { ...selectedPage, priority: event.currentTarget.value as DocumentationPlanPage['priority'] })}><option value="must-have">Essential</option><option value="next">Recommended</option></Select></Field>
+            </div>
+            <Field label="Documentation section"><Input disabled={!editable} value={selectedPage.type} onInput={(event) => setPage(selectedIndex, { ...selectedPage, type: event.currentTarget.value })} /></Field>
+            <section class="plan-page-visuals">
+              <h3>Application screenshots</h3>
+              <div class="plan-page-drawer-grid">
+                <Field label="Visual treatment"><Select disabled={!editable || screenshotIntent === 'disabled'} value={selectedPage.visuals?.mode ?? 'none'} onChange={(event) => {
+                  const mode = event.currentTarget.value as 'none' | 'recommended' | 'required'
+                  const enabling = mode !== 'none' && (selectedPage.visuals?.mode ?? 'none') === 'none'
+                  const estimatedCaptures = mode === 'none' ? 0 : Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), selectedPage.visuals?.estimatedCaptures ?? 0)
+                  setPage(selectedIndex, { ...selectedPage, visuals: {
+                    mode,
+                    rationale: enabling ? '' : selectedPage.visuals?.rationale ?? '',
+                    estimatedCaptures,
+                    ...(mode !== 'none' && selectedPage.visuals?.startPath ? { startPath: selectedPage.visuals.startPath } : {}),
+                    ...(mode !== 'none' && selectedPage.visuals?.workflow ? { workflow: selectedPage.visuals.workflow } : {}),
+                    ...(mode !== 'none' && selectedPage.visuals?.captureSequence ? { captureSequence: selectedPage.visuals.captureSequence } : {}),
+                  } })
+                }}><option value="none">Text only</option><option value="recommended">Capture when ready</option><option value="required">Require screenshots</option></Select></Field>
+                <Field label={selectedPage.visuals?.mode === 'required' || screenshotIntent === 'enabled' ? 'Required captures' : 'Planned captures'}><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} type="number" min={minimumUiPlannedCaptures(selectedPage.type, selectedPage.visuals?.mode ?? 'recommended')} max="20" value={selectedPage.visuals?.estimatedCaptures ?? 0} onInput={(event) => { const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), Math.min(20, Number(event.currentTarget.value) || 1)) } }) }} /></Field>
+              </div>
+              <Field label="Starting route" hint="Relative to the configured application URL"><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} value={selectedPage.visuals?.startPath ?? ''} placeholder="/settings/team" onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), startPath: event.currentTarget.value } })} /></Field>
+              <Field label="Capture workflow" hint="Include the safe test state and ordered actions"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={4} value={selectedPage.visuals?.workflow ?? ''} placeholder="Use the demo workspace. Open Team settings, invite a synthetic member, and verify the invitation state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), workflow: event.currentTarget.value } })} /></Field>
+              <Field label="Capture sequence" hint="One screenshot per line: action — visible state — why it helps"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={Math.max(4, Math.min(8, selectedPage.visuals?.estimatedCaptures ?? 4))} value={(selectedPage.visuals?.captureSequence ?? []).join('\n')} placeholder={'Open Team settings — Team settings heading and navigation are visible — orients the reader\nSelect Invite member — the empty invitation form is open — confirms where data is entered\nSubmit the demo invitation — success confirmation is visible — proves completion'} onInput={(event) => { const captureSequence = event.currentTarget.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean); const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), captureSequence.length), captureSequence } }) }} /></Field>
+              <Field label="Why images help"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={3} value={selectedPage.visuals?.rationale ?? ''} placeholder="Show the complete invitation journey so readers can verify each meaningful state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), rationale: event.currentTarget.value } })} /></Field>
+            </section>
+            <section class="plan-page-reason"><h3>Why the agent recommends this page</h3><p>{selectedPage.rationale || 'No rationale was provided for this page.'}</p>{selectedPage.evidenceDetails.length > 0 ? <details><summary>View {selectedPage.evidenceDetails.length} supporting source{selectedPage.evidenceDetails.length === 1 ? '' : 's'}</summary><div class="plan-evidence-list">{selectedPage.evidenceDetails.map((item, index) => <article key={`${item.source}-${item.path}-${index}`}><span>{item.source}</span><div><code>{item.path}{item.line ? `:${item.line}` : ''}</code>{(item.label || item.kind) && <small>{item.label ?? item.kind}</small>}</div></article>)}</div></details> : selectedPage.evidence.length > 0 && <details><summary>View {selectedPage.evidence.length} supporting source{selectedPage.evidence.length === 1 ? '' : 's'}</summary><ul>{selectedPage.evidence.map((item) => <li key={item}><code>{item}</code></li>)}</ul></details>}</section>
+            <details class="plan-page-advanced"><summary>Advanced settings</summary><div><Field label="File path"><Input disabled={!editable} class="mono" value={selectedPage.path} onInput={(event) => setPage(selectedIndex, { ...selectedPage, path: event.currentTarget.value })} /></Field><small>The documentation section and file path are primarily used by the generator.</small></div></details>
+          </div>
+          <footer><div class="plan-page-move"><Button size="sm" disabled={!editable || selectedIndex === 0} onClick={() => movePage(selectedIndex, -1)}>Move up</Button><Button size="sm" disabled={!editable || selectedIndex === pages.length - 1} onClick={() => movePage(selectedIndex, 1)}>Move down</Button></div>{editable && <Button size="sm" tone="danger" icon="trash" onClick={() => removePage(selectedIndex)}>Remove page</Button>}<Button size="sm" tone="primary" onClick={() => setSelectedPageId(undefined)}>Done</Button></footer>
+        </aside>
+      </div>}
+    </>}
+  </div>
+}
+
+function newPlanPage(index: number): DocumentationPlanPage {
+  return { id: `new-page-${Date.now()}-${index}`, title: 'New page', path: `new-page-${index + 1}`, type: 'how-to', priority: 'next', action: 'create', purpose: 'Describe the reader outcome for this page.', rationale: 'Added by the reviewer.', evidence: [], evidenceDetails: [], visuals: { mode: 'none', rationale: 'No application capture planned.', estimatedCaptures: 0 } }
+}
+
+function planEditablePayload(plan: DocumentationPlan) {
+  return {
+    scope: plan.scope,
+    summary: plan.summary,
+    audiences: plan.audiences,
+    outcomes: plan.outcomes,
+    terminology: plan.terminology,
+    exclusions: plan.exclusions,
+    instructions: plan.instructions,
+    experienceLevel: plan.experienceLevel,
+    preferredExamples: plan.preferredExamples,
+    locale: plan.locale,
+    accessibilityTarget: plan.accessibilityTarget,
+    styleGuide: plan.styleGuide,
+    capabilities: plan.capabilities,
+    navigation: plan.navigation,
+    estimatedPages: plan.estimatedPages,
+    pages: plan.pages,
+    questions: plan.questions,
+    execution: plan.execution,
+  }
+}
+
+function normalizeUiScreenshotIntent(value: DocumentationPlan['execution']['screenshots']): 'auto' | 'enabled' | 'disabled' {
+  if (value === true || value === 'enabled') return 'enabled'
+  if (value === false || value === 'disabled') return 'disabled'
+  return 'auto'
+}
+
+function minimumUiPlannedCaptures(type: string, mode: 'none' | 'recommended' | 'required'): number {
+  if (mode === 'none') return 0
+  const recommended = mode === 'recommended'
+  switch (type.trim().toLowerCase()) {
+    case 'tutorial': return recommended ? 4 : 5
+    case 'getting-started': return recommended ? 3 : 4
+    case 'how-to': return recommended ? 3 : 4
+    case 'troubleshooting': return recommended ? 2 : 3
+    default: return recommended ? 2 : 3
+  }
+}
+
+function planEditableJson(plan: DocumentationPlan): string {
+  return JSON.stringify(planEditablePayload(plan))
+}
+
+function comparePlanVersions(previous: DocumentationPlan, current: DocumentationPlan) {
+  const before = new Map(previous.pages.map((page) => [page.id, page]))
+  const after = new Map(current.pages.map((page) => [page.id, page]))
+  const added = current.pages.filter((page) => !before.has(page.id)).map((page) => page.title)
+  const removed = previous.pages.filter((page) => !after.has(page.id)).map((page) => page.title)
+  const changed = current.pages.filter((page) => {
+    const old = before.get(page.id)
+    return old && JSON.stringify(old) !== JSON.stringify(page)
+  }).map((page) => page.title)
+  const briefChanged = JSON.stringify({ audiences: previous.audiences, outcomes: previous.outcomes, terminology: previous.terminology, exclusions: previous.exclusions, instructions: previous.instructions }) !== JSON.stringify({ audiences: current.audiences, outcomes: current.outcomes, terminology: current.terminology, exclusions: current.exclusions, instructions: current.instructions })
+  return { added, removed, changed, briefChanged }
+}
+
+function workflowActivityLabel(type: string): string {
+  if (type === 'plan:propose') return 'Researching and building the documentation plan'
+  if (type === 'plan:revise') return 'Revising the documentation plan'
+  if (type === 'plan:generate') return 'Generating the approved documentation proposal'
+  if (type === 'plan:continue') return 'Continuing the interrupted documentation run'
+  if (type.startsWith('proposal:resume:')) return 'Continuing the interrupted documentation run'
+  return 'Documentation workflow in progress'
+}
+
+interface RunCapture {
+  run: string
+  file: string
+  url: string
+  guide?: string
+  step?: string
+  alt?: string
+  status?: string
+  duplicateOf?: string
+}
+
+/**
+ * Captured screenshots for the current run. Polled while the run is live so
+ * images appear as they land, then left alone once the run finishes.
+ */
+function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
+  const [captures, setCaptures] = useState<RunCapture[]>([])
+  const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const result = await api<{ captures: RunCapture[] }>(run ? `/api/captures?run=${encodeURIComponent(run)}` : '/api/captures')
+        if (!cancelled) setCaptures(result.captures)
+      } catch {
+        // A run without a workspace yet simply has nothing to show.
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    }
+    void load()
+    if (!live) return () => { cancelled = true }
+    const timer = setInterval(() => void load(), 4000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [live, run])
+
+  const duplicates = captures.filter((capture) => capture.duplicateOf).length
+  if (loaded && captures.length === 0) {
+    return <Empty icon="camera" title="No screenshots captured yet" detail={live ? 'Images appear here as the agent verifies each state.' : 'This run did not capture application screenshots.'} />
+  }
+  return <div class="capture-gallery">
+    {duplicates > 0 && <Note tone="bad">{duplicates} of {captures.length} captures repeat an earlier image. Steps showing the same screen under different names mislead readers — the agent should reach those states or record them as text-only.</Note>}
+    <div class="capture-grid">
+      {captures.map((capture) => <figure key={capture.file} class={`capture-tile${capture.duplicateOf ? ' duplicate' : ''}`}>
+        <a href={capture.url} target="_blank" rel="noreferrer"><img src={capture.url} alt={capture.alt ?? capture.file} loading="lazy" /></a>
+        <figcaption>
+          <strong>{capture.guide ? `${capture.guide} · ${capture.step ?? ''}` : capture.file.split('/').slice(-1)[0]}</strong>
+          <small>{capture.duplicateOf ? `Identical to ${capture.duplicateOf.split('/').slice(-1)[0]}` : capture.alt ?? capture.file}</small>
+        </figcaption>
+      </figure>)}
+    </div>
   </div>
 }
 
 function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
   const log = useRef<HTMLPreElement>(null)
   const agent = job.agent ? agentLabel(job.agent) : 'Agent'
+  const [tab, setTab] = useState<'log' | 'captures'>('log')
   useEffect(() => {
     if (log.current) log.current.scrollTop = log.current.scrollHeight
-  }, [job.lines.length])
+  }, [job.lines.length, tab])
   return <div class="authoring-live-log">
+    {job.stages.length > 0 && <ol class="workflow-stages" aria-label="Documentation workflow stages">
+      {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span>{stage.status === 'completed' ? <Icon name="check" size={11} /> : stage.status === 'failed' ? <Icon name="alert" size={11} /> : <i />}</span><strong>{stage.label}</strong></li>)}
+    </ol>}
     <div class="live-job-meta" aria-live="polite">
       <span><Icon name="bot" size={14} />{agent}</span>
       <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
@@ -642,9 +1363,13 @@ function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
       <span class="authoring-live-actions">
         <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
         {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>Stop update</Button>}
+        {job.status !== 'running' && job.retryable && <Button size="sm" icon="refresh" onClick={() => void act(() => post(`/api/jobs/${job.id}/retry`), 'Workflow restarted')}>Retry stage</Button>}
       </span>
     </div>
-    <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.join('\n') : `Starting ${agent}…`}</pre>
+    <div class="live-log-tabs"><Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} /></div>
+    {tab === 'log'
+      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.join('\n') : `Starting ${agent}…`}</pre>
+      : <CaptureGallery live={job.status === 'running'} />}
   </div>
 }
 
@@ -702,6 +1427,37 @@ function changeCountText(pages: HistoryChangedPage[], total: number): string {
   return count === 1 ? '1 page' : `${count} pages`
 }
 
+const HISTORY_REQUEST_SUMMARY_LENGTH = 140
+
+export function historyRequestSummary(request: string): { text: string; truncated: boolean } {
+  const text = request.replace(/\s+/g, ' ').trim()
+  if (text.length <= HISTORY_REQUEST_SUMMARY_LENGTH) return { text, truncated: false }
+  return {
+    text: `${text.slice(0, HISTORY_REQUEST_SUMMARY_LENGTH).replace(/\s+\S*$/, '').trimEnd()}…`,
+    truncated: true,
+  }
+}
+
+export function historyActionLabel(kind: HistoryRequest['kind']): string {
+  if (kind === 'create') return 'Create'
+  if (kind === 'review') return 'Review'
+  return 'Update'
+}
+
+export function historyInstruction(entry: Pick<HistoryRequest, 'kind' | 'requestText' | 'trigger'>): string {
+  const request = entry.requestText?.replace(/\s+/g, ' ').trim()
+  const internalPlanPrompt = request?.startsWith('Implement the approved Doxloop documentation plan at .doxloop/documentation-plan.json')
+  if (request && !internalPlanPrompt) return request
+  if (entry.kind === 'create') return 'Create documentation from the approved plan.'
+  if (entry.kind === 'review') return 'Review the documentation.'
+  if (entry.trigger === 'schedule' || entry.trigger === 'watch') {
+    return 'Update documentation for detected source changes.'
+  }
+  return internalPlanPrompt
+    ? 'Update documentation from the approved plan.'
+    : 'Update documentation from configured sources.'
+}
+
 /** Past documentation requests: what was asked, what happened, what changed. */
 function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: string) => void }) {
   const { entries, available, loading } = useHistoryFeed<HistoryRequest>(
@@ -719,45 +1475,26 @@ function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: str
       detail="Once you start an update, the request and everything it changed are recorded here."
     />
   }
-  return <Table class="history-table" head={<><th>Request</th><th>Result</th><th>Changed</th><th>When</th></>}>
+  return <Table class="history-table" head={<><th>Action</th><th>Instruction</th><th>Result</th><th>When</th></>}>
     {entries.map((entry) => {
       const pages = entry.pages ?? []
+      const instruction = historyRequestSummary(historyInstruction(entry))
       return <tr key={entry.id} class="history-row">
+        <td class="history-action">
+          <strong>{historyActionLabel(entry.kind)}</strong>
+        </td>
         <td>
           <div class="history-request">
-            {entry.requestText
-              ? <strong>{entry.requestText}</strong>
-              : <strong class="muted-cell">{entry.sourceSummary ?? 'Source change'}</strong>}
-            <small>
-              <span class="history-kind">{entry.kind}</span>
-              {entry.agent && <> · {agentLabel(entry.agent)}</>}
-              {entry.model && <> · {entry.model}</>}
-              {entry.trigger === 'schedule' && <> · scheduled</>}
-            </small>
+            <strong title={instruction.truncated ? historyInstruction(entry) : undefined}>{instruction.text}</strong>
             {entry.error && <small class="history-error">{entry.error}</small>}
           </div>
-          {pages.length > 0 && <details class="history-pages">
-            <summary>View changed {pages.length === 1 ? 'page' : 'pages'}</summary>
-            <ul>
-              {pages.map((page) => <li key={page.path}>
-                <Badge tone={statusTone(page.changeKind)}>{page.changeKind}</Badge>
-                <code class="mono">{page.path}</code>
-                <Badge tone={statusTone(page.decision)}>{statusLabel(page.decision)}</Badge>
-              </li>)}
-            </ul>
-          </details>}
         </td>
-        <td><Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge></td>
-        <td class="history-changed">
-          <span>{changeCountText(pages, entry.pagesChanged)}</span>
-          {(entry.linesAdded > 0 || entry.linesRemoved > 0) && <small class="history-lines">
-            <i class="added">+{entry.linesAdded}</i>
-            <i class="removed">−{entry.linesRemoved}</i>
-          </small>}
+        <td class="history-result">
+          <Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge>
+          <small>{entry.pagesChanged > 0 || pages.length > 0 ? `${changeCountText(pages, entry.pagesChanged)} changed` : 'No page changes'}</small>
         </td>
         <td class="muted-cell">
           {timeText(entry.createdAt)}
-          {entry.durationMs !== undefined && <small class="history-duration">{durationText(entry.durationMs)}</small>}
         </td>
       </tr>
     })}
@@ -814,7 +1551,7 @@ function durationText(milliseconds: number): string {
   return `${minutes}m ${seconds % 60}s`
 }
 
-function MonitoringDialog({ state, source, act, onClose }: { state: UiState; source: Source; act: Action; onClose: () => void }) {
+function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action; onClose: () => void }) {
   const project = state.project!
   const [sync, setSync] = useState<SyncConfig>(() => {
     const current = { ...structuredClone(project.sync), mode: 'auto' as const }
@@ -846,7 +1583,7 @@ function MonitoringDialog({ state, source, act, onClose }: { state: UiState; sou
     <section class="monitoring-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-dialog-title" onClick={(event) => event.stopPropagation()}>
       <header>
         <span class="sources-dialog-icon"><Icon name="bell" size={23} /></span>
-        <div><h2 id="monitoring-dialog-title">Configure monitoring</h2><p><strong>{source.name}</strong> · Source changes automatically generate a documentation update for review under Review Changes.</p></div>
+        <div><h2 id="monitoring-dialog-title">Configure project monitoring</h2><p>One project-wide policy checks all {project.sources.length} connected sources. Changes generate a documentation proposal for review.</p></div>
         <button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button>
       </header>
       <div class="monitoring-dialog-body">
@@ -869,6 +1606,9 @@ function MonitoringDialog({ state, source, act, onClose }: { state: UiState; sou
             <Field label="Watched paths"><Lines value={sync.watch} onInput={(value) => set('watch', value)} placeholder={'src/**\nopenapi.yaml'} /></Field>
             <Field label="Ignored paths"><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
             <Field label="Maximum agent minutes"><Input type="number" min="1" value={sync.budget?.maxMinutes ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxMinutes', event.currentTarget.value) })} /></Field>
+            <Field label="Maximum runs per day"><Input type="number" min="1" value={sync.budget?.maxRunsPerDay ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxRunsPerDay', event.currentTarget.value) })} /></Field>
+            <Field label="Re-verify after (days)" hint="Checks evidence age even when source content is unchanged."><Input type="number" min="1" max="3650" value={sync.maxVerificationAgeDays ?? ''} onInput={(event) => set('maxVerificationAgeDays', event.currentTarget.value ? clampNumber(event.currentTarget.value, 1, 3650) : undefined)} /></Field>
+            <Field label="Expired verification"><Select value={sync.maxVerificationAgeSeverity ?? 'warn'} onChange={(event) => set('maxVerificationAgeSeverity', event.currentTarget.value as 'warn' | 'fail')}><option value="warn">Warn</option><option value="fail">Fail validation</option></Select></Field>
           </div>}
           <Note>Monitoring creates the documentation update as a proposal under Review Changes. It never modifies the product source or publishes automatically.</Note>
         </section>
@@ -937,24 +1677,76 @@ function commandText(line: string) {
 
 function Proposals({ state, act, onError }: { state: UiState; act: Action; onError: (error: string) => void }) {
   const runs = validRuns(state.runs)
+  const [showArchived, setShowArchived] = useState(false)
+  const archivedCount = runs.filter((run) => Boolean(run.archivedAt)).length
+  const visibleRuns = runs.filter((run) => showArchived ? Boolean(run.archivedAt) : !run.archivedAt)
   const [selectedId, setSelectedId] = useState('')
   const selected = runs.find((run) => run.id === selectedId)
   const [changeId, setChangeId] = useState('')
   const [confirmingAcceptance, setConfirmingAcceptance] = useState<Proposal | null>(null)
   const [appliedProposal, setAppliedProposal] = useState<Proposal | null>(null)
+  const [delivery, setDelivery] = useState<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string; pushedAt?: string; pullRequestUrl?: string } | null>(null)
   const [view, setView] = useState<'rendered' | 'source'>('rendered')
   const [layout, setLayout] = useState<'split' | 'unified'>('split')
   const [onlyChanges, setOnlyChanges] = useState(true)
+  const [rationaleChange, setRationaleChange] = useState<ProposalChange | null>(null)
+  const [revision, setRevision] = useState<{
+    mode: 'current' | 'selected' | 'all'
+    instruction: string
+    selectedIds: string[]
+    hunkIds: string[]
+  } | null>(null)
+  const [editor, setEditor] = useState<{
+    change: ProposalChange
+    content: string
+    evidenceDisposition: 'preserved' | 'needs-review'
+  } | null>(null)
   const change = selected?.changes.find((item) => item.id === changeId) ?? selected?.changes[0]
   useEffect(() => setChangeId(selected?.changes[0]?.id ?? ''), [selected?.id])
-  const open = selected ? OPEN_STATUSES.includes(selected.status) : false
+  const open = selected ? !selected.archivedAt && OPEN_STATUSES.includes(selected.status) : false
   const counts = selected ? proposalChangeCounts(selected.changes) : { added: 0, modified: 0, deleted: 0 }
   const acceptAll = async (proposal: Proposal) => {
     const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all' }))
     setConfirmingAcceptance(null)
     if (result?.status === 'applied') setAppliedProposal(result)
   }
+  const openEditor = async (proposal: Proposal, selectedChange: ProposalChange) => {
+    try {
+      const result = await api<{ content: string; evidenceDisposition: 'preserved' | 'needs-review' }>(`/api/proposals/${proposal.id}/changes/${selectedChange.id}/content`)
+      setEditor({ change: selectedChange, content: result.content, evidenceDisposition: result.evidenceDisposition })
+    } catch (cause) {
+      onError(message(cause))
+    }
+  }
+  const requestRevision = async (proposal: Proposal) => {
+    if (!revision?.instruction.trim()) return
+    const changeIds = revision.mode === 'all'
+      ? proposal.changes.map((item) => item.id)
+      : revision.mode === 'current'
+        ? (change ? [change.id] : [])
+        : revision.selectedIds
+    const result = await act(
+      () => post<UiJob>(`/api/proposals/${proposal.id}/revise`, {
+        instruction: revision.instruction,
+        changeIds,
+        hunkIds: revision.hunkIds,
+      }),
+      'Revision started',
+      false,
+    )
+    if (result) setRevision(null)
+  }
   return <>
+    {delivery && <div class="proposal-ready-scrim" role="presentation"><section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-delivery-title"><button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setDelivery(null)}><Icon name="close" size={16} /></button><span class="proposal-ready-icon"><Icon name="external" size={24} /></span><div><h2 id="proposal-delivery-title">{delivery.pullRequestUrl ? 'Pull request is ready' : delivery.pushedAt ? 'Branch published' : 'Pull-request branch is ready'}</h2><p>{delivery.pushedAt ? 'The reviewed commit is available on the remote without changing your current working tree.' : 'Doxloop created the branch in an isolated Git worktree without changing your current working tree.'}</p></div><div class="proposal-ready-summary"><strong>{delivery.branch}</strong><span>Commit {delivery.commit.slice(0, 12)}</span></div>{!delivery.pushedAt && delivery.pullRequestCommand && <code>{delivery.pullRequestCommand}</code>}<footer>{delivery.pullRequestUrl ? <a class="btn primary md" href={delivery.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request</a> : delivery.pushedAt ? delivery.compareUrl && <a class="btn primary md" href={delivery.compareUrl} target="_blank" rel="noreferrer">Open comparison</a> : <><Button onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: false }), 'Branch published'); if (result) setDelivery(result) })()}>Push branch</Button><Button tone="primary" onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: true }), 'Pull request created'); if (result) setDelivery(result) })()}>Push & create PR</Button></>}<Button onClick={() => setDelivery(null)}>Done</Button></footer></section></div>}
+    {rationaleChange && <ProposalRationaleDrawer change={rationaleChange} onClose={() => setRationaleChange(null)} />}
+    {revision && selected && <ProposalRevisionDialog proposal={selected} current={change} draft={revision} onChange={setRevision} onClose={() => setRevision(null)} onSubmit={() => void requestRevision(selected)} />}
+    {editor && selected && <ProposalEditDialog value={editor} onChange={setEditor} onClose={() => setEditor(null)} onSave={() => void (async () => {
+      const result = await act(() => patch<Proposal>(`/api/proposals/${selected.id}/changes/${editor.change.id}/content`, {
+        content: editor.content,
+        evidenceDisposition: editor.evidenceDisposition,
+      }), 'Page edit saved')
+      if (result) setEditor(null)
+    })()} />}
     {confirmingAcceptance && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-accept-title">
         <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingAcceptance(null)}><Icon name="close" size={16} /></button>
@@ -976,15 +1768,17 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
     {selected
       ? <div class="review-detail-heading">
         <button type="button" class="review-back-button" onClick={() => setSelectedId('')}><Icon name="chevronRight" size={14} />All proposals</button>
-        <PageHeader title="Review proposal" description="Compare the current documentation with the proposed update." actions={<Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview documentation</Button>} />
+        <PageHeader title="Review proposal" description="Compare the current documentation with the proposed update." actions={<><Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview documentation</Button>{open && <Button icon="publish" onClick={() => void (async () => { const result = await act(() => post<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string }>(`/api/proposals/${selected.id}/delivery/branch`, {}), 'Pull-request branch prepared'); if (result) setDelivery(result) })()}>Prepare PR branch</Button>}{!selected.archivedAt && selected.status !== 'generating' && <Button onClick={() => confirm('Archive this proposal? It can remain in history until cleanup.') && void act(() => post(`/api/proposals/${selected.id}/archive`), 'Proposal archived')}>Archive</Button>}</>} />
       </div>
       : <PageHeader title="Review Changes" description="Choose a proposal to inspect and approve its documentation changes." />}
     {runs.length === 0
       ? <Panel flush><Empty icon="proposals" title="No proposals yet" detail="Run source monitoring, or start an update when documentation becomes stale." /></Panel>
       : !selected
-        ? <Panel class="proposal-index-panel" title="All proposals" description={runs.length + ' documentation update' + (runs.length === 1 ? '' : 's') + ' available for review.'} flush>
+        ? <Panel class="proposal-index-panel" title={showArchived ? 'Archived proposals' : 'All proposals'} description={visibleRuns.length + ' documentation update' + (visibleRuns.length === 1 ? '' : 's') + (showArchived ? ' retained for audit.' : ' available for review.')} flush>
+          <div class="proposal-index-tools"><Button size="sm" onClick={() => setShowArchived(!showArchived)}>{showArchived ? 'Back to proposals' : `Archived (${archivedCount})`}</Button>{showArchived && archivedCount > 0 && <Button size="sm" tone="danger" onClick={() => confirm('Permanently remove every archived proposal workspace?') && void act(() => post('/api/proposals/cleanup', {}), 'Archived proposals cleaned up')}>Clean up archived</Button>}</div>
+          {visibleRuns.length === 0 ? <Empty title={showArchived ? 'No archived proposals' : 'No active proposals'} detail={showArchived ? 'Archived proposal workspaces will appear here until cleanup.' : 'Archive completed reviews to keep this list focused.'} /> :
           <Table class="proposal-index-table" head={<><th>Proposal</th><th>Changes</th><th>Files</th><th>Created</th><th>Status</th><th><span class="sr-only">Open</span></th></>}>
-            {runs.map((run) => {
+            {visibleRuns.map((run) => {
               const runCounts = proposalChangeCounts(run.changes)
               return <tr key={run.id} class="proposal-index-row" tabIndex={0} onClick={() => setSelectedId(run.id)} onKeyDown={(event) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return
@@ -995,11 +1789,12 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                 <td><span class="proposal-index-counts"><b class="added">+{runCounts.added}</b><b class="modified">{runCounts.modified} modified</b><b class="deleted">−{runCounts.deleted}</b></span></td>
                 <td><span class="proposal-index-files"><Icon name="file" size={14} />{run.changes.length}</span></td>
                 <td><time>{timeText(run.createdAt)}</time></td>
-                <td><Badge tone={statusTone(run.status)}>{statusLabel(run.status)}</Badge></td>
+                <td><Badge tone={statusTone(run.archivedAt ? 'archived' : run.status)}>{run.archivedAt ? 'Archived' : statusLabel(run.status)}</Badge></td>
                 <td><Icon name="chevronRight" size={15} /></td>
               </tr>
             })}
           </Table>
+          }
         </Panel>
         : <div class="review">
         <section class="review-main">
@@ -1010,33 +1805,54 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                 <div class="proposal-summary-line">
                   <h2>{selected.changes.length} file change{selected.changes.length === 1 ? '' : 's'}</h2>
                   <div class="change-counts" aria-label={`${counts.added} added, ${counts.modified} modified, ${counts.deleted} deleted`}>
-                    <span class="added"><i />{counts.added} added</span><b />
-                    <span class="modified"><i />{counts.modified} modified</span><b />
-                    <span class="deleted"><i />{counts.deleted} deleted</span>
+                    {counts.added > 0 && <span class="added"><i />{counts.added} added</span>}
+                    {counts.added > 0 && (counts.modified > 0 || counts.deleted > 0) && <b />}
+                    {counts.modified > 0 && <span class="modified"><i />{counts.modified} modified</span>}
+                    {counts.modified > 0 && counts.deleted > 0 && <b />}
+                    {counts.deleted > 0 && <span class="deleted"><i />{counts.deleted} deleted</span>}
                   </div>
                 </div>
-                <strong class="source-count">{selected.sourceSummary}<Icon name="info" size={14} /></strong>
-                <p class="source-detail">{selected.stalePages.length > 0 ? selected.stalePages.join(', ') : selected.summary}</p>
+                <strong class="source-count">{selected.sourceSummary}</strong>
               </div>
               <div class="proposal-summary-side">
                 <div class="proposal-actions">
+                  {selected.status === 'applied' && selected.undo?.status === 'available' && <Button onClick={() => confirm('Undo every file applied by this proposal? Newer edits will be protected.') && void act(() => post(`/api/proposals/${selected.id}/undo`), 'Documentation changes undone')}>Undo</Button>}
+                  {(open || (selected.status === 'stale' && !selected.archivedAt)) && <Button onClick={() => setRevision({ mode: 'all', instruction: 'Regenerate this proposal using the current approved plan and evidence.', selectedIds: selected.changes.map((item) => item.id), hunkIds: [] })}>Regenerate</Button>}
                   <Button tone="danger" disabled={!open} onClick={() => confirm('Reject this complete proposal?') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Proposal rejected')}>Reject</Button>
                   <Button tone="primary" icon="check" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
                 </div>
-                <div class="proposal-meta"><span><Icon name="file" size={15} />Review files individually or apply the full proposal</span></div>
               </div>
             </header>
 
-            <div class="review-workspace">
-              <aside class="review-file-rail" aria-label="Changed files">
-                <header><div><strong>Changed files</strong><small>{selected.changes.length} file{selected.changes.length === 1 ? '' : 's'} in this proposal</small></div></header>
-                <ReviewFileTree nodes={proposalFileTree(selected.changes)} selectedId={change?.id ?? ''} onSelect={setChangeId} />
-              </aside>
+            {selected.status === 'failed' && !selected.archivedAt && <div class="proposal-lifecycle-notice failed">
+              <Icon name="alert" size={15} />
+              <span class="proposal-failed-copy"><strong>This run stopped before it could be reviewed.</strong>{selected.error && <small>{selected.error}</small>}{(selected.recovery?.resumable !== false || selected.recovery?.ignorable !== false) && <small>Its workspace is preserved: continue it instead of generating again.</small>}</span>
+              {(selected.recovery?.resumable !== false || selected.recovery?.ignorable !== false) && <span class="proposal-failed-actions">
+                {selected.recovery?.resumable !== false && <Button size="sm" tone="primary" icon="play" onClick={() => void act(() => post<UiJob>(`/api/proposals/${selected.id}/resume`), 'Continuing the documentation run')}>Resume</Button>}
+                {selected.recovery?.ignorable !== false && <Button size="sm" icon="check" onClick={() => void act(() => post<Proposal>(`/api/proposals/${selected.id}/recover`, { ignoreScreenshotProblems: true }), 'Proposal ready for review with problems ignored')}>Ignore problems & review</Button>}
+              </span>}
+            </div>}
+            {selected.advisories?.map((advisory) => <div key={advisory} class="proposal-lifecycle-notice advisory"><Icon name="info" size={15} /><span>{advisory}</span></div>)}
+            {(selected.status === 'stale' || selected.status === 'superseded' || selected.archivedAt) && <div class={`proposal-lifecycle-notice ${selected.status}`}>
+              <Icon name="info" size={15} />
+              <span>{selected.status === 'stale' ? selected.error : selected.status === 'superseded' ? `A newer revision${selected.supersededBy ? ` (${selected.supersededBy})` : ''} replaced this proposal.` : 'This proposal is archived.'}</span>
+            </div>}
 
+            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <div class={`proposal-screenshot-result ${selected.screenshots.ignoredProblems ? 'ignored' : selected.screenshots.status}`}><span class="screenshot-camera"><Icon name="camera" size={17} /></span><span><strong>{selected.screenshots.ignoredProblems ? `${selected.screenshots.captured} application screenshot${selected.screenshots.captured === 1 ? '' : 's'} verified · ${selected.screenshots.ignoredProblems} problem${selected.screenshots.ignoredProblems === 1 ? '' : 's'} ignored` : selected.screenshots.status === 'verified' ? `${selected.screenshots.captured} application screenshot${selected.screenshots.captured === 1 ? '' : 's'} verified` : selected.screenshots.status === 'skipped' ? 'Application screenshots skipped' : 'Application screenshot capture needs attention'}</strong><small>{selected.screenshots.message ?? `${selected.screenshots.guides} guide${selected.screenshots.guides === 1 ? '' : 's'} · ${selected.screenshots.textOnly} text-only step${selected.screenshots.textOnly === 1 ? '' : 's'}`}</small></span>{selected.screenshots.status === 'verified' && <Button size="sm" onClick={() => void openProposalPreview(selected.id, onError)}>Review in preview</Button>}</div>}
+
+            <div class="review-workspace">
               <section class="review-diff-panel">
                 {change ? <>
                   <header class="review-file-head">
-                    <div><span class="review-file-head-icon"><Icon name="file" size={16} /></span><span><small>Reviewing file</small><strong>{change.path}</strong></span></div>
+                    <div class="review-file-head-main">
+                      <ReviewFilePicker
+                        key={selected.id}
+                        nodes={proposalFileTree(selected.changes)}
+                        selected={change}
+                        fileCount={selected.changes.length}
+                        onSelect={setChangeId}
+                      />
+                    </div>
                     <span class="file-position">{Math.max(0, selected.changes.findIndex((item) => item.id === change.id)) + 1} of {selected.changes.length}</span>
                   </header>
                   <div class="review-toolbar">
@@ -1049,13 +1865,16 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                         <div class="review-layout-control"><span class="toolbar-label">Diff layout</span><Segmented value={layout} onChange={setLayout} items={[['split', 'Side-by-side'], ['unified', 'Inline']] as const} /></div>
                         <Button size="sm" class={onlyChanges ? 'active-filter' : ''} onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Changes only' : 'Show all'}</Button>
                       </>}
+                      <Button size="sm" onClick={() => setRationaleChange(change)}>Why this change</Button>
+                      <Button size="sm" disabled={!open || change.category !== 'page' || change.binary || change.kind === 'deleted'} onClick={() => void openEditor(selected, change)}>Edit page</Button>
+                      <Button size="sm" disabled={!open} onClick={() => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [] })}>Ask agent to revise</Button>
                       <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id }), 'Page accepted')}>Accept file</Button>
                     </div>
                   </div>
                   <div class="review-diff-body">
                     {view === 'source'
-                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} />
-                      : <iframe class="review-frame" title={`Review ${change.title}`} src={`/review-preview/${selected.id}/${change.id}?layout=${layout}${onlyChanges ? '&only=1' : ''}`} />}
+                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} onReviseHunk={(hunkId) => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [hunkId] })} />
+                      : <div class="review-device"><iframe class="review-frame" title={`Review ${change.title}`} src={`/review-preview/${selected.id}/${change.id}?layout=${layout}${onlyChanges ? '&only=1' : ''}`} /></div>}
                   </div>
                 </> : <Empty title="This proposal contains no file changes" />}
               </section>
@@ -1066,11 +1885,162 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
   </>
 }
 
+type ProposalRevisionDraft = {
+  mode: 'current' | 'selected' | 'all'
+  instruction: string
+  selectedIds: string[]
+  hunkIds: string[]
+}
+
+type ProposalEditorDraft = {
+  change: ProposalChange
+  content: string
+  evidenceDisposition: 'preserved' | 'needs-review'
+}
+
+function ProposalRationaleDrawer({ change, onClose }: { change: ProposalChange; onClose: () => void }) {
+  const rationale = change.rationale
+  const claims = [...rationale.claims.added, ...rationale.claims.changed, ...rationale.claims.removed]
+  return <div class="proposal-drawer-scrim" role="presentation" onClick={(event) => event.target === event.currentTarget && onClose()}>
+    <aside class="proposal-rationale-drawer" role="dialog" aria-modal="true" aria-labelledby="proposal-rationale-title">
+      <header><span><small>Why this change</small><h2 id="proposal-rationale-title">{change.title}</h2><code>{change.path}</code></span><button type="button" aria-label="Close rationale" onClick={onClose}><Icon name="close" size={17} /></button></header>
+      <div class="proposal-drawer-body">
+        <section class="rationale-lead"><Badge tone={statusTone(rationale.confidence)}>{rationale.confidence.replace('-', ' ')}</Badge><p>{rationale.reason}</p></section>
+        <section><h3>Supporting evidence</h3>{rationale.evidence.length > 0 ? <div class="rationale-evidence-list">{rationale.evidence.map((item, index) => <article key={index} class={!item.available ? 'unavailable' : ''}><Icon name="link" size={14} /><span><strong>{item.source}</strong><code>{item.path ?? item.operation ?? 'Configured source'}</code>{item.revision && <small>Revision {item.revision.slice(0, 12)}</small>}{!item.available && <small>Unavailable in this environment</small>}</span></article>)}</div> : <p class="muted-copy">No precise source reference was recorded. Review this change manually before acceptance.</p>}</section>
+        {claims.length > 0 && <section><h3>Reader-facing claims</h3><ul>{claims.map((claim) => <li key={claim}>{claim}</li>)}</ul></section>}
+        {rationale.affectedInterfaces.length > 0 && <section><h3>Public interfaces affected</h3><div class="rationale-tags">{rationale.affectedInterfaces.map((item) => <span key={item}>{item}</span>)}</div></section>}
+        <section class="rationale-validation"><h3>Checks</h3><p><Icon name="check" size={14} /> {rationale.validation.errors} errors · {rationale.validation.warnings} warnings</p><small>{rationale.authorship === 'human' ? 'Edited by a reviewer' : rationale.planId ? `From approved plan ${rationale.planId}` : 'Generated from the review request'}</small></section>
+        {rationale.assumptions.length > 0 && <details><summary>Assumptions to verify</summary><ul>{rationale.assumptions.map((item) => <li key={item}>{item}</li>)}</ul></details>}
+      </div>
+    </aside>
+  </div>
+}
+
+function ProposalRevisionDialog({ proposal, current, draft, onChange, onClose, onSubmit }: {
+  proposal: Proposal
+  current: ProposalChange | undefined
+  draft: ProposalRevisionDraft
+  onChange: (next: ProposalRevisionDraft) => void
+  onClose: () => void
+  onSubmit: () => void
+}) {
+  const selectedCount = draft.mode === 'all' ? proposal.changes.length : draft.mode === 'current' ? Number(Boolean(current)) : draft.selectedIds.length
+  return <div class="proposal-ready-scrim" role="presentation">
+    <section class="proposal-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-revision-title">
+      <header><span><small>Agent revision</small><h2 id="proposal-revision-title">What should change?</h2><p>Only the selected scope will be regenerated. Everything else stays exactly as reviewed.</p></span><button type="button" aria-label="Close revision" onClick={onClose}><Icon name="close" size={16} /></button></header>
+      <div class="revision-scope-tabs">
+        {([['current', 'This file'], ['selected', 'Choose files'], ['all', 'Whole proposal']] as const).map(([id, label]) => <button type="button" class={draft.mode === id ? 'active' : ''} onClick={() => onChange({ ...draft, mode: id, selectedIds: id === 'current' && current ? [current.id] : draft.selectedIds, hunkIds: id === 'current' ? draft.hunkIds : [] })}>{label}</button>)}
+      </div>
+      {draft.hunkIds.length > 0 && <Note tone="info">The request is scoped to one selected source change in {current?.path}.</Note>}
+      {draft.mode === 'selected' && <div class="revision-file-list">{proposal.changes.map((item) => <label key={item.id}><input type="checkbox" checked={draft.selectedIds.includes(item.id)} onChange={(event) => onChange({ ...draft, selectedIds: event.currentTarget.checked ? [...draft.selectedIds, item.id] : draft.selectedIds.filter((id) => id !== item.id) })} /><span><strong>{item.title}</strong><code>{item.path}</code></span><Badge tone={statusTone(item.kind)}>{item.kind}</Badge></label>)}</div>}
+      <Field label="Revision instructions"><Textarea rows={5} maxlength={2000} value={draft.instruction} placeholder="For example: Make this task more concise, keep the API example, and explain the expected response." onInput={(event) => onChange({ ...draft, instruction: event.currentTarget.value })} /></Field>
+      <footer><small>{selectedCount} file{selectedCount === 1 ? '' : 's'} selected</small><span><Button onClick={onClose}>Cancel</Button><Button tone="primary" icon="wand" disabled={!draft.instruction.trim() || selectedCount === 0} onClick={onSubmit}>Send to agent</Button></span></footer>
+    </section>
+  </div>
+}
+
+function ProposalEditDialog({ value, onChange, onClose, onSave }: {
+  value: ProposalEditorDraft
+  onChange: (next: ProposalEditorDraft) => void
+  onClose: () => void
+  onSave: () => void
+}) {
+  return <div class="proposal-ready-scrim" role="presentation">
+    <section class="proposal-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-edit-title">
+      <header><span><small>Direct page edit</small><h2 id="proposal-edit-title">{value.change.title}</h2><code>{value.change.path}</code></span><button type="button" aria-label="Close editor" onClick={onClose}><Icon name="close" size={16} /></button></header>
+      <Textarea class="proposal-code-editor" rows={22} value={value.content} onInput={(event) => onChange({ ...value, content: event.currentTarget.value })} />
+      <label class="evidence-disposition"><span><strong>Evidence after this edit</strong><small>Keep the source links only if your edit does not change the factual claims.</small></span><select value={value.evidenceDisposition} onChange={(event) => onChange({ ...value, evidenceDisposition: event.currentTarget.value as ProposalEditorDraft['evidenceDisposition'] })}><option value="preserved">Evidence still applies</option><option value="needs-review">Needs evidence review</option></select></label>
+      <footer><Button onClick={onClose}>Cancel</Button><Button tone="primary" icon="check" disabled={!value.content.trim()} onClick={onSave}>Validate and save</Button></footer>
+    </section>
+  </div>
+}
+
 type ReviewTreeNode = {
   name: string
   path: string
   children: ReviewTreeNode[]
   change?: ProposalChange
+}
+
+function ReviewFilePicker({ nodes, selected, fileCount, onSelect }: {
+  nodes: ReviewTreeNode[]
+  selected: ProposalChange
+  fileCount: number
+  onSelect: (id: string) => void
+}) {
+  const root = useRef<HTMLDivElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const filteredNodes = filterReviewFileTree(nodes, query)
+  const matchingFiles = countReviewTreeFiles(filteredNodes)
+  const selectedName = selected.path.split('/').filter(Boolean).pop() ?? selected.path
+
+  useEffect(() => {
+    if (!open) return
+    searchInput.current?.focus()
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      root.current?.querySelector<HTMLButtonElement>('.review-file-picker-trigger')?.focus()
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePress)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePress)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  const selectFile = (id: string) => {
+    onSelect(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return <div class="review-file-picker" ref={root}>
+    <button
+      type="button"
+      class={`review-file-picker-trigger ${open ? 'open' : ''}`}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-controls="review-file-picker-menu"
+      onClick={() => setOpen(!open)}
+    >
+      <Icon name="file" size={15} />
+      <strong class="review-file-picker-name">{selectedName}</strong>
+      <span class={`review-file-picker-status ${selected.kind}`}>{selected.kind}</span>
+      <Icon name="chevronRight" size={13} />
+    </button>
+
+    {open && <div id="review-file-picker-menu" class="review-file-picker-menu" role="dialog" aria-label="Changed files">
+      <header>
+        <span><strong>Changed files</strong><small>{fileCount} file{fileCount === 1 ? '' : 's'} in this proposal</small></span>
+        <button type="button" aria-label="Close changed files" onClick={() => setOpen(false)}><Icon name="close" size={14} /></button>
+      </header>
+      <label class="review-file-search">
+        <span class="sr-only">Search changed files</span>
+        <Icon name="search" size={15} />
+        <input
+          class="input"
+          ref={searchInput}
+          type="search"
+          value={query}
+          placeholder="Search files or folders…"
+          onInput={(event) => setQuery(event.currentTarget.value)}
+        />
+      </label>
+      <div class="review-file-picker-tree">
+        {matchingFiles > 0
+          ? <ReviewFileTree nodes={filteredNodes} selectedId={selected.id} onSelect={selectFile} />
+          : <div class="review-file-search-empty"><Icon name="search" size={18} /><strong>No matching files</strong><small>Try a filename or folder path.</small></div>}
+      </div>
+      {query.trim() && <footer>{matchingFiles} matching file{matchingFiles === 1 ? '' : 's'}</footer>}
+    </div>}
+  </div>
 }
 
 function proposalFileTree(changes: ProposalChange[]): ReviewTreeNode[] {
@@ -1094,6 +2064,22 @@ function proposalFileTree(changes: ProposalChange[]): ReviewTreeNode[] {
     .sort((left, right) => Number(Boolean(left.change)) - Number(Boolean(right.change)) || left.name.localeCompare(right.name))
     .map((node) => ({ ...node, children: sort(node.children) }))
   return sort(root)
+}
+
+function filterReviewFileTree(nodes: ReviewTreeNode[], rawQuery: string): ReviewTreeNode[] {
+  const query = rawQuery.trim().toLocaleLowerCase()
+  if (!query) return nodes
+  return nodes.flatMap((node): ReviewTreeNode[] => {
+    const matches = node.path.toLocaleLowerCase().includes(query)
+    if (node.change) return matches ? [node] : []
+    if (matches) return [node]
+    const children = filterReviewFileTree(node.children, query)
+    return children.length > 0 ? [{ ...node, children }] : []
+  })
+}
+
+function countReviewTreeFiles(nodes: ReviewTreeNode[]): number {
+  return nodes.reduce((count, node) => count + (node.change ? 1 : countReviewTreeFiles(node.children)), 0)
 }
 
 function ReviewFileTree({ nodes, selectedId, onSelect, depth = 0 }: {
@@ -1130,7 +2116,7 @@ function proposalSummaryText(changes: ProposalChange[]): string {
   return `${changes.length} file change${changes.length === 1 ? '' : 's'} · ${counts.added} added · ${counts.modified} modified · ${counts.deleted} deleted`
 }
 
-function ProposalSourceDiff({ runId, change, act }: { runId: string; change: ProposalChange; act: Action }) {
+function ProposalSourceDiff({ runId, change, act, onReviseHunk }: { runId: string; change: ProposalChange; act: Action; onReviseHunk: (hunkId: string) => void }) {
   const [diff, setDiff] = useState<SourceDiff | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -1147,7 +2133,7 @@ function ProposalSourceDiff({ runId, change, act }: { runId: string; change: Pro
     {groups.map((group, index) => <section class={`hunk ${group.state ?? ''}`} key={group.hunkId ?? index}>
       <header>
         <strong>{group.hunkId ? `Change ${index + 1}` : 'Context'}</strong>
-        {group.hunkId && group.state === 'pending' && <Button size="sm" tone="primary" onClick={() => void act(() => post(`/api/proposals/${runId}/accept`, { scope: 'hunk', changeId: change.id, hunkId: group.hunkId }), 'Change accepted')}>Accept change</Button>}
+        {group.hunkId && group.state === 'pending' && <span class="hunk-actions"><Button size="sm" onClick={() => onReviseHunk(group.hunkId!)}>Revise</Button><Button size="sm" tone="primary" onClick={() => void act(() => post(`/api/proposals/${runId}/accept`, { scope: 'hunk', changeId: change.id, hunkId: group.hunkId }), 'Change accepted')}>Accept change</Button></span>}
         {group.hunkId && group.state !== 'pending' && <Badge tone={statusTone(group.state ?? '')}>{group.state ?? 'resolved'}</Badge>}
       </header>
       <div class="diff-lines">{group.rows.map((row, rowIndex) => <DiffLine key={rowIndex} row={row} />)}</div>
@@ -1483,18 +2469,28 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
   const project = state.project!
   const [section, setSection] = useState<typeof SETTINGS_SECTIONS[number][0]>('general')
   const [identity, setIdentity] = useState({ title: project.title, defaultAgent: project.defaultAgent ?? '' })
-  const [docs, setDocs] = useState({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
+  const [docs, setDocs] = useState({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
   const [application, setApplication] = useState({
     baseUrl: project.application?.baseUrl ?? '',
     source: project.application?.source ?? '',
-    startCommand: project.application?.startCommand ?? '',
     readyPath: project.application?.readyPath ?? '',
     policy: project.application?.screenshots?.policy ?? 'requested',
     highlight: project.application?.screenshots?.highlight ?? true,
+    startPath: project.application?.screenshots?.startPath ?? '/',
+    workflow: project.application?.screenshots?.workflow ?? '',
     viewportWidth: String(project.application?.screenshots?.viewport?.width ?? 1440),
     viewportHeight: String(project.application?.screenshots?.viewport?.height ?? 900),
   })
-  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: parseTerms(docs.termsText) } }), 'Documentation preferences saved')
+  const [applicationReadiness, setApplicationReadiness] = useState<ApplicationReadiness>()
+  const [testingApplication, setTestingApplication] = useState(false)
+  const applicationPayload = { baseUrl: application.baseUrl, source: application.source, readyPath: application.readyPath, screenshots: { policy: application.policy, highlight: application.highlight, viewport: { width: application.viewportWidth, height: application.viewportHeight }, startPath: application.startPath, workflow: application.workflow } }
+  const testApplication = async () => {
+    setTestingApplication(true)
+    try { setApplicationReadiness(await post<ApplicationReadiness>('/api/application/readiness', applicationPayload)) }
+    catch { setApplicationReadiness(undefined) }
+    finally { setTestingApplication(false) }
+  }
+  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), preferredExamples: splitComma(docs.preferredExamplesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: parseTerms(docs.termsText) } }), 'Documentation preferences saved')
   return <>
     <PageHeader title="Settings" description="Shape the documentation experience for this workspace." />
     <div class="settings">
@@ -1509,7 +2505,7 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
             <Field label="Site title"><Input value={identity.title} onInput={(event) => setIdentity({ ...identity, title: event.currentTarget.value })} /></Field>
             <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => setIdentity({ ...identity, defaultAgent: event.currentTarget.value })}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
           </div>
-          <KeyValues items={[['Content directory', <code class="mono">{project.contentDir}</code>], ['Generator', generatorLabel(state.generators, project.generator)], ['Workspace', <code class="mono">{state.root ?? state.cwd}</code>]]} />
+          <KeyValues items={[['Content directory', <code class="mono">{project.contentDir || 'Project root'}</code>], ['Generator', generatorLabel(state.generators, project.generator)], ['Workspace', <code class="mono">{state.root ?? state.cwd}</code>]]} />
           <div class="form-actions"><Button tone="primary" onClick={() => void act(() => patch('/api/project', identity), 'Identity settings saved')}>Save changes</Button></div>
         </Panel>}
 
@@ -1522,6 +2518,8 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
             <Field label="Accessibility target"><Input value={docs.accessibilityTarget} onInput={(event) => setDocs({ ...docs, accessibilityTarget: event.currentTarget.value })} /></Field>
             <Field label="Tone"><Input value={docs.toneText} placeholder="clear, direct, helpful" onInput={(event) => setDocs({ ...docs, toneText: event.currentTarget.value })} /></Field>
             <Field label="Priority outcomes"><Input value={docs.outcomesText} placeholder="quick start, successful integration" onInput={(event) => setDocs({ ...docs, outcomesText: event.currentTarget.value })} /></Field>
+            <Field label="Preferred examples"><Input value={docs.preferredExamplesText} placeholder="TypeScript, curl" onInput={(event) => setDocs({ ...docs, preferredExamplesText: event.currentTarget.value })} /></Field>
+            <Field label="Design direction"><Input value={docs.designDirection ?? ''} placeholder="Compact, task-led developer documentation" onInput={(event) => setDocs({ ...docs, designDirection: event.currentTarget.value })} /></Field>
             <Field label="Standards profile"><Input value={docs.standardsProfile} onInput={(event) => setDocs({ ...docs, standardsProfile: event.currentTarget.value })} /></Field>
             <Field label="Style guide"><Input value={docs.styleGuide} onInput={(event) => setDocs({ ...docs, styleGuide: event.currentTarget.value })} /></Field>
             <Field label="Preferred terminology" hint="One “term = replacement” per line"><Textarea rows={5} value={docs.termsText} onInput={(event) => setDocs({ ...docs, termsText: event.currentTarget.value })} /></Field>
@@ -1536,16 +2534,19 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
             <div class="form-grid">
               <Field label="Application base URL"><Input value={application.baseUrl} placeholder="http://localhost:3000" onInput={(event) => setApplication({ ...application, baseUrl: event.currentTarget.value })} /></Field>
               <Field label="Product source"><Select value={application.source} onChange={(event) => setApplication({ ...application, source: event.currentTarget.value })}><option value="">None</option>{project.sources.map((source) => <option value={source.name}>{source.name}</option>)}</Select></Field>
-              <Field label="Start command"><Input value={application.startCommand} placeholder="npm run dev" onInput={(event) => setApplication({ ...application, startCommand: event.currentTarget.value })} /></Field>
               <Field label="Ready path"><Input value={application.readyPath} placeholder="/health" onInput={(event) => setApplication({ ...application, readyPath: event.currentTarget.value })} /></Field>
+              <Field label="Default starting route"><Input value={application.startPath} placeholder="/settings/team" onInput={(event) => setApplication({ ...application, startPath: event.currentTarget.value })} /></Field>
               <Field label="Screenshot policy"><Select value={application.policy} onChange={(event) => setApplication({ ...application, policy: event.currentTarget.value })}><option value="requested">Only when requested</option><option value="auto">Automatically for UI workflows</option><option value="off">Never</option></Select></Field>
               <Field label="Viewport width"><Input type="number" min="320" max="3840" value={application.viewportWidth} onInput={(event) => setApplication({ ...application, viewportWidth: event.currentTarget.value })} /></Field>
               <Field label="Viewport height"><Input type="number" min="320" max="2160" value={application.viewportHeight} onInput={(event) => setApplication({ ...application, viewportHeight: event.currentTarget.value })} /></Field>
+              <Field label="Capture workflow guidance" hint="Safe test state, authentication, actions, and expected outcomes" wide><Textarea rows={4} value={application.workflow} placeholder="Reuse the signed-in demo workspace and synthetic data only." onInput={(event) => setApplication({ ...application, workflow: event.currentTarget.value })} /></Field>
             </div>
             <Toggle checked={application.highlight} onChange={(checked) => setApplication({ ...application, highlight: checked })} label="Highlight captured controls" />
+            {applicationReadiness && <div class={`plan-capture-readiness ${applicationReadiness.reachable ? 'ready' : 'missing'}`}><Icon name={applicationReadiness.reachable ? 'check' : 'info'} size={15} /><span><strong>{applicationReadiness.reachable ? 'Application reachable' : 'Application not reachable'}</strong><small>{applicationReadiness.message}</small></span></div>}
             <div class="form-actions">
               <Button tone="danger" onClick={() => void act(() => patch('/api/project', { application: null }), 'Application configuration removed')}>Remove</Button>
-              <Button tone="primary" disabled={!application.baseUrl} onClick={() => void act(() => patch('/api/project', { application: { baseUrl: application.baseUrl, source: application.source, startCommand: application.startCommand, readyPath: application.readyPath, screenshots: { policy: application.policy, highlight: application.highlight, viewport: { width: application.viewportWidth, height: application.viewportHeight } } } }), 'Application settings saved')}>Save application</Button>
+              <Button disabled={!application.baseUrl} busy={testingApplication} onClick={() => void testApplication()}>Test application</Button>
+              <Button tone="primary" disabled={!application.baseUrl} onClick={() => void act(() => patch('/api/project', { application: applicationPayload }), 'Application settings saved')}>Save application</Button>
             </div>
           </Panel>
         </>}
@@ -1572,9 +2573,9 @@ type Action = <T>(run: () => Promise<T>, success?: string, refresh?: boolean) =>
 const OPEN_STATUSES = ['awaiting-review', 'partially-applied', 'conflicted']
 
 function statusTone(status: string): string {
-  if (['applied', 'accepted', 'succeeded', 'pass', 'added'].includes(status)) return 'good'
-  if (['awaiting-review', 'generating', 'pending', 'running', 'modified'].includes(status)) return 'info'
-  if (['partially-applied', 'conflicted'].includes(status)) return 'warn'
+  if (['applied', 'accepted', 'approved', 'generated', 'succeeded', 'pass', 'added'].includes(status)) return 'good'
+  if (['awaiting-review', 'ready-for-review', 'planning', 'revising', 'generating', 'pending', 'running', 'modified'].includes(status)) return 'info'
+  if (['needs-input', 'stale', 'partially-applied', 'conflicted'].includes(status)) return 'warn'
   if (['rejected', 'failed', 'error', 'deleted'].includes(status)) return 'bad'
   return 'neutral'
 }
@@ -1600,6 +2601,21 @@ function gitServiceLabel(repository: string, provider?: 'git' | 'github'): strin
 
 function validRuns(value: UiState['runs']): Proposal[] {
   return Array.isArray(value) ? value : []
+}
+
+function documentationExists(state: UiState): boolean {
+  if (state.receipt?.completedAt) return true
+  return validRuns(state.runs).some((run) => run.status === 'applied' || run.status === 'partially-applied')
+}
+
+function shouldShowAuthoringForm(state: UiState): boolean {
+  const plan = state.documentationPlan
+  if (!plan || plan.status === 'cancelled') return true
+  if (plan.status !== 'generated') return false
+  const proposal = plan.proposalId ? validRuns(state.runs).find((run) => run.id === plan.proposalId) : undefined
+  // A generated plan without a loaded proposal is treated as pending so the UI
+  // never flashes a second create form while proposal state is being loaded.
+  return proposal ? !OPEN_STATUSES.includes(proposal.status) : false
 }
 
 

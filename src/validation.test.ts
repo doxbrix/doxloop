@@ -29,7 +29,7 @@ describe('validateProject', () => {
   test('finds missing navigation pages and broken links', async () => {
     const root = await fixture()
     const config = JSON.parse(
-      await readFile(join(root, 'docs', 'docs.json'), 'utf8'),
+      await readFile(join(root, 'docs.json'), 'utf8'),
     ) as {
       spaces: Array<{
         nav: Array<{ type: string; items: Array<Record<string, unknown>> }>
@@ -37,11 +37,11 @@ describe('validateProject', () => {
     }
     config.spaces[0]?.nav[0]?.items.push({ type: 'page', file: 'missing' })
     await writeFile(
-      join(root, 'docs', 'docs.json'),
+      join(root, 'docs.json'),
       `${JSON.stringify(config, null, 2)}\n`,
     )
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Home\ndescription: Find a missing page.\n---\n\n[Missing](./does-not-exist.md)\n',
     )
     const result = await validateProject(root)
@@ -52,7 +52,7 @@ describe('validateProject', () => {
 
   test('validates a captioned guide screenshot asset', async () => {
     const root = await fixture()
-    const pagePath = join(root, 'docs', 'index.mdx')
+    const pagePath = join(root, 'index.mdx')
     await writeFile(
       pagePath,
       `---
@@ -73,13 +73,12 @@ description: Invite a teammate from team settings.
     const missing = await validateProject(root)
     expect(missing.issues).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: 'broken-link', file: 'docs/index.mdx' }),
+        expect.objectContaining({ code: 'broken-link', file: 'index.mdx' }),
       ]),
     )
 
     const assets = join(
       root,
-      'docs',
       'assets',
       'guides',
       'invite-team-member',
@@ -98,7 +97,7 @@ description: Invite a teammate from team settings.
   test('does not treat project files outside content as documentation assets', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: Unsafe asset
 description: Demonstrate an invalid asset reference.
@@ -111,7 +110,7 @@ description: Demonstrate an invalid asset reference.
     const result = await validateProject(root)
     expect(result.issues).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: 'broken-link', file: 'docs/index.mdx' }),
+        expect.objectContaining({ code: 'broken-link', file: 'index.mdx' }),
       ]),
     )
   })
@@ -205,7 +204,7 @@ Open **Settings**.
   test('detects unbalanced Doxbrix component tags', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Home\ndescription: Complete a task.\n---\n\n<Steps><Step title="One">Content</Steps>\n',
     )
 
@@ -216,7 +215,7 @@ Open **Settings**.
   test('rejects an ApiEndpoint opening tag that borrows a child delimiter', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: List projects
 description: List accessible projects.
@@ -250,7 +249,7 @@ description: List accessible projects.
   test('requires Doxbrix component opening tags on one physical line', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: List projects
 description: List accessible projects.
@@ -281,7 +280,7 @@ description: List accessible projects.
   test('ignores Doxbrix component examples inside code spans and fences', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: Component syntax
 description: Learn how component syntax works.
@@ -306,7 +305,7 @@ Write \`<ApiEndpoint>\` for an endpoint.
   test('enforces the native Doxbrix ApiEndpoint contract', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: List projects
 description: List accessible projects.
@@ -334,7 +333,7 @@ description: List accessible projects.
   test('accepts a complete native Doxbrix ApiEndpoint block', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: Get project
 description: Retrieve one project.
@@ -358,7 +357,7 @@ description: Retrieve one project.
 
   test('validates Doxbrix brand colors and local assets', async () => {
     const root = await fixture()
-    const configPath = join(root, 'docs', 'docs.json')
+    const configPath = join(root, 'docs.json')
     const config = JSON.parse(await readFile(configPath, 'utf8')) as {
       theme: Record<string, unknown>
     }
@@ -374,12 +373,12 @@ description: Retrieve one project.
 
   test('accepts copied Doxbrix logos and font sources', async () => {
     const root = await fixture()
-    await mkdir(join(root, 'docs', 'assets'))
-    await mkdir(join(root, 'docs', 'fonts'))
-    await writeFile(join(root, 'docs', 'assets', 'logo.svg'), '<svg></svg>')
-    await writeFile(join(root, 'docs', 'fonts', 'brand.woff2'), 'font fixture')
+    await mkdir(join(root, 'assets'))
+    await mkdir(join(root, 'fonts'))
+    await writeFile(join(root, 'assets', 'logo.svg'), '<svg></svg>')
+    await writeFile(join(root, 'fonts', 'brand.woff2'), 'font fixture')
 
-    const configPath = join(root, 'docs', 'docs.json')
+    const configPath = join(root, 'docs.json')
     const config = JSON.parse(await readFile(configPath, 'utf8')) as {
       theme: Record<string, unknown>
     }
@@ -397,14 +396,14 @@ description: Retrieve one project.
 
     const result = await validateProject(root)
     expect(
-      result.issues.filter((issue) => issue.code !== 'starter-content'),
+      result.issues.filter((issue) => issue.code !== 'starter-content' && !issue.code.startsWith('thin-')),
     ).toHaveLength(0)
   })
 
   test('enforces professional release gates and reports editorial warnings', async () => {
     const root = await fixture()
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       `---
 title: Unsafe guide
 ---
@@ -442,7 +441,7 @@ example
 
   test('treats duplicate and missing Doxbrix navigation as errors', async () => {
     const root = await fixture()
-    const configPath = join(root, 'docs', 'docs.json')
+    const configPath = join(root, 'docs.json')
     const config = JSON.parse(await readFile(configPath, 'utf8')) as {
       spaces: Array<{
         nav: Array<{ items: Array<Record<string, unknown>> }>
@@ -495,8 +494,8 @@ describe('evidence map validation', () => {
 
   test('accepts a map that covers every page', async () => {
     const root = await withEvidenceMap({
-      'docs/index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
-      'docs/quickstart.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+      'index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+      'quickstart.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
     })
 
     const codes = (await validateProject(root)).issues.map((issue) => issue.code)
@@ -506,7 +505,7 @@ describe('evidence map validation', () => {
 
   test('warns about a page the map does not cover', async () => {
     const root = await withEvidenceMap({
-      'docs/index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
+      'index.mdx': { sources: [{ source: 'product', paths: ['src'] }] },
     })
 
     const result = await validateProject(root)
@@ -515,27 +514,27 @@ describe('evidence map validation', () => {
       (issue) => issue.code === 'evidence-map-missing-page',
     )
     expect(missing?.severity).toBe('warning')
-    expect(missing?.file).toBe('docs/quickstart.mdx')
+    expect(missing?.file).toBe('quickstart.mdx')
   })
 
   test('warns about an entry for a page that no longer exists', async () => {
     const root = await withEvidenceMap({
-      'docs/index.mdx': { sources: [{ source: 'product' }] },
-      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
-      'docs/removed.mdx': { sources: [{ source: 'product' }] },
+      'index.mdx': { sources: [{ source: 'product' }] },
+      'quickstart.mdx': { sources: [{ source: 'product' }] },
+      'removed.mdx': { sources: [{ source: 'product' }] },
     })
 
     const result = await validateProject(root)
 
     expect(
       result.issues.find((issue) => issue.code === 'evidence-map-orphan')?.message,
-    ).toContain('docs/removed.mdx')
+    ).toContain('removed.mdx')
   })
 
   test('warns about an entry bound to an unconfigured source', async () => {
     const root = await withEvidenceMap({
-      'docs/index.mdx': { sources: [{ source: 'legacy' }] },
-      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
+      'index.mdx': { sources: [{ source: 'legacy' }] },
+      'quickstart.mdx': { sources: [{ source: 'product' }] },
     })
 
     const result = await validateProject(root)
@@ -548,20 +547,20 @@ describe('evidence map validation', () => {
 
   test('surfaces a page the agent could not verify', async () => {
     const root = await withEvidenceMap({
-      'docs/index.mdx': { sources: [{ source: 'product' }], confidence: 'needs-human' },
-      'docs/quickstart.mdx': { sources: [{ source: 'product' }] },
+      'index.mdx': { sources: [{ source: 'product' }], confidence: 'needs-human' },
+      'quickstart.mdx': { sources: [{ source: 'product' }] },
     })
 
     const result = await validateProject(root)
 
     const unverified = result.issues.find((issue) => issue.code === 'evidence-unverified')
     expect(unverified?.severity).toBe('warning')
-    expect(unverified?.file).toBe('docs/index.mdx')
+    expect(unverified?.file).toBe('index.mdx')
   })
 
   test('never fails validation for evidence-map coverage alone', async () => {
     const root = await withEvidenceMap({
-      'docs/removed.mdx': { sources: [{ source: 'legacy' }] },
+      'removed.mdx': { sources: [{ source: 'legacy' }] },
     })
 
     const result = await validateProject(root)
@@ -569,5 +568,61 @@ describe('evidence map validation', () => {
     for (const issue of result.issues.filter((issue) => issue.code.startsWith('evidence'))) {
       expect(issue.severity).toBe('warning')
     }
+  })
+})
+
+describe('page depth gate', () => {
+  test('reports thin pages and shallow procedures as warnings, never errors', async () => {
+    const root = await fixture()
+    await mkdir(join(root, 'guides'), { recursive: true })
+    await writeFile(
+      join(root, 'guides', 'deploy.mdx'),
+      `---
+title: Deploy documentation
+description: Publish the site.
+---
+
+# Deploy documentation
+
+<Steps>
+<Step title="Open Deploy">
+Open **Deploy** and select **Publish**.
+</Step>
+</Steps>
+`,
+    )
+    await writeFile(
+      join(root, 'guides', 'complete.mdx'),
+      `---
+title: Configure monitoring
+description: Schedule drift checks for a remote source.
+---
+
+# Configure monitoring
+
+${'This guide walks an administrator through configuring a monitoring schedule for a remote read-only source, choosing budgets, and verifying the first run. '.repeat(12)}
+
+<Steps>
+<Step title="Open Sources">
+Open **Sources** and select **Monitoring**. The dialog lists the remote source and its schedule.
+</Step>
+<Step title="Choose a schedule">
+Select **Every day** and enter a budget of 20 minutes. The summary updates.
+</Step>
+<Step title="Save">
+Select **Save monitoring**. The schedule badge shows the next run time.
+</Step>
+</Steps>
+
+Next, [review the first proposal](/guides/review).
+`,
+    )
+
+    const result = await validateProject(root)
+    const deploy = result.issues.filter((issue) => issue.file === 'guides/deploy.mdx')
+    expect(deploy.map((issue) => issue.code)).toEqual(expect.arrayContaining(['thin-page', 'thin-procedure']))
+    expect(deploy.filter((issue) => issue.code.startsWith('thin-')).every((issue) => issue.severity === 'warning')).toBe(true)
+    const complete = result.issues.filter((issue) => issue.file === 'guides/complete.mdx' && issue.code.startsWith('thin-'))
+    expect(complete).toEqual([])
   })
 })

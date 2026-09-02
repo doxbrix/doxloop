@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -6,6 +6,7 @@ import {
   addDesignReferences,
   completeDocumentationBriefForCreate,
   defaultDocumentationBrief,
+  loadPages,
   loadProject,
   loadSiteConfig,
   parseDesignReference,
@@ -14,6 +15,7 @@ import {
   saveProjectSettings,
   scaffoldProject,
   validateProjectSourceBoundaries,
+  validateSourceScopes,
 } from './project.js'
 
 const roots: string[] = []
@@ -23,6 +25,16 @@ afterEach(async () => {
 })
 
 describe('project scaffolding', () => {
+  test('rejects overlapping source route ownership and permits explicit shared pages', () => {
+    expect(() => validateSourceScopes([
+      { name: 'platform', path: '../platform', scope: { routePrefix: 'api' } },
+      { name: 'billing', path: '../billing', scope: { routePrefix: 'api/billing' } },
+    ])).toThrow(/overlap/)
+    expect(() => validateSourceScopes([
+      { name: 'platform', path: '../platform', scope: { routePrefix: 'platform', sharedPages: ['docs/overview.md'] } },
+      { name: 'billing', path: '../billing', scope: { routePrefix: 'billing', sharedPages: ['docs/overview.md'] } },
+    ])).not.toThrow()
+  })
   test('completes a documentation brief before a create run', () => {
     expect(
       completeDocumentationBriefForCreate(defaultDocumentationBrief()),
@@ -156,11 +168,14 @@ describe('project scaffolding', () => {
       styleGuide: 'doxloop',
       terminology: {},
       exclusions: [],
+      preferredExamples: [],
       accessibilityTarget: 'WCAG 2.2 AA',
     })
-    const indexPage = await readFile(join(root, 'docs', 'index.mdx'), 'utf8')
+    expect(project.contentDir).toBe('')
+    await expect(readFile(join(root, 'docs', 'docs.json'), 'utf8')).rejects.toThrow()
+    const indexPage = await readFile(join(root, 'index.mdx'), 'utf8')
     const quickstartPage = await readFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       'utf8',
     )
     expect(indexPage).toContain('<CardGroup')
@@ -193,6 +208,52 @@ describe('project scaffolding', () => {
         },
       ],
     })
+  })
+
+  test('ignores project tooling when native documentation lives at the root', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'sample-docs'),
+      sources: [],
+    })
+    await mkdir(join(root, '.agents', 'skills', 'custom'), { recursive: true })
+    await writeFile(join(root, '.agents', 'skills', 'custom', 'SKILL.md'), '# Tooling\n')
+    await mkdir(join(root, 'node_modules', 'example'), { recursive: true })
+    await writeFile(join(root, 'node_modules', 'example', 'README.md'), '# Dependency\n')
+
+    const project = await loadProject(root)
+    expect(await loadPages(root, project)).toEqual([
+      join(root, 'index.mdx'),
+      join(root, 'quickstart.mdx'),
+    ])
+  })
+
+  test('continues to load existing projects with nested documentation content', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-project-'))
+    roots.push(parent)
+    const root = await scaffoldProject({
+      directory: join(parent, 'sample-docs'),
+      sources: [],
+    })
+    await mkdir(join(root, 'docs'))
+    for (const file of ['docs.json', 'index.mdx', 'quickstart.mdx']) {
+      await rename(join(root, file), join(root, 'docs', file))
+    }
+    const projectPath = join(root, '.doxloop', 'project.json')
+    const raw = JSON.parse(await readFile(projectPath, 'utf8')) as Record<string, unknown>
+    await writeFile(
+      projectPath,
+      `${JSON.stringify({ ...raw, contentDir: 'docs' }, null, 2)}\n`,
+    )
+
+    const project = await loadProject(root)
+    expect(project.contentDir).toBe('docs')
+    expect(await loadPages(root, project)).toEqual([
+      join(root, 'docs', 'index.mdx'),
+      join(root, 'docs', 'quickstart.mdx'),
+    ])
+    expect((await loadSiteConfig(root, project)).version).toBe(1)
   })
 
   test('persists user-facing project and deployment settings', async () => {
@@ -245,7 +306,7 @@ describe('project scaffolding', () => {
       directory: join(parent, 'sample-docs'),
       sources: [],
     })
-    const configPath = join(root, 'docs', 'docs.json')
+    const configPath = join(root, 'docs.json')
     const config = JSON.parse(await readFile(configPath, 'utf8')) as {
       spaces: Array<{ nav: Array<Record<string, unknown>> }>
     }
@@ -253,7 +314,7 @@ describe('project scaffolding', () => {
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
 
     await expect(loadSiteConfig(root)).rejects.toThrow(
-      'docs/docs.json is invalid: spaces[0].nav[0].title must be a non-empty string.',
+      'docs.json is invalid: spaces[0].nav[0].title must be a non-empty string.',
     )
   })
 
@@ -380,6 +441,8 @@ describe('project scaffolding', () => {
               policy: 'requested',
               viewport: { width: 1440, height: 900 },
               highlight: true,
+              startPath: '/settings/team',
+              workflow: 'Use the signed-in demo workspace and synthetic team members only.',
             },
           },
         },
@@ -397,6 +460,8 @@ describe('project scaffolding', () => {
         policy: 'requested',
         viewport: { width: 1440, height: 900 },
         highlight: true,
+        startPath: '/settings/team',
+        workflow: 'Use the signed-in demo workspace and synthetic team members only.',
       },
     })
   })

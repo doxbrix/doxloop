@@ -4,11 +4,10 @@ import { join } from 'node:path'
 /**
  * Local history storage.
  *
- * Doxloop ships without a native database dependency: history uses `node:sqlite`,
- * which is built into modern Node runtimes. Older runtimes simply record no
- * history — every call in this module degrades to a no-op rather than failing a
- * command. Documentation stays in git; this database is a derived audit index
- * that can be deleted and rebuilt at any time.
+ * Doxloop ships without a native database dependency: history uses `node:sqlite`
+ * from the required Node.js 22.13+ runtime. `DOXLOOP_NO_HISTORY=1` remains an
+ * explicit privacy/diagnostic opt-out. Documentation stays in git; this database
+ * is a derived audit index that can be deleted and rebuilt at any time.
  */
 
 export const DATABASE_FILE = join('.doxloop', 'doxloop.db')
@@ -281,7 +280,15 @@ export function closeHistory(root?: string): void {
 
 /** True when the runtime can store history at all. */
 export async function historyAvailable(): Promise<boolean> {
-  return (await loadSqlite()) !== null
+  return process.env.DOXLOOP_NO_HISTORY !== '1' && (await loadSqlite()) !== null
+}
+
+export function historyRuntimeStatus(version: string): { available: boolean; detail: string } {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version)
+  const supported = Boolean(match && (Number(match[1]) > 22 || (Number(match[1]) === 22 && (Number(match[2]) > 13 || (Number(match[2]) === 13 && Number(match[3]) >= 0)))))
+  return supported
+    ? { available: true, detail: `Node.js ${version} includes the SQLite history runtime required by Doxloop.` }
+    : { available: false, detail: `Node.js ${version} is too old for request history. Upgrade to Node.js 22.13 or newer before the first documentation run.` }
 }
 
 function debug(stage: string, error: unknown): void {

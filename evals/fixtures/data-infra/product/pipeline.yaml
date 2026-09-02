@@ -1,0 +1,3 @@
+partitions: 16
+checkpoint: durable
+retry: exponential

@@ -26,11 +26,15 @@ const options = parseArgs(process.argv.slice(2))
 if (options.help) {
   process.stdout.write(`Usage: pnpm eval:agents -- [options]
 
-Run the same read-only documentation-review fixtures through installed agents.
+Run the same review, generation, or update fixtures through installed agents.
 
 Options:
   --agent <name>  codex, claude, or gemini; may be repeated
   --case <id>     Run one fixture; may be repeated
+  --model <agent=model>  Select a model for one agent; may be repeated
+  --mode <review|generation|update>  Evaluation workflow (default: review)
+  --regression-threshold <points>  Allowed score drop (default: 3)
+  --approve-baseline     Replace evals/baseline.json after review
   --help          Show this help
 `)
   process.exit(0)
@@ -62,6 +66,7 @@ const resultsRoot = join(root, 'evals', 'results', timestamp)
 await mkdir(resultsRoot, { recursive: true })
 
 let failures = 0
+const summaries = []
 for (const agent of agents) {
   for (const entry of cases) {
     const workspace = await mkdtemp(join(tmpdir(), `doxloop-eval-${entry.id}-`))
@@ -88,44 +93,44 @@ for (const agent of agents) {
           `Could not install ${agent} skills for ${entry.id}:\n${setup.stderr}`,
         )
       }
-      const prepared = await run(
-        process.execPath,
-        [
-          join(root, 'dist', 'cli.js'),
-          'review',
-          'Review the documentation against the persisted brief, configured product source, and professional quality rubric. Report evidence-based findings and do not edit files.',
-          '--print',
-          '--cwd',
-          projectRoot,
-        ],
-        root,
-      )
-      if (prepared.code !== 0) {
-        throw new Error(
-          `Could not prepare the review prompt for ${entry.id}:\n${prepared.stderr}`,
-        )
-      }
-      const invocation = headlessInvocation(agent, prepared.stdout.trim())
+      const request = options.mode === 'review'
+        ? 'Review the documentation against the persisted brief, configured product source, and professional quality rubric. Report evidence-based findings and do not edit files.'
+        : options.mode === 'generation'
+          ? 'Create a complete evidence-grounded documentation set for the persisted brief. Replace incomplete pages and validate the result.'
+          : 'Apply only the reader-visible changes supported by current evidence. Preserve every unrelated page and validate the result.'
+      const model = options.models.get(agent)
       const before = await workspaceDigest(projectRoot)
-      const result = await run(
-        invocation.command,
-        invocation.args,
-        projectRoot,
-      )
+      const startedAt = Date.now()
+      let result
+      if (options.mode === 'review') {
+        const prepared = await run(process.execPath, [join(root, 'dist', 'cli.js'), 'review', request, '--print', '--cwd', projectRoot], root)
+        if (prepared.code !== 0) throw new Error(`Could not prepare the review prompt for ${entry.id}:\n${prepared.stderr}`)
+        const invocation = headlessInvocation(agent, prepared.stdout.trim(), model, true)
+        result = await run(invocation.command, invocation.args, projectRoot)
+      } else {
+        result = await runPlanFirstUiWorkflow({ projectRoot, agent, model, mode: options.mode, request })
+      }
       const report = `${result.stdout}\n${result.stderr}`.trim()
+      const durationMs = Date.now() - startedAt
       const score = scoreReport(report, entry.signalGroups)
       const evidence = scoreReport(report, entry.evidenceGroups ?? [])
       const unchanged = before === (await workspaceDigest(projectRoot))
       const hasPriorities = /\b(blocker|major|minor|priority|severity)\b/i.test(report)
       const hasRubricScore = /\b(?:score|total)\b[^\n]{0,30}\b\d{1,3}\s*\/\s*100\b/i.test(report)
-      const passed =
-        result.code === 0 &&
-        score.matched >= entry.minimumSignalGroups &&
-        evidence.matched >= (entry.minimumEvidenceGroups ?? 0) &&
-        hasPriorities &&
-        hasRubricScore &&
-        unchanged
+      let quality
+      let workspaceEvaluation
+      if (options.mode !== 'review' && result.code === 0) {
+        const checked = await run(process.execPath, [join(root, 'dist', 'cli.js'), 'quality', '--offline', '--format', 'json', '--cwd', projectRoot], root)
+        try { quality = JSON.parse(checked.stdout) } catch { quality = { status: 'fail', counts: { failed: 1 } } }
+        const evaluated = await run(process.execPath, [join(root, 'dist', 'cli.js'), 'evaluate', '--mode', options.mode, '--cwd', projectRoot, ...(entry.maximumPages ? ['--max-pages', String(entry.maximumPages)] : [])], root)
+        try { workspaceEvaluation = JSON.parse(evaluated.stdout) } catch { workspaceEvaluation = { score: 0 } }
+      }
+      const passed = options.mode === 'review'
+        ? result.code === 0 && score.matched >= entry.minimumSignalGroups && evidence.matched >= (entry.minimumEvidenceGroups ?? 0) && hasPriorities && hasRubricScore && unchanged
+        : result.code === 0 && !unchanged && quality?.status !== 'fail' && workspaceEvaluation?.score >= (entry.minimumEvaluationScore ?? 60)
       if (!passed) failures += 1
+      const aggregateScore = options.mode === 'review' ? Math.round(100 * (score.matched + evidence.matched) / Math.max(entry.signalGroups.length + (entry.evidenceGroups ?? []).length, 1)) : (workspaceEvaluation?.score ?? 0)
+      summaries.push({ agent, model: model ?? 'default', case: entry.id, mode: options.mode, productType: entry.productType, score: aggregateScore, matchedSignals: score.matched, totalSignals: entry.signalGroups.length, matchedEvidence: evidence.matched, totalEvidence: (entry.evidenceGroups ?? []).length, prioritized: hasPriorities, rubricScore: hasRubricScore, readOnly: unchanged, qualityStatus: quality?.status, durationMs, passed })
 
       const agentRoot = join(resultsRoot, agent)
       await mkdir(agentRoot, { recursive: true })
@@ -133,7 +138,9 @@ for (const agent of agents) {
         join(agentRoot, `${entry.id}.txt`),
         [
           `agent: ${agent}`,
+          `model: ${model ?? 'default'}`,
           `case: ${entry.id}`,
+          `mode: ${options.mode}`,
           `exitCode: ${result.code}`,
           `matchedSignals: ${score.matched}/${entry.signalGroups.length}`,
           `minimumSignals: ${entry.minimumSignalGroups}`,
@@ -142,6 +149,9 @@ for (const agent of agents) {
           `prioritized: ${hasPriorities}`,
           `rubricScore: ${hasRubricScore}`,
           `readOnly: ${unchanged}`,
+          `durationMs: ${durationMs}`,
+          ...(quality ? [`qualityStatus: ${quality.status}`, `qualityFailures: ${quality.counts?.failed ?? 0}`] : []),
+          ...(workspaceEvaluation ? [`evaluationScore: ${workspaceEvaluation.score}`] : []),
           `result: ${passed ? 'pass' : 'fail'}`,
           '',
           report,
@@ -157,21 +167,52 @@ for (const agent of agents) {
   }
 }
 
+const baselinePath = join(root, 'evals', 'baseline.json')
+let regressions = []
+try {
+  const baseline = JSON.parse(await readFile(baselinePath, 'utf8'))
+  regressions = summaries.flatMap((summary) => {
+    const previous = baseline.results?.find((entry) => entry.agent === summary.agent && entry.model === summary.model && entry.case === summary.case && (entry.mode ?? 'review') === summary.mode)
+    if (!previous) return []
+    const delta = summary.score - previous.score
+    return delta < -options.regressionThreshold ? [{ ...summary, baselineScore: previous.score, delta }] : []
+  })
+} catch {
+  // A baseline is optional until explicitly approved.
+}
+if (regressions.length > 0) failures += regressions.length
+const matrix = { schemaVersion: 1, contractVersion: '1.0.0', generatedAt: new Date().toISOString(), regressionThreshold: options.regressionThreshold, results: summaries, regressions }
+await writeFile(join(resultsRoot, 'matrix.json'), `${JSON.stringify(matrix, null, 2)}\n`)
+if (options.approveBaseline) await writeFile(baselinePath, `${JSON.stringify(matrix, null, 2)}\n`)
 process.stdout.write(`Evaluation reports: ${resultsRoot}\n`)
+if (regressions.length > 0) process.stdout.write(`Release blocked by ${regressions.length} agent/model regression${regressions.length === 1 ? '' : 's'}.\n`)
 process.exitCode = failures === 0 ? 0 : 1
 
 function parseArgs(args) {
-  const output = { agents: [], cases: [], help: false }
+  const output = { agents: [], cases: [], models: new Map(), mode: 'review', regressionThreshold: 3, approveBaseline: false, help: false }
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]
     if (argument === '--help') output.help = true
-    else if (argument === '--agent' || argument === '--case') {
+    else if (argument === '--approve-baseline') output.approveBaseline = true
+    else if (argument === '--agent' || argument === '--case' || argument === '--model' || argument === '--mode' || argument === '--regression-threshold') {
       const value = args[index + 1]
       if (!value || value.startsWith('--')) {
         throw new Error(`${argument} needs a value.`)
       }
       if (argument === '--agent') output.agents.push(value)
-      else output.cases.push(value)
+      else if (argument === '--case') output.cases.push(value)
+      else if (argument === '--mode') {
+        if (!['review', 'generation', 'update'].includes(value)) throw new Error('--mode must be review, generation, or update.')
+        output.mode = value
+      }
+      else if (argument === '--model') {
+        const separator = value.indexOf('=')
+        if (separator < 1 || !value.slice(separator + 1)) throw new Error('--model must use agent=model.')
+        output.models.set(value.slice(0, separator), value.slice(separator + 1))
+      } else {
+        output.regressionThreshold = Number(value)
+        if (!Number.isFinite(output.regressionThreshold) || output.regressionThreshold < 0) throw new Error('--regression-threshold must be zero or greater.')
+      }
       index += 1
     } else {
       throw new Error(`Unknown option "${argument}".`)
@@ -227,16 +268,76 @@ function run(command, args, cwd) {
   })
 }
 
-function headlessInvocation(agent, prompt) {
+async function runPlanFirstUiWorkflow({ projectRoot, agent, model, mode, request }) {
+  const port = 44000 + Math.floor(Math.random() * 15000)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(process.execPath, [join(root, 'dist', 'cli.js'), 'ui', '--no-open', '--port', String(port), '--cwd', projectRoot], { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''; let errorOutput = ''
+  child.stdout.on('data', (chunk) => { output += chunk })
+  child.stderr.on('data', (chunk) => { errorOutput += chunk })
+  try {
+    await waitUntil(async () => {
+      try { return (await fetch(origin)).ok } catch { return false }
+    }, 15_000, 'The evaluation UI server did not start.')
+    const initial = await fetch(origin)
+    const cookie = initial.headers.get('set-cookie')?.split(';')[0]
+    if (!cookie) throw new Error('The evaluation UI did not establish a local session.')
+    const api = async (path, init = {}) => {
+      const response = await fetch(`${origin}${path}`, { ...init, headers: { cookie, origin, 'content-type': 'application/json', ...(init.headers ?? {}) } })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error ?? `${path} returned ${response.status}`)
+      return body
+    }
+    const started = await api('/api/plans', { method: 'POST', body: JSON.stringify({ mode: mode === 'generation' ? 'create' : 'update', scope: 'comprehensive', request, agent, ...(model ? { model } : {}), clarificationMode: 'defaults', screenshots: false }) })
+    const planId = started.plan.id
+    await waitUntil(async () => {
+      const plan = await api(`/api/plans/${planId}`)
+      if (plan.status === 'failed' || plan.status === 'cancelled') throw new Error(plan.error ?? `Planning ended as ${plan.status}.`)
+      return plan.status === 'ready-for-review'
+    }, 15 * 60_000, 'Planning did not reach review.')
+    await api(`/api/plans/${planId}/approve`, { method: 'POST', body: '{}' })
+    await api(`/api/plans/${planId}/generate`, { method: 'POST', body: '{}' })
+    await waitUntil(async () => {
+      const plan = await api(`/api/plans/${planId}`)
+      if (plan.status === 'failed' || plan.status === 'cancelled' || plan.status === 'stale') throw new Error(plan.error ?? `Generation ended as ${plan.status}.`)
+      return plan.status === 'generated'
+    }, 30 * 60_000, 'Generation did not produce a review proposal.')
+    const proposals = await api('/api/proposals')
+    const proposal = proposals.find((item) => item.status === 'awaiting-review' && item.changes?.length)
+    if (!proposal) throw new Error('The plan-first workflow did not produce a reviewable proposal.')
+    const applied = await api(`/api/proposals/${proposal.id}/accept`, { method: 'POST', body: JSON.stringify({ scope: 'all' }) })
+    if (applied.status !== 'applied') throw new Error(`The generated proposal ended as ${applied.status}.`)
+    return { code: 0, stdout: `${output}\nPlan ${planId} approved; proposal ${proposal.id} applied.`, stderr: errorOutput }
+  } catch (error) {
+    return { code: 1, stdout: output, stderr: `${errorOutput}\n${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+      await new Promise((resolveExit) => child.once('exit', resolveExit))
+    }
+  }
+}
+
+async function waitUntil(check, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await check()) return
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500))
+  }
+  throw new Error(message)
+}
+
+function headlessInvocation(agent, prompt, model, readOnly) {
   if (agent === 'codex') {
     return {
       command: 'codex',
       args: [
         'exec',
         '--sandbox',
-        'read-only',
+        readOnly ? 'read-only' : 'workspace-write',
         '--skip-git-repo-check',
         '--ephemeral',
+        ...(model ? ['--model', model] : []),
         prompt,
       ],
     }
@@ -244,12 +345,12 @@ function headlessInvocation(agent, prompt) {
   if (agent === 'claude') {
     return {
       command: 'claude',
-      args: ['--print', '--permission-mode', 'plan', '--max-turns', '20', prompt],
+      args: ['--print', '--permission-mode', readOnly ? 'plan' : 'acceptEdits', '--max-turns', '20', ...(model ? ['--model', model] : []), prompt],
     }
   }
   return {
     command: 'gemini',
-    args: ['--approval-mode', 'plan', '--prompt', prompt],
+    args: ['--approval-mode', readOnly ? 'plan' : 'auto_edit', ...(model ? ['--model', model] : []), '--prompt', prompt],
   }
 }
 

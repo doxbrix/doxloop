@@ -10,7 +10,7 @@ Read this reference before creating or moving documentation pages.
 {
   "schemaVersion": 1,
   "title": "Example documentation",
-  "contentDir": "docs",
+  "contentDir": "",
   "generator": "doxbrix",
   "sources": [
     {
@@ -43,12 +43,13 @@ Read this reference before creating or moving documentation pages.
   "application": {
     "baseUrl": "http://localhost:3000/",
     "source": "product",
-    "startCommand": "npm run dev",
     "readyPath": "/health",
     "screenshots": {
       "policy": "requested",
       "viewport": { "width": 1440, "height": 900 },
-      "highlight": true
+      "highlight": true,
+      "startPath": "/settings/team",
+      "workflow": "Reuse the signed-in demo workspace and synthetic team members. Capture the invite form and successful invitation state."
     }
   },
   "documentation": {
@@ -58,6 +59,8 @@ Read this reference before creating or moving documentation pages.
       "Install the SDK",
       "Complete the first API request"
     ],
+    "preferredExamples": ["TypeScript", "curl"],
+    "designDirection": "Compact developer reference with task-led guides",
     "locale": "en-US",
     "tone": ["clear", "direct", "professional"],
     "standardsProfile": "doxloop-v1",
@@ -78,12 +81,18 @@ Read this reference before creating or moving documentation pages.
   missing value in an older project means `doxbrix`.
 - `generatorPackage` records the npm package for an external generator.
   Doxbrix is built in and does not use this field.
-- Treat `contentDir` as the only documentation content directory.
+- Treat `contentDir` as the only documentation content directory. An empty
+  value means the project root for native Doxbrix projects; external generators
+  keep their generator-specific content directories.
 - Treat `sources` as an allowlist for product research.
 - A source with `"kind": "openapi"` is an OpenAPI or Swagger document — a
   local file path or an HTTP(S) URL. Read it as authoritative API evidence for
   endpoints, parameters, schemas, and examples. A source without `kind` is a
   read-only local directory.
+- Respect `source.scope`. Pages grounded in a scoped source must stay below its
+  `routePrefix` and should use its `space` and `navigationGroup`. A page outside
+  that boundary is allowed only when it matches `sharedPages`; never move one
+  source's claims into another source's assigned section.
 - `defaultAgent` optionally records the coding agent (`codex`, `claude`, or
   `gemini`) the user chose for this project. Do not change it.
 - `deployment` optionally records the hosted project identity, visibility, and
@@ -94,8 +103,10 @@ Read this reference before creating or moving documentation pages.
 - Treat `application` as the optional safe browser surface for application
   guide screenshots. Resolve its `source` through the configured source
   allowlist, and follow [screenshots.md](screenshots.md) before starting or
-  operating the application. A missing object preserves request-driven capture
-  behavior and does not affect design-reference capture.
+  operating the application. Treat `screenshots.startPath` and
+  `screenshots.workflow` as the user-approved default capture boundary. A
+  missing object preserves request-driven capture behavior and does not affect
+  design-reference capture.
 - Keep source paths local. Never copy them into documentation or deployment
   content.
 - A directory source may include a read-only `remote` used by scheduled sync.
@@ -112,6 +123,21 @@ Read this reference before creating or moving documentation pages.
   it. Report a contradiction between the brief and current product evidence
   instead of silently rewriting the brief.
 
+## Approved documentation plan
+
+When `.doxloop/documentation-plan.json` exists, it is the approved, immutable
+scope for the current create or update run. It uses schema version 2 and records
+the reader brief, evidence-backed capabilities, navigation outline, page
+actions, structured page evidence, generator target, and approval hash.
+
+- Create, update, preserve, or remove only the pages named in the plan.
+- Treat its `target.navigationFiles` as the generator-owned navigation
+  boundaries; the matching generator skill still owns their native syntax.
+- Do not turn exclusions, unknowns, or recommendations into reader content.
+- Do not add a future backlog or deferred pages to the current generation.
+- If evidence contradicts the approved plan, stop and report it instead of
+  silently expanding scope.
+
 ## Evidence map
 
 `.doxloop/evidence-map.json` records which configured source produced each page.
@@ -123,13 +149,18 @@ or change pages:
 {
   "schemaVersion": 1,
   "pages": {
-    "docs/guides/authentication.md": {
+    "guides/authentication.md": {
       "sources": [
         { "source": "product", "paths": ["src/auth.ts", "src/session.ts"] },
         { "source": "api", "operations": ["POST /oauth/token"] }
       ],
+      "verifiedAt": { "product": "9f2c1ab...", "api": "sha256..." },
+      "verifiedOn": { "product": "2026-08-26T10:00:00.000Z", "api": "2026-08-26T10:00:00.000Z" },
       "confidence": "verified",
-      "claims": ["Access tokens expire after 900 seconds"]
+      "claims": ["Access tokens expire after 900 seconds"],
+      "claimVerification": {
+        "Access tokens expire after 900 seconds": "verified"
+      }
     }
   }
 }
@@ -151,11 +182,16 @@ or change pages:
 - Omit `paths` only for a page that genuinely depends on the whole source, such
   as a release overview.
 - `operations` name documented API operations for an OpenAPI source.
+- `verifiedAt` records the exact source revision or OpenAPI content hash.
+  `verifiedOn` records the ISO timestamp when you actually checked the claims;
+  update both for every source used by a created or changed page.
 - `confidence` is `verified` when you read the source and confirmed the claims,
   `inferred` when you reasoned from indirect evidence, or `needs-human` when a
   claim could not be verified and a person must confirm it.
 - `claims` optionally lists the reader-facing facts most worth re-checking when
-  the source changes.
+  the source changes. `claimVerification` records each exact claim as
+  `verified`, `inferred`, `contradicted`, or `needs-human`; never overstate
+  evidence.
 - Preserve entries for pages you did not touch, and remove entries for pages you
   deleted or renamed.
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks'
-import { api, post } from './api'
+import { api } from './api'
 import { SetupApplication } from './SetupApplication'
 import { WorkspaceApplication } from './WorkspaceApplication'
 import type { UiState } from './types'
@@ -43,12 +43,9 @@ export function App() {
       state={state}
       act={act}
       error={error}
-      onOpenPreview={async (openInSystemBrowser) => {
-        await act(() => post('/api/preview/start', { open: openInSystemBrowser }), undefined, false)
-      }}
       onContinue={async (page) => {
-        await reload()
         history.pushState({}, '', `/${page}`)
+        await reload()
       }}
     />
   }

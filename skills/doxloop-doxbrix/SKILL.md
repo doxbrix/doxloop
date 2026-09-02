@@ -48,6 +48,26 @@ skill instead.
 Do not emit Docusaurus directives such as `:::tip`, Docusaurus theme imports, or
 `sidebars.js` entries in a Doxbrix project.
 
+## Compose professional pages
+
+Doxbrix renders rich pages; use that to make every page complete and
+scannable, following the authoring skill's page-depth reference:
+
+- Landing page: an opening value statement, a `<CardGroup>` with one card per
+  audience, a capability list, a `<Mermaid>` lifecycle diagram, and a closing
+  `<CardGroup>` of next steps.
+- Guides: a `<Note>` or `<Info>` for prerequisites, `<Steps>` with one
+  `<Step>` per reader action, a `<Frame>` screenshot inside every step that
+  changes the screen, a `<Check>` for the success state, `<Tabs>` for UI and
+  CLI alternatives, an `<Accordion>` for troubleshooting or edge cases, and a
+  closing card or link to the next job.
+- Reference: one heading per command, field, or operation with complete tables
+  (type, default, meaning) and a `<CodeGroup>` of realistic examples.
+- Concepts: a `<Mermaid>` diagram or comparison table and links to the tasks
+  the concept informs.
+
+Use components only where they clarify; never as decoration.
+
 ## Maintain navigation
 
 Implement the semantic top/left navigation plan composed by
@@ -56,8 +76,9 @@ site links and map left-navigation groups to nested `docs.json` nodes. Preserve
 the planned labels, order, hierarchy, and routes unless Doxbrix requires a
 documented adaptation; do not copy empty template groups.
 
-Treat `docs/docs.json` as the canonical manifest for new Doxloop projects.
-Legacy projects may keep `docs.json` at the project root. Add every
+Treat `docs.json` at the project root as the canonical manifest for new native
+Doxbrix projects. Existing projects with a non-empty `contentDir` keep the
+manifest inside that directory, such as `docs/docs.json`. Add every
 reader-facing page exactly once under a relevant space and navigation group.
 Assign meaningful named icons to spaces and primary group, page, link, and API
 nodes. Choose icons by reader meaning, keep the vocabulary consistent, and

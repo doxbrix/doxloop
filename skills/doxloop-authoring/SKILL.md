@@ -40,8 +40,9 @@ When the task prompt requires application screenshots, or the configured
 read [references/screenshots.md](references/screenshots.md). Application guide
 screenshots are committed reader content and are separate from the ignored
 design-reference evidence produced by `doxloop capture`. Treat the application
-as user-managed: never start, stop, reset, seed, or reconfigure it. Reuse the
-approved in-app browser session and follow its authentication checkpoint.
+as user-managed: never start, stop, reset, seed, or reconfigure it. Use the
+Doxloop-provided `doxloop_capture` browser when available and follow the
+authentication checkpoint.
 
 Read the project's `generator` and use its installed format skill:
 
@@ -130,6 +131,7 @@ template tree verbatim when it would create empty or unsupported destinations.
 ### Create
 
 Read [references/documentation-types.md](references/documentation-types.md),
+[references/page-depth.md](references/page-depth.md),
 [references/examples-and-evidence.md](references/examples-and-evidence.md),
 [references/accessibility.md](references/accessibility.md), and
 [references/branding.md](references/branding.md), then use this workflow.
@@ -240,6 +242,17 @@ Prefer useful detail over brevity. Do not stop after replacing the starter
 landing page and quickstart when the source supports additional must-have
 documentation.
 
+Write every page to the depth defined in
+[references/page-depth.md](references/page-depth.md): an outcome-led opening,
+prerequisites, complete ordered steps with exact labels and observable results,
+verification, evidence-backed troubleshooting, and a next step for guides;
+complete tables for reference pages; a model, its consequences, and links to
+tasks for concepts; and an audience-oriented landing page with cards, a
+capability overview, and a lifecycle diagram. Use native components where they
+make a page clearer. A page that is a title, one paragraph, and an image is a
+placeholder, not documentation. Resolve every `thin-page` and `thin-procedure`
+validation warning on a page in scope before finishing.
+
 Before finishing, replace every generated starter page and remove every
 `doxloop:starter-page` marker. A final response is allowed only after files have
 been edited and the required validation command has passed.
@@ -300,7 +313,9 @@ the next manifest row. Treat the screenshot completeness gate as blocking.
    and refresh only the affected guide screenshots.
 10. Update all affected pages. For transformation work, preserve verified facts,
     examples, routes, and useful links while changing structure, depth, or voice
-    according to the selected type template and audience flavor.
+    according to the selected type template and audience flavor. Bring every
+    page you create or rewrite to the depth in
+    [references/page-depth.md](references/page-depth.md).
 11. Preserve the persisted brief, terminology, and structure unless the user
     changes them or they contradict verified public behavior.
 12. Recommend relevant new pages when the change exposes a gap; ask before
@@ -395,10 +410,14 @@ For editing tasks:
    or assertion and no narrower public-interface evidence supports it. Before
    finishing, review any one path referenced by more than half of the pages and
    remove incidental page associations.
+   Record both `verifiedAt` (revision or content hash) and `verifiedOn` (current
+   ISO timestamp) for every checked source. Respect every configured source
+   route boundary and use `sharedPages` only for intentional cross-source pages.
 4. Review the Git diff for accidental source or secret inclusion.
 5. Compare the result with the agreed coverage plan.
 6. Read [references/quality.md](references/quality.md), clear every hard gate,
-   and score the finished agreed scope.
+   and score the finished agreed scope. Treat an unresolved `thin-page` or
+   `thin-procedure` validation warning on a page in scope as a failed gate.
 7. For screenshot-enabled guides, reconcile the final procedure with the
    capture manifest and inspect the rendered step/image sequence at desktop and
    narrow widths.

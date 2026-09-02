@@ -26,6 +26,9 @@ Treat any of these as blocking:
 - a screenshot-enabled guide has a missing, random, duplicate, stale,
   unreadable, mismatched, or incorrectly placed step image, or a published UI
   step has neither a verified image nor an explicit text-only reason;
+- a page in the agreed scope is a stub: `doxloop test` reports `thin-page` or
+  `thin-procedure`, or the page lacks the sections that
+  [page-depth.md](page-depth.md) requires for its type;
 - the agreed must-have reader job has no usable documentation.
 
 Do not describe a documentation set as release-ready while a hard gate fails.

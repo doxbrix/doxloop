@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doxloop.dev/contracts/evaluation-v1.schema.json",
+  "title": "Doxloop evaluation report v1",
+  "type": "object",
+  "required": ["schemaVersion", "contractVersion", "generatedAt", "mode", "project", "score", "metrics", "reviewer"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contractVersion": { "const": "1.0.0" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "mode": { "enum": ["generation", "update"] },
+    "project": { "type": "string", "minLength": 1 },
+    "score": { "type": "number", "minimum": 0, "maximum": 100 },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "score", "weight", "detail"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "weight": { "type": "number", "exclusiveMinimum": 0 },
+          "detail": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "durationMs": { "type": "number", "minimum": 0 },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": { "type": "number", "minimum": 0 },
+        "outputTokens": { "type": "number", "minimum": 0 },
+        "costUsd": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "reviewer": {
+      "type": "object",
+      "required": ["accepted", "revised", "rejected"],
+      "properties": {
+        "accepted": { "type": "integer", "minimum": 0 },
+        "revised": { "type": "integer", "minimum": 0 },
+        "rejected": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "regression": {
+      "type": "object",
+      "required": ["baselineScore", "delta", "threshold", "blocked"],
+      "properties": {
+        "baselineScore": { "type": "number", "minimum": 0, "maximum": 100 },
+        "delta": { "type": "number" },
+        "threshold": { "type": "number", "minimum": 0 },
+        "blocked": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

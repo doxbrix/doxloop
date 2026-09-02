@@ -6,6 +6,7 @@ import {
   agentArguments,
   authorPrompt,
   ClaudeStreamLogFormatter,
+  authoringTurnBudget,
   parseClaudeEffort,
   parseReasoning,
   prepareAgentPrompt,
@@ -17,6 +18,7 @@ import { closeHistory, historyAvailable } from './db.js'
 import { pathExists } from './fs.js'
 import { listRequests, pageHistory } from './history.js'
 import { scaffoldProject } from './project.js'
+import { listReviewReports } from './review-report.js'
 
 const roots: string[] = []
 const originalPath = process.env.PATH
@@ -416,7 +418,7 @@ describe('agent invocation', () => {
       '--permission-mode',
       'plan',
       '--max-turns',
-      '30',
+      '100',
       '--output-format',
       'stream-json',
       '--verbose',
@@ -446,7 +448,7 @@ describe('unattended authoring', () => {
       '--permission-mode',
       'acceptEdits',
       '--max-turns',
-      '60',
+      '400',
       '--output-format',
       'stream-json',
       '--verbose',
@@ -503,7 +505,7 @@ describe('unattended authoring', () => {
       '--permission-mode',
       'acceptEdits',
       '--max-turns',
-      '60',
+      '400',
       '--output-format',
       'stream-json',
       '--verbose',
@@ -612,9 +614,50 @@ describe('Claude activity streaming', () => {
       'Claude finished · 2 turns · 1m 5s',
     ])
   })
+
+  test('names the turn limit when Claude stops before finishing', () => {
+    const formatter = new ClaudeStreamLogFormatter()
+    const lines = [
+      ...formatter.push(`${JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 61, duration_ms: 193_000 })}\n`),
+      ...formatter.finish(),
+    ]
+    expect(lines).toEqual(['Claude stopped · 61 turns · 3m 13s · reached its 61-turn limit before finishing; retry the stage to continue from the preserved workspace'])
+    expect(formatter.stopReason).toContain('reached its 61-turn limit')
+
+    const errored = new ClaudeStreamLogFormatter()
+    errored.push(`${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 3, errors: ['Rate limit exceeded'] })}\n`)
+    expect(errored.stopReason).toBe('stopped with an error: Rate limit exceeded')
+  })
+
+  test('scales the unattended turn budget with the approved plan', () => {
+    const page = (action: 'create' | 'update' | 'preserve', captures = 0, priority: 'must-have' | 'later' = 'must-have') => ({
+      action,
+      priority,
+      ...(captures > 0 ? { visuals: { mode: 'required', estimatedCaptures: captures } } : {}),
+    })
+    expect(authoringTurnBudget(undefined)).toBe(400)
+    expect(authoringTurnBudget({ pages: [page('create'), page('preserve')] as never })).toBe(400)
+    // 44 written pages and 85 planned captures need far more than the old fixed cap of 60.
+    const large = { pages: [...Array.from({ length: 44 }, () => page('create', 2)), page('update', 0, 'later')] as never }
+    expect(authoringTurnBudget(large)).toBe(44 * 30 + 88 * 12)
+    process.env.DOXLOOP_AGENT_MAX_TURNS = '75'
+    try {
+      expect(authoringTurnBudget(large)).toBe(75)
+    } finally {
+      delete process.env.DOXLOOP_AGENT_MAX_TURNS
+    }
+  })
 })
 
 describe('author lifecycle', () => {
+  test('blocks required direct capture before starting an agent when no application is configured', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-capture-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+
+    await expect(runAuthor({ root, mode: 'create', agent: 'codex', screenshots: 'enabled' })).rejects.toThrow('Cannot start required screenshot capture')
+  })
+
   test('does not record completion when the agent leaves validation errors', async () => {
     if (process.platform === 'win32') return
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-lifecycle-'))
@@ -647,13 +690,13 @@ describe('author lifecycle', () => {
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
     const page = (title: string, body: string): string =>
       `---\ntitle: ${title}\ndescription: ${body}\n---\n\n${body}\n`
-    await writeFile(join(root, 'docs', 'index.mdx'), page('Limits', 'The limit is 10.'))
-    await writeFile(join(root, 'docs', 'quickstart.mdx'), page('Quickstart', 'Start safely.'))
+    await writeFile(join(root, 'index.mdx'), page('Limits', 'The limit is 10.'))
+    await writeFile(join(root, 'quickstart.mdx'), page('Quickstart', 'Start safely.'))
 
     const executable = join(parent, 'codex')
     await writeFile(
       executable,
-      `#!/bin/sh\ncat > "${join(root, 'docs', 'index.mdx')}" <<'PAGE'\n${page('Limits', 'The limit is 20.')}PAGE\nexit 0\n`,
+      `#!/bin/sh\ncat > "${join(root, 'index.mdx')}" <<'PAGE'\n${page('Limits', 'The limit is 20.')}PAGE\nexit 0\n`,
     )
     await chmod(executable, 0o755)
     // The stub uses `cat`, so the real PATH has to stay reachable behind it.
@@ -669,11 +712,11 @@ describe('author lifecycle', () => {
       expect(request?.pagesChanged).toBe(1)
       expect(request?.linesAdded).toBeGreaterThan(0)
 
-      const entry = (await pageHistory(root, 'docs/index.mdx'))[0]
+      const entry = (await pageHistory(root, 'index.mdx'))[0]
       expect(entry?.changeKind).toBe('modified')
       expect(entry?.requestId).toBe(request?.id)
       // The page the agent left alone stays out of the request.
-      expect(await pageHistory(root, 'docs/quickstart.mdx')).toEqual([])
+      expect(await pageHistory(root, 'quickstart.mdx')).toEqual([])
     } finally {
       closeHistory()
     }
@@ -688,7 +731,7 @@ describe('author lifecycle', () => {
       sources: [],
     })
     const executable = join(parent, 'codex')
-    await writeFile(executable, '#!/bin/sh\nexit 0\n')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '<doxloop-review>{"score":88,"hardGates":"pass","summary":"The documentation is coherent and ready for its intended readers.","findings":[]}</doxloop-review>'\nexit 0\n`)
     await chmod(executable, 0o755)
     process.env.PATH = parent
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -698,5 +741,7 @@ describe('author lifecycle', () => {
     await expect(pathExists(join(root, '.doxloop', 'last-run.json'))).resolves.toBe(
       false,
     )
+    expect((await listReviewReports(root))[0]).toMatchObject({ score: 88, hardGates: 'pass', findings: [] })
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toContain('doxloop:starter-page')
   })
 })

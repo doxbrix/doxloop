@@ -1,6 +1,6 @@
 import { pagesForChange, readEvidenceMap } from './evidence.js'
 import { isWatchedPath } from './globs.js'
-import { changedSourcePaths, collectSourceChanges } from './sync.js'
+import { changedSourcePaths, collectSourceChanges, readSyncState } from './sync.js'
 import type {
   DoxloopProject,
   DriftResult,
@@ -48,6 +48,7 @@ export async function computeDriftFromChanges(
       filteredPaths: rawPaths.length - changedPaths.length,
       ...('baseline' in change ? { baseline: change.baseline } : {}),
       ...('head' in change ? { head: change.head } : {}),
+      ...(change.scope ? { scope: change.scope } : {}),
     })
 
     const note = unresolvedNote(change)
@@ -82,6 +83,30 @@ export async function computeDriftFromChanges(
       notes.push(
         `${unattributed.length} changed file${unattributed.length === 1 ? '' : 's'} in "${change.name}" ${unattributed.length === 1 ? 'is' : 'are'} not referenced by any page.`,
       )
+    }
+  }
+
+  if (map && project.sync.maxVerificationAgeDays) {
+    const state = await readSyncState(root)
+    const threshold = project.sync.maxVerificationAgeDays
+    const severity = project.sync.maxVerificationAgeSeverity ?? 'warn'
+    for (const [page, evidence] of Object.entries(map.pages)) {
+      for (const entry of evidence.sources) {
+        const record = state.sources[entry.source]
+        const explicit = evidence.verifiedOn?.[entry.source]
+        const revisionMatches = record && evidence.verifiedAt?.[entry.source] && [record.commit, record.contentFingerprint].includes(evidence.verifiedAt[entry.source])
+        const verifiedOn = explicit ?? (revisionMatches ? record.recordedAt : undefined)
+        const ageDays = verifiedOn ? Math.floor((Date.now() - Date.parse(verifiedOn)) / 86_400_000) : Number.POSITIVE_INFINITY
+        if (ageDays <= threshold) continue
+        const ageLabel = Number.isFinite(ageDays) ? `${ageDays} days` : 'an unknown amount of time'
+        if (severity === 'warn') {
+          notes.push(`Page "${page}" was last verified against "${entry.source}" ${ageLabel} ago; policy is ${threshold} days.`)
+          continue
+        }
+        const reasons = reasonsByPage.get(page) ?? []
+        reasons.push({ source: entry.source, paths: [], kind: 'max-age', ...(Number.isFinite(ageDays) ? { ageDays } : {}) })
+        reasonsByPage.set(page, reasons)
+      }
     }
   }
 
@@ -125,8 +150,6 @@ function unresolvedNote(change: SourceChange): string | undefined {
       return `Source "${change.name}" has no sync baseline yet. Run \`doxloop update\` to record one.`
     case 'baseline-lost':
       return `The recorded baseline for source "${change.name}" no longer exists, so changes cannot be compared.`
-    case 'spec-changed':
-      return `The API specification "${change.name}" changed since the last documentation sync.`
     case 'spec-remote':
       return `The API specification "${change.name}" is remote and is not compared locally. Run \`doxloop update\` to check it.`
     default:
@@ -144,6 +167,10 @@ export function formatDrift(result: DriftResult): string {
     for (const page of result.pages) {
       lines.push(`  ${page.page}`)
       for (const reason of page.reasons) {
+        if (reason.kind === 'max-age') {
+          lines.push(`    stale because  verification is ${reason.ageDays === undefined ? 'undated' : `${reason.ageDays} days old`} for source "${reason.source}"`)
+          continue
+        }
         const because =
           reason.paths.length === 0
             ? `source "${reason.source}" changed`

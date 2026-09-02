@@ -1,14 +1,32 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { access, appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
 import { applySyncConfig, computeConfiguredDrift, disableSync, formatSyncStatus, parseSyncMode, parseTriggerList } from './autosync.js'
 import { authenticatedRequest, authenticatedRequestOptional, loadUserConfig, logout } from './auth.js'
+import { parseClaudeEffort, parseReasoning } from './author.js'
 import { historyAvailable } from './db.js'
+import {
+  approveDocumentationPlan,
+  beginDocumentationPlanRevision,
+  cancelDocumentationPlan,
+  continueDocumentationPlanGeneration,
+  createDocumentationPlan,
+  documentationPlanClarificationFeedback,
+  editDocumentationPlan,
+  ignoreDocumentationPlanError,
+  latestDocumentationPlan,
+  listDocumentationPlanVersions,
+  readDocumentationPlan,
+  resumeDocumentationPlan,
+  retryDocumentationPlan,
+} from './documentation-plan.js'
 import { DoxloopError } from './errors.js'
+import { applyWorkflowStageLine, finishWorkflowStages, parseWorkflowStage, type WorkflowStage } from './job-events.js'
+import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { addGenerator } from './generator-manager.js'
 import {
   backfillHistory,
@@ -33,6 +51,14 @@ import {
   validateProjectSourceBoundaries,
 } from './project.js'
 import { effectiveDeployment } from './settings.js'
+import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent } from './screenshot-workflow.js'
+import { checkScreenCaptureBrowser } from './screen-capture-provider.js'
+import { discoverDocumentationSources } from './source-discovery.js'
+import { buildSourceIntelligence } from './source-intelligence.js'
+import { resolveCoverageItem, type CoverageResolutionAction } from './coverage-actions.js'
+import { connectorForSource } from './source-connectors.js'
+import { assertInside, ensureGitignoreEntries, pathExists } from './fs.js'
+import { loadOpenApiSource, parseOpenApi } from './openapi.js'
 import { testRemoteSource } from './remote-monitor.js'
 import {
   listRemoteBranches,
@@ -46,9 +72,16 @@ import {
 } from './remote-source.js'
 import {
   acceptSyncChanges,
+  archiveSyncRun,
+  editSyncRunChange,
   listSyncRuns,
+  pruneSyncRuns,
   readSyncRun,
+  recoverSyncRun,
+  runWorkspace,
+  readSyncRunChangeContent,
   rejectSyncRun,
+  undoSyncRun,
 } from './sync-runs.js'
 import {
   requireSyncReviewChange,
@@ -86,7 +119,11 @@ interface UiJob {
   finishedAt?: string
   exitCode?: number
   lines: string[]
+  stages: WorkflowStage[]
+  planId?: string
   child?: ChildProcess | undefined
+  retry?: { args: string[]; cwd: string; agent?: AgentName; planId?: string }
+  recovered?: boolean
 }
 
 interface UiRuntime {
@@ -97,6 +134,7 @@ interface UiRuntime {
   proposalPreviewJobId?: string | undefined
   proposalPreviewRunId?: string | undefined
   jobSubscribers: Set<ServerResponse>
+  jobBroadcastTimer?: ReturnType<typeof setTimeout> | undefined
   jobPersistTimer?: ReturnType<typeof setTimeout> | undefined
   jobPersistQueue: Promise<void>
   jobLogQueues: Map<string, Promise<void>>
@@ -108,6 +146,16 @@ const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url))
 const DOXBRIX_CSS = resolve(PACKAGE_ROOT, 'assets', 'doxbrix-preview.css')
 const MAX_BODY_BYTES = 1_000_000
 const MAX_PERSISTED_JOBS = 50
+// Agents stream one JSON line per token delta, so a single planning run leaves
+// megabytes of output behind. The full log stays on disk under
+// UI_JOB_LOG_DIRECTORY and is served by /api/jobs/:id/log; the in-memory copy
+// that every state snapshot, job-stream event, and ui-jobs.json write carries
+// keeps only a recent tail. Without this cap a finished 2 MB job was
+// re-serialized on every output chunk of the next run, which pinned the server
+// and left the control center unresponsive.
+const MAX_JOB_LINES = 400
+const MAX_JOB_LINE_LENGTH = 4_000
+const JOB_BROADCAST_INTERVAL_MS = 150
 const UI_JOBS_FILE = join('.doxloop', 'ui-jobs.json')
 const UI_JOB_LOG_DIRECTORY = join('.doxloop', 'ui-job-logs')
 
@@ -125,7 +173,8 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     if (job.status !== 'running') continue
     job.status = 'failed'
     job.finishedAt = new Date().toISOString()
-    job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved; start the documentation update again.')
+    job.recovered = true
+    job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.')
     recoveredJobs = true
   }
   const runtime: UiRuntime = {
@@ -146,7 +195,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     server.once('error', rejectListen)
     server.listen(port, host, resolveListen)
   })
-  const url = `http://${host}:${port}${page === 'home' ? '/' : `/${page}`}`
+  const url = `http://${host}:${port}/${page}`
   process.stdout.write(
     `Doxloop UI: ${url}\nLocal project data stays on this computer.\nPress Ctrl+C to stop.\n`,
   )
@@ -163,6 +212,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
       job.lines.push('The Doxloop UI server stopped and cancelled this run.')
       queueUiJobLog(runtime, job.id, '\nThe Doxloop UI server stopped and cancelled this run.\n')
       job.child?.kill('SIGTERM')
+      if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId).catch(() => undefined)
     }
     broadcastJobs(runtime)
     await flushUiJobLogs(runtime)
@@ -186,13 +236,13 @@ async function handleUiRequest(
     requireLocalHost(request, port)
     const url = new URL(request.url ?? '/', `http://127.0.0.1:${port}`)
     if (url.pathname.startsWith('/api/')) {
-      requireSession(request, session)
+      requireSession(request, session, port)
       if (request.method !== 'GET') requireSameOrigin(request, port)
       await handleApi(request, response, url, runtime)
       return
     }
     if (url.pathname.startsWith('/review-preview/')) {
-      requireSession(request, session)
+      requireSession(request, session, port)
       await handleProposalPreview(response, url, runtime)
       return
     }
@@ -208,7 +258,7 @@ async function handleUiRequest(
       await serveFile(response, join(PACKAGE_ROOT, 'assets', 'brand', 'doxloop-favicon.png'), false)
       return
     }
-    response.setHeader('Set-Cookie', `doxloop_ui=${session}; HttpOnly; SameSite=Strict; Path=/`)
+    response.setHeader('Set-Cookie', `${uiSessionCookieName(port)}=${session}; HttpOnly; SameSite=Strict; Path=/`)
     await serveFile(response, join(UI_ROOT, 'index.html'), true)
   } catch (error) {
     const status = error instanceof DoxloopError ? 409 : 500
@@ -278,16 +328,32 @@ async function handleApi(
     send(response, 200, 'text/plain; charset=utf-8', log, baseHeaders())
     return
   }
-  const jobAction = /^\/api\/jobs\/([a-f0-9]+)\/(cancel)$/.exec(url.pathname)
+  const jobAction = /^\/api\/jobs\/([a-f0-9]+)\/(cancel|retry)$/.exec(url.pathname)
   if (request.method === 'POST' && jobAction) {
     const job = runtime.jobs.get(jobAction[1]!)
     if (!job) throw new DoxloopError('The requested job does not exist.')
+    if (jobAction[2] === 'retry') {
+      if (job.status === 'running' || !job.retry) throw new DoxloopError('This job does not have a safe retry checkpoint.')
+      assertNoActiveDocumentationJob(runtime)
+      // A continuation resumes from the plan's own failure record, so it needs
+      // no stage reset; the other plan stages restore their durable state first.
+      if (job.planId && runtime.root && job.type.startsWith('plan:') && job.type !== 'plan:continue') {
+        const stage = job.type === 'plan:generate' ? 'generate' : job.type === 'plan:revise' ? 'revise' : 'propose'
+        await retryDocumentationPlan(runtime.root, job.planId, stage)
+      }
+      const retry = job.retry
+      const next = startCliJob(runtime, job.type, retry.args, retry.cwd, retry.agent, retry.planId)
+      next.lines.push(`Retrying interrupted run ${job.id} from its last durable stage.`)
+      sendJson(response, 202, publicJob(next))
+      return
+    }
     if (job.status === 'running') {
       job.status = 'cancelled'
       job.finishedAt = new Date().toISOString()
       job.lines.push('The run was cancelled from the Doxloop UI.')
       queueUiJobLog(runtime, job.id, '\nThe run was cancelled from the Doxloop UI.\n')
       job.child?.kill('SIGTERM')
+      if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId)
       delete job.child
       publishJobs(runtime)
     }
@@ -311,6 +377,23 @@ async function handleApi(
     sendJson(response, 201, await loadProject(root))
     return
   }
+  if (request.method === 'GET' && url.pathname === '/api/source-intelligence') {
+    sendJson(response, 200, await buildSourceIntelligence(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/coverage/resolve') {
+    const body = recordBody(await readJsonBody(request))
+    const action = optionalString(body.action)
+    if (!action || !['link', 'exclude', 'needs-human', 'remove-priority', 'reset'].includes(action)) throw new DoxloopError('Choose a valid coverage resolution action.')
+    await resolveCoverageItem(requireProject(runtime), {
+      id: stringValue(body.id),
+      action: action as CoverageResolutionAction,
+      ...(optionalString(body.page) ? { page: optionalString(body.page)! } : {}),
+      ...(optionalString(body.reason) ? { reason: optionalString(body.reason)! } : {}),
+    })
+    sendJson(response, 200, await buildSourceIntelligence(requireProject(runtime)))
+    return
+  }
   const sourceAction = /^\/api\/sources\/([^/]+)$/.exec(url.pathname)
   if (sourceAction && request.method === 'PATCH') {
     const root = requireProject(runtime)
@@ -326,10 +409,12 @@ async function handleApi(
   }
   const sourceTest = /^\/api\/sources\/([^/]+)\/test$/.exec(url.pathname)
   if (sourceTest && request.method === 'POST') {
-    const project = await loadProject(requireProject(runtime))
+    const root = requireProject(runtime)
+    const project = await loadProject(root)
     const source = project.sources.find((item) => item.name === decodeURIComponent(sourceTest[1]!))
-    if (!source?.remote) throw new DoxloopError('Save a remote Git connection before testing it.')
-    sendJson(response, 200, await testRemoteSource(source.remote))
+    if (!source) throw new DoxloopError('The requested source does not exist.')
+    const remote = source.remote ? await testRemoteSource(source.remote) : undefined
+    sendJson(response, 200, { health: await connectorForSource(source).health(root, source), ...(remote ? { remote } : {}) })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/sync/configure') {
@@ -384,9 +469,164 @@ async function handleApi(
     sendJson(response, 200, await listSyncRuns(requireProject(runtime)))
     return
   }
+  if (request.method === 'GET' && url.pathname === '/api/plans/discovery') {
+    const discovery = await discoverDocumentationSources(requireProject(runtime))
+    sendJson(response, 200, {
+      suggestedPages: discovery.inventory.suggestedPages,
+      publicSignals: discovery.inventory.totals.publicSignals,
+      generatedAt: discovery.inventory.generatedAt,
+      cacheHit: discovery.cacheHit,
+    })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/application/readiness') {
+    const project = await loadProject(requireProject(runtime))
+    sendJson(response, 200, await checkApplicationReadiness(project.application))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/application/readiness') {
+    const project = await loadProject(requireProject(runtime))
+    const application = applicationFromBody(await readJsonBody(request), project)
+    sendJson(response, 200, await checkApplicationReadiness(application))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/application/readiness') {
+    const application = applicationFromBody(await readJsonBody(request))
+    sendJson(response, 200, await checkApplicationReadiness(application))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plans') {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const body = recordBody(await readJsonBody(request))
+    const mode = optionalString(body.mode)
+    if (mode !== 'create' && mode !== 'update') throw new DoxloopError('Plan mode must be create or update.')
+    const scope = optionalString(body.scope) ?? 'standard'
+    if (!['starter', 'standard', 'comprehensive', 'custom'].includes(scope)) {
+      throw new DoxloopError('Plan scope must be starter, standard, comprehensive, or custom.')
+    }
+    const project = await loadProject(root)
+    const requestedAgent = parseAgent(optionalString(body.agent))
+    const clarificationMode = optionalString(body.clarificationMode) ?? 'review'
+    if (!['review', 'defaults', 'stop'].includes(clarificationMode)) throw new DoxloopError('Clarification mode must be review, defaults, or stop.')
+    const screenshotIntent = normalizeScreenshotIntent(body.screenshots)
+    await assertScreenshotPlanningReadiness(project.application, screenshotIntent)
+    if (screenshotIntent === 'enabled') {
+      const browserReadiness = await checkScreenCaptureBrowser()
+      if (!browserReadiness.available) throw new DoxloopError(`Screenshots are selected, but the capture browser cannot start. ${browserReadiness.message}`)
+    }
+    const targetPages = body.targetPages === undefined || body.targetPages === null || body.targetPages === '' ? undefined : Number(body.targetPages)
+    if (targetPages !== undefined && (!Number.isInteger(targetPages) || targetPages < 1 || targetPages > 500)) {
+      throw new DoxloopError('Target page count must be a whole number between 1 and 500.')
+    }
+    const plan = await createDocumentationPlan(root, {
+      mode,
+      scope: scope as 'starter' | 'standard' | 'comprehensive' | 'custom',
+      ...(targetPages !== undefined ? { targetPages } : {}),
+      ...(optionalString(body.request) ? { request: optionalString(body.request)! } : {}),
+      clarificationMode: clarificationMode as 'review' | 'defaults' | 'stop',
+      execution: {
+        ...(requestedAgent ?? project.defaultAgent ? { agent: (requestedAgent ?? project.defaultAgent)! } : {}),
+        ...(optionalString(body.model) ? { model: optionalString(body.model)! } : {}),
+        ...(optionalString(body.reasoning) ? { reasoning: parseReasoning(optionalString(body.reasoning))! } : {}),
+        ...(optionalString(body.effort) ? { effort: parseClaudeEffort(optionalString(body.effort))! } : {}),
+        screenshots: screenshotIntent,
+      },
+    })
+    const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', plan.id, '--cwd', root], root, requestedAgent ?? project.defaultAgent, plan.id)
+    sendJson(response, 202, { plan, job: publicJob(job) })
+    return
+  }
+  const planRoute = /^\/api\/plans\/(plan-[a-z0-9-]+)$/.exec(url.pathname)
+  if (request.method === 'GET' && planRoute) {
+    sendJson(response, 200, await readDocumentationPlan(requireProject(runtime), planRoute[1]!))
+    return
+  }
+  if (request.method === 'PATCH' && planRoute) {
+    sendJson(response, 200, await editDocumentationPlan(requireProject(runtime), planRoute[1]!, await readJsonBody(request)))
+    return
+  }
+  const planVersionsRoute = /^\/api\/plans\/(plan-[a-z0-9-]+)\/versions$/.exec(url.pathname)
+  if (request.method === 'GET' && planVersionsRoute) {
+    sendJson(response, 200, await listDocumentationPlanVersions(requireProject(runtime), planVersionsRoute[1]!))
+    return
+  }
+  const planAction = /^\/api\/plans\/(plan-[a-z0-9-]+)\/(revise|clarify|approve|generate|resume|continue)$/.exec(url.pathname)
+  if (request.method === 'POST' && planAction) {
+    const root = requireProject(runtime)
+    const id = planAction[1]!
+    const action = planAction[2]!
+    if (action === 'approve') {
+      sendJson(response, 200, await approveDocumentationPlan(root, id))
+      return
+    }
+    if (action === 'resume') {
+      sendJson(response, 200, await resumeDocumentationPlan(root, id))
+      return
+    }
+    const plan = await readDocumentationPlan(root, id)
+    if (action === 'continue') {
+      // Pick up a failed run where it stopped instead of starting over: a
+      // planning failure keeps the plan the agent proposed; a generation
+      // failure keeps the pages and screenshots already in the workspace.
+      const strategy = optionalString(recordBody(await readJsonBody(request)).strategy) ?? 'resume'
+      if (strategy !== 'resume' && strategy !== 'ignore-errors') throw new DoxloopError('Continuation strategy must be resume or ignore-errors.')
+      // The job may complete after the browser rendered failed-plan actions.
+      // Return the completed plan instead of turning that stale click into an
+      // error; the normal action reload will then replace the stale screen.
+      if (plan.status === 'generated') {
+        sendJson(response, 200, { plan })
+        return
+      }
+      assertNoActiveDocumentationJob(runtime)
+      if (plan.failure?.stage !== 'generate') {
+        if (strategy !== 'ignore-errors') throw new DoxloopError('A planning run cannot be resumed. Retry planning, or continue with the plan it left behind.')
+        sendJson(response, 200, { plan: await ignoreDocumentationPlanError(root, id) })
+        return
+      }
+      const job = startCliJob(runtime, 'plan:continue', ['plan', 'continue', '--id', id, '--strategy', strategy, '--cwd', root], root, plan.execution.agent, id)
+      sendJson(response, 202, { job: publicJob(job) })
+      return
+    }
+    assertNoActiveDocumentationJob(runtime)
+    if (action === 'clarify') {
+      const body = recordBody(await readJsonBody(request))
+      const answers = stringRecord(body.answers)
+      const useRecommendations = body.useRecommendations === true
+      const feedback = documentationPlanClarificationFeedback(plan, answers, useRecommendations)
+      const effectiveAnswers = Object.fromEntries(plan.questions.map((question) => [question.id, answers[question.id] ?? question.recommendation ?? '']))
+      await beginDocumentationPlanRevision(root, id, effectiveAnswers)
+      const job = startCliJob(runtime, 'plan:revise', ['plan', 'revise', '--id', id, '--feedback', feedback, '--cwd', root], root, plan.execution.agent, id)
+      sendJson(response, 202, publicJob(job))
+      return
+    }
+    if (action === 'revise') {
+      const feedback = optionalString(recordBody(await readJsonBody(request)).feedback)
+      if (!feedback) throw new DoxloopError('Describe how the documentation plan should change.')
+      await beginDocumentationPlanRevision(root, id)
+      const job = startCliJob(runtime, 'plan:revise', ['plan', 'revise', '--id', id, '--feedback', feedback, '--cwd', root], root, plan.execution.agent, id)
+      sendJson(response, 202, publicJob(job))
+      return
+    }
+    const job = startCliJob(runtime, 'plan:generate', ['plan', 'generate', '--id', id, '--cwd', root], root, plan.execution.agent, id)
+    sendJson(response, 202, publicJob(job))
+    return
+  }
   const proposal = /^\/api\/proposals\/([a-z0-9-]+)$/.exec(url.pathname)
   if (request.method === 'GET' && proposal) {
     sendJson(response, 200, await readSyncRun(requireProject(runtime), proposal[1]!))
+    return
+  }
+  const proposalDelivery = /^\/api\/proposals\/([a-z0-9-]+)\/delivery\/branch$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalDelivery) {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 201, await createProposalBranch(requireProject(runtime), proposalDelivery[1]!, optionalString(body.branch)))
+    return
+  }
+  const proposalPublish = /^\/api\/proposals\/([a-z0-9-]+)\/delivery\/publish$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalPublish) {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await publishProposalBranch(requireProject(runtime), proposalPublish[1]!, body.createPullRequest === true))
     return
   }
   const proposalPreview = /^\/api\/proposals\/([a-z0-9-]+)\/preview\/start$/.exec(url.pathname)
@@ -428,6 +668,92 @@ async function handleApi(
     sendJson(response, 200, await syncReviewSourceDiff(root, run, requireSyncReviewChange(run, proposalDiff[2]!)))
     return
   }
+  const proposalContent = /^\/api\/proposals\/([a-z0-9-]+)\/changes\/(change-\d+)\/content$/.exec(url.pathname)
+  if (request.method === 'GET' && proposalContent) {
+    sendJson(response, 200, await readSyncRunChangeContent(requireProject(runtime), proposalContent[1]!, proposalContent[2]!))
+    return
+  }
+  if (request.method === 'PATCH' && proposalContent) {
+    const body = recordBody(await readJsonBody(request))
+    const disposition = body.evidenceDisposition === 'needs-review' ? 'needs-review' : 'preserved'
+    sendJson(response, 200, await editSyncRunChange(
+      requireProject(runtime),
+      proposalContent[1]!,
+      proposalContent[2]!,
+      stringValue(body.content),
+      disposition,
+    ))
+    return
+  }
+  const proposalRevision = /^\/api\/proposals\/([a-z0-9-]+)\/(revise|regenerate)$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalRevision) {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const run = await readSyncRun(root, proposalRevision[1]!)
+    const body = recordBody(await readJsonBody(request))
+    const changeIds = proposalRevision[2] === 'regenerate'
+      ? run.changes.map((change) => change.id)
+      : stringArray(body.changeIds)
+    const instruction = proposalRevision[2] === 'regenerate'
+      ? optionalString(body.instruction) ?? 'Regenerate this proposal using the current approved plan and evidence.'
+      : optionalString(body.instruction) ?? ''
+    if (!instruction) throw new DoxloopError('Describe how the selected documentation should change.')
+    if (changeIds.length === 0) throw new DoxloopError('Select at least one file to revise.')
+    const args = ['proposal', 'revise', '--id', run.id, '--request', instruction, '--cwd', root]
+    for (const changeId of changeIds) args.push('--change', changeId)
+    for (const hunkId of stringArray(body.hunkIds)) args.push('--hunk', hunkId)
+    const job = startCliJob(runtime, `proposal:revise:${run.id}`, args, root)
+    sendJson(response, 202, publicJob(job))
+    return
+  }
+  const proposalLifecycle = /^\/api\/proposals\/([a-z0-9-]+)\/(undo|archive|recover)$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalLifecycle) {
+    const root = requireProject(runtime)
+    const result = proposalLifecycle[2] === 'undo'
+      ? await undoSyncRun(root, proposalLifecycle[1]!)
+      : proposalLifecycle[2] === 'recover'
+        ? await recoverSyncRun(root, proposalLifecycle[1]!, {
+            ignoreScreenshotProblems: recordBody(await readJsonBody(request)).ignoreScreenshotProblems === true,
+          })
+        : await archiveSyncRun(root, proposalLifecycle[1]!)
+    sendJson(response, 200, result)
+    return
+  }
+  const proposalResume = /^\/api\/proposals\/([a-z0-9-]+)\/resume$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalResume) {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const run = await readSyncRun(root, proposalResume[1]!)
+    if (run.status !== 'failed' && run.status !== 'generating') throw new DoxloopError(`Only a failed or interrupted proposal can be resumed; ${run.id} is ${run.status}.`)
+    const job = startCliJob(runtime, `proposal:resume:${run.id}`, ['proposal', 'resume', '--id', run.id, '--cwd', root], root)
+    sendJson(response, 202, publicJob(job))
+    return
+  }
+  // Captured screenshots are served straight from the isolated run workspace so
+  // reviewers can watch them appear during a run, before anything is applied.
+  if (request.method === 'GET' && url.pathname === '/api/captures') {
+    const root = requireProject(runtime)
+    sendJson(response, 200, { captures: await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/captures/file') {
+    const root = requireProject(runtime)
+    const runId = url.searchParams.get('run')
+    const file = url.searchParams.get('path')
+    if (!runId || !file) throw new DoxloopError('A capture request needs a run and a project-relative path.')
+    const workspace = runWorkspace(root, runId)
+    const image = assertInside(workspace, resolve(workspace, file))
+    if (extname(image).toLowerCase() !== '.png' || !(await pathExists(image))) {
+      sendJson(response, 404, { error: 'That capture no longer exists.' })
+      return
+    }
+    send(response, 200, 'image/png', await readFile(image), { ...baseHeaders(), 'Cache-Control': 'no-store' })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/proposals/cleanup') {
+    sendJson(response, 200, { removed: await pruneSyncRuns(requireProject(runtime)) })
+    return
+  }
   const proposalDecision = /^\/api\/proposals\/([a-z0-9-]+)\/(accept|reject)$/.exec(url.pathname)
   if (request.method === 'POST' && proposalDecision) {
     const root = requireProject(runtime)
@@ -442,10 +768,6 @@ async function handleApi(
     sendJson(response, 200, result)
     return
   }
-  if (request.method === 'POST' && url.pathname === '/api/validate') {
-    sendJson(response, 200, await validateProject(requireProject(runtime)))
-    return
-  }
   if (request.method === 'POST' && url.pathname === '/api/author') {
     const activeAuthoringJob = [...runtime.jobs.values()].find(
       (job) => job.status === 'running' && job.type.startsWith('author:'),
@@ -458,6 +780,7 @@ async function handleApi(
     if (mode !== 'create' && mode !== 'update' && mode !== 'review') {
       throw new DoxloopError('Authoring mode must be create, update, or review.')
     }
+    requirePlanFirstAuthoring(mode)
     const root = requireProject(runtime)
     let project = await loadProject(root)
     if (
@@ -491,8 +814,9 @@ async function handleApi(
     appendOption(args, 'model', optionalString(body.model))
     if (effectiveAgent === 'codex') appendOption(args, 'reasoning', optionalString(body.reasoning))
     if (effectiveAgent === 'claude') appendOption(args, 'effort', optionalString(body.effort))
-    if (body.screenshots === true && mode !== 'review') args.push('--screenshots')
-    if (body.screenshots === false && mode !== 'review') args.push('--no-screenshots')
+    const screenshotIntent = normalizeScreenshotIntent(body.screenshots)
+    if (screenshotIntent === 'enabled' && mode !== 'review') args.push('--screenshots')
+    if (screenshotIntent === 'disabled' && mode !== 'review') args.push('--no-screenshots')
     args.push('--yes', '--cwd', root)
     sendJson(
       response,
@@ -633,6 +957,7 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     agents,
     account,
     receipt,
+    documentationPlan: await latestDocumentationPlan(root),
     generators: (await installedGeneratorEntries(root)).filter(
       (generator) => generator.id === project.generator,
     ),
@@ -701,6 +1026,7 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   const body = recordBody(raw)
   const title = optionalString(body.title)
   const generator = parseGenerator(optionalString(body.generator)) ?? 'doxbrix'
+  const application = body.application !== undefined ? applicationFromBody(body.application) : undefined
   const root = resolveUiDocumentationDirectory(runtime.cwd, stringValue(body.directory))
   await assertUiProjectDirectoryAvailable(root)
   await assertNewProjectDirectory(root)
@@ -729,6 +1055,7 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
     } else if (itemKind === 'directory' && itemPath) {
       sources.push({ name, path: portableRelative(root, resolve(runtime.cwd, itemPath)) })
     } else if (itemKind === 'openapi' && specificationContent) {
+      parseOpenApi(specificationContent, `OpenAPI source "${name}"`)
       const extension = specificationContent.trimStart().startsWith('{') ? 'json' : 'yaml'
       const inlineDirectory = resolve(root, '..', '.doxloop-sources', sourceIdentifier(root.split(sep).pop() ?? 'project'), 'openapi')
       const inlinePath = join(inlineDirectory, `${name}.${extension}`)
@@ -756,6 +1083,7 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   await saveProjectSettings(root, {
     ...(agent ? { defaultAgent: agent } : {}),
     documentation,
+    ...(application ? { application } : {}),
   })
   runtime.root = root
 }
@@ -779,8 +1107,10 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
   const sourceKind = optionalString(body.sourceKind)
   const sourceLocation = optionalString(body.sourceLocation) ?? 'local'
   const sourcePath = optionalString(body.sourcePath)
+  const sourceSpecContent = optionalString(body.specContent)
   let resolvedSourcePath: string | undefined
   let sourcePathError: string | undefined
+  let openapiSummary: Awaited<ReturnType<typeof loadOpenApiSource>>['summary'] | undefined
   if (sourceKind && sourceKind !== 'none') {
     if (sourceKind === 'directory' && sourceLocation === 'git') {
       try {
@@ -788,6 +1118,9 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
       } catch (error) {
         sourcePathError = error instanceof Error ? error.message : String(error)
       }
+    } else if (sourceKind === 'openapi' && sourceSpecContent) {
+      try { openapiSummary = parseOpenApi(sourceSpecContent, 'Uploaded OpenAPI specification').summary }
+      catch (error) { sourcePathError = error instanceof Error ? error.message : String(error) }
     } else if (!sourcePath) {
       sourcePathError = sourceKind === 'directory' ? 'Choose a product source directory.' : 'Enter an OpenAPI file path or URL.'
     } else if (root) {
@@ -800,6 +1133,7 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
           resolvedSourcePath = isSpecUrl(parsed.path) ? parsed.path : resolve(runtime.cwd, parsed.path)
           const binding = isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolvedSourcePath) }
           await validateProjectSourceBoundaries(root, [binding])
+          openapiSummary = (await loadOpenApiSource(root, binding)).summary
         } else {
           sourcePathError = 'Choose a supported source type.'
         }
@@ -814,6 +1148,7 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
     ...(directoryError ? { directoryError } : {}),
     ...(resolvedSourcePath ? { sourcePath: resolvedSourcePath } : {}),
     ...(sourcePathError ? { sourcePathError } : {}),
+    ...(openapiSummary ? { openapiSummary } : {}),
   }
 }
 
@@ -894,24 +1229,26 @@ async function addSourceFromUi(root: string, raw: unknown): Promise<void> {
   const kind = stringValue(body.kind)
   const location = optionalString(body.path)
   const specificationContent = optionalString(body.specContent)
+  const scope = sourceScopeFromBody(body)
   let source: SourceBinding
   if (kind === 'openapi' && specificationContent) {
+    parseOpenApi(specificationContent, 'Uploaded OpenAPI specification')
     const extension = specificationContent.trimStart().startsWith('{') ? 'json' : 'yaml'
     const inlineDirectory = resolve(root, '..', '.doxloop-sources', sourceIdentifier(root.split(sep).pop() ?? 'project'), 'openapi')
     const inlinePath = join(inlineDirectory, `${name}.${extension}`)
     await mkdir(inlineDirectory, { recursive: true })
     await writeFile(inlinePath, `${specificationContent.trim()}\n`, 'utf8')
-    source = { name, path: portableRelative(root, inlinePath), kind: 'openapi' }
+    source = { name, path: portableRelative(root, inlinePath), kind: 'openapi', ...(scope ? { scope } : {}) }
   } else if (kind === 'openapi') {
     const parsed = parseSpec(`${name}=${location ?? ''}`)
-    source = isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(root, parsed.path)) }
+    source = { ...(isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(root, parsed.path)) }), ...(scope ? { scope } : {}) }
   } else if (kind === 'directory') {
     if (!location) throw new DoxloopError('Choose a product source directory.')
-    source = { name, path: portableRelative(root, resolve(root, location)) }
+    source = { name, path: portableRelative(root, resolve(root, location)), ...(scope ? { scope } : {}) }
   } else if (kind === 'git') {
     const remote = remoteSourceFromSetupBody(body)
     const prepared = await materializeRemoteSource(root, { name, remote })
-    source = { name, path: portableSourcePath(root, prepared.path), remote }
+    source = { name, path: portableSourcePath(root, prepared.path), remote, ...(scope ? { scope } : {}) }
   } else {
     throw new DoxloopError('Source type must be directory, git, or openapi.')
   }
@@ -946,6 +1283,15 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
     }
     sources[index] = source
   }
+  if (body.scope !== undefined) {
+    const scope = sourceScopeFromBody(body)
+    if (scope) source = { ...source, scope }
+    else {
+      const { scope: _scope, ...unscoped } = source
+      source = unscoped
+    }
+    sources[index] = source
+  }
   if (body.remote === null) {
     const { remote: _remote, ...withoutRemote } = source
     sources[index] = withoutRemote
@@ -975,6 +1321,17 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
   }
   await validateProjectSourceBoundaries(root, sources)
   await saveProjectSettings(root, { sources })
+}
+
+function sourceScopeFromBody(body: Record<string, unknown>): SourceBinding['scope'] | undefined {
+  if (body.scope === undefined || body.scope === null) return undefined
+  const raw = recordBody(body.scope)
+  const space = optionalString(raw.space)
+  const routePrefix = optionalString(raw.routePrefix)
+  const navigationGroup = optionalString(raw.navigationGroup)
+  const sharedPages = raw.sharedPages === undefined ? undefined : stringArray(raw.sharedPages)
+  if (!space && !routePrefix && !navigationGroup && !sharedPages?.length) return undefined
+  return { ...(space ? { space } : {}), ...(routePrefix ? { routePrefix } : {}), ...(navigationGroup ? { navigationGroup } : {}), ...(sharedPages?.length ? { sharedPages } : {}) }
 }
 
 async function removeSourceFromUi(root: string, name: string): Promise<void> {
@@ -1049,7 +1406,11 @@ function syncConfigFromBody(raw: unknown, current: SyncConfig): SyncConfig {
   const maxRunsPerDay = budgetBody ? optionalPositiveNumber(budgetBody.maxRunsPerDay) : current.budget?.maxRunsPerDay
   const maxMinutes = budgetBody ? optionalPositiveNumber(budgetBody.maxMinutes) : current.budget?.maxMinutes
   const budget = maxRunsPerDay || maxMinutes ? { ...(maxRunsPerDay ? { maxRunsPerDay } : {}), ...(maxMinutes ? { maxMinutes } : {}) } : undefined
-  return { mode, ...(branch ? { branch } : {}), on, watch, ignore, ...(budget ? { budget } : {}) }
+  const maxVerificationAgeDays = body.maxVerificationAgeDays === undefined ? current.maxVerificationAgeDays : optionalPositiveNumber(body.maxVerificationAgeDays)
+  const rawSeverity = optionalString(body.maxVerificationAgeSeverity) ?? current.maxVerificationAgeSeverity
+  if (rawSeverity && rawSeverity !== 'warn' && rawSeverity !== 'fail') throw new DoxloopError('Verification age severity must be warn or fail.')
+  const maxVerificationAgeSeverity = rawSeverity === 'warn' || rawSeverity === 'fail' ? rawSeverity : undefined
+  return { mode, ...(branch ? { branch } : {}), on, watch, ignore, ...(budget ? { budget } : {}), ...(maxVerificationAgeDays ? { maxVerificationAgeDays } : {}), ...(maxVerificationAgeSeverity ? { maxVerificationAgeSeverity } : {}) }
 }
 
 function documentationFromBody(raw: unknown, current: DocumentationBrief): DocumentationBrief {
@@ -1077,10 +1438,14 @@ function documentationFromBody(raw: unknown, current: DocumentationBrief): Docum
   }
   const priorityOutcomes = body.priorityOutcomes === undefined ? current.priorityOutcomes : stringArray(body.priorityOutcomes)
   if (priorityOutcomes) result.priorityOutcomes = priorityOutcomes
+  const preferredExamples = body.preferredExamples === undefined ? current.preferredExamples : stringArray(body.preferredExamples)
+  if (preferredExamples) result.preferredExamples = preferredExamples
+  const designDirection = body.designDirection === undefined ? current.designDirection : optionalString(body.designDirection)
+  if (designDirection) result.designDirection = designDirection
   return result
 }
 
-function applicationFromBody(raw: unknown, project: DoxloopProject): ApplicationConfig {
+function applicationFromBody(raw: unknown, project?: DoxloopProject): ApplicationConfig {
   const body = recordBody(raw)
   const baseUrl = stringValue(body.baseUrl)
   let parsed: URL
@@ -1094,7 +1459,7 @@ function applicationFromBody(raw: unknown, project: DoxloopProject): Application
   }
   const screenshots = body.screenshots === undefined ? undefined : recordBody(body.screenshots)
   const source = optionalString(body.source)
-  if (source && !project.sources.some((item) => item.name === source)) {
+  if (source && (!project || !project.sources.some((item) => item.name === source))) {
     throw new DoxloopError(`Application source "${source}" is not configured.`)
   }
   const startCommand = optionalString(body.startCommand)
@@ -1108,6 +1473,12 @@ function applicationFromBody(raw: unknown, project: DoxloopProject): Application
   const width = screenshots ? optionalViewportNumber(screenshots.viewport, 'width', 3840) : undefined
   const height = screenshots ? optionalViewportNumber(screenshots.viewport, 'height', 2160) : undefined
   if ((width === undefined) !== (height === undefined)) throw new DoxloopError('Screenshot viewport requires both width and height.')
+  const startPath = optionalString(screenshots?.startPath)
+  if (startPath && !validApplicationRelativePath(startPath)) {
+    throw new DoxloopError('Screenshot starting route must begin with one slash and must not include a fragment.')
+  }
+  const workflow = optionalString(screenshots?.workflow)
+  if (workflow && workflow.length < 12) throw new DoxloopError('Screenshot workflow guidance must describe the safe state and capture process.')
   return {
     baseUrl: parsed.toString().replace(/\/$/, ''),
     ...(source ? { source } : {}),
@@ -1118,8 +1489,20 @@ function applicationFromBody(raw: unknown, project: DoxloopProject): Application
         policy: policy as 'requested' | 'auto' | 'off',
         ...(width !== undefined && height !== undefined ? { viewport: { width, height } } : {}),
         ...(screenshots.highlight === undefined ? {} : { highlight: screenshots.highlight === true }),
+        ...(startPath ? { startPath } : {}),
+        ...(workflow ? { workflow } : {}),
       },
     } : {}),
+  }
+}
+
+function validApplicationRelativePath(value: string): boolean {
+  if (!value.startsWith('/') || value.startsWith('//')) return false
+  try {
+    const parsed = new URL(value, 'https://application.invalid')
+    return parsed.origin === 'https://application.invalid' && !parsed.hash
+  } catch {
+    return false
   }
 }
 
@@ -1161,6 +1544,7 @@ async function handleProposalPreview(response: ServerResponse, url: URL, runtime
   const html = await syncReviewComparisonDocument(root, run, requireSyncReviewChange(run, match[2]!), {
     layout: url.searchParams.get('layout') === 'unified' ? 'unified' : 'split',
     onlyChanges: url.searchParams.get('only') === '1',
+    theme: url.searchParams.get('theme') === 'dark' ? 'dark' : 'light',
   })
   send(response, 200, 'text/html; charset=utf-8', html, reviewHeaders())
 }
@@ -1176,11 +1560,12 @@ function startAgentInstallJob(runtime: UiRuntime, agent: AgentName): UiJob {
     startedAt: new Date().toISOString(),
     lastOutputAt: new Date().toISOString(),
     lines: [`Preparing to install ${displayName}…`],
+    stages: [],
   }
   const append = (output: string): void => {
     const lines = output.split(/\r?\n/).filter(Boolean)
     if (lines.length === 0) return
-    job.lines.push(...lines)
+    appendJobLines(job, lines)
     job.lastOutputAt = new Date().toISOString()
     queueUiJobLog(runtime, job.id, output.endsWith('\n') ? output : `${output}\n`)
     publishJobs(runtime)
@@ -1214,8 +1599,10 @@ function startCliJob(
   args: string[],
   cwd: string,
   agent?: AgentName,
+  planId?: string,
 ): UiJob {
   const id = randomBytes(8).toString('hex')
+  const retryable = expectedRetryCommand(type) !== undefined
   const job: UiJob = {
     id,
     type,
@@ -1223,6 +1610,9 @@ function startCliJob(
     status: 'running',
     startedAt: new Date().toISOString(),
     lines: [],
+    stages: [],
+    ...(planId ? { planId } : {}),
+    ...(retryable ? { retry: { args: [...args], cwd, ...(agent ? { agent } : {}), ...(planId ? { planId } : {}) } } : {}),
   }
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
     cwd,
@@ -1233,7 +1623,8 @@ function startCliJob(
   const append = (chunk: Buffer | string): void => {
     const text = chunk.toString()
     const lines = text.split(/\r?\n/).filter(Boolean)
-    job.lines.push(...lines)
+    appendJobLines(job, lines)
+    for (const line of lines) applyWorkflowStageLine(job.stages, line)
     job.lastOutputAt = new Date().toISOString()
     queueUiJobLog(runtime, job.id, text)
     publishJobs(runtime)
@@ -1243,6 +1634,7 @@ function startCliJob(
   child.once('error', (error) => {
     append(error.message)
     job.status = 'failed'
+    finishWorkflowStages(job.stages, 'failed')
     job.finishedAt = new Date().toISOString()
     publishJobs(runtime)
   })
@@ -1250,6 +1642,7 @@ function startCliJob(
     if (job.status === 'cancelled') return
     job.exitCode = code ?? 1
     job.status = code === 0 && !signal ? 'succeeded' : 'failed'
+    finishWorkflowStages(job.stages, job.status === 'succeeded' ? 'completed' : 'failed')
     job.finishedAt = new Date().toISOString()
     delete job.child
     publishJobs(runtime)
@@ -1259,9 +1652,29 @@ function startCliJob(
   return job
 }
 
-function publicJob(job: UiJob): Omit<UiJob, 'child'> {
+function publicJob(job: UiJob): Omit<UiJob, 'child' | 'retry'> & { retryable: boolean } {
+  const { child: _child, retry, ...rest } = job
+  return { ...rest, retryable: Boolean(retry) && job.status !== 'running' }
+}
+
+function persistedJob(job: UiJob): Omit<UiJob, 'child'> {
   const { child: _child, ...rest } = job
   return rest
+}
+
+function assertNoActiveDocumentationJob(runtime: UiRuntime): void {
+  const active = [...runtime.jobs.values()].find(
+    (job) => job.status === 'running' && (job.type.startsWith('author:') || job.type.startsWith('plan:') || job.type.startsWith('proposal:')),
+  )
+  if (active) {
+    throw new DoxloopError('A documentation workflow is already in progress. Wait for it to finish or cancel it before starting another.')
+  }
+}
+
+function requirePlanFirstAuthoring(mode: string): void {
+  if (mode !== 'review') {
+    throw new DoxloopError('Create and update runs must start from an approved documentation plan in the Doxloop UI.')
+  }
 }
 
 async function waitForPreviewServer(url: string, job: UiJob): Promise<void> {
@@ -1307,11 +1720,36 @@ function jobEvent(runtime: UiRuntime): string {
   return `data: ${JSON.stringify(jobs)}\n\n`
 }
 
+/** Subscribers whose socket is full; they get the newest snapshot once it drains. */
+const drainingSubscribers = new WeakSet<ServerResponse>()
+
 function broadcastJobs(runtime: UiRuntime): void {
+  if (runtime.jobBroadcastTimer) {
+    clearTimeout(runtime.jobBroadcastTimer)
+    runtime.jobBroadcastTimer = undefined
+  }
   const event = jobEvent(runtime)
   for (const response of runtime.jobSubscribers) {
     if (response.destroyed || response.writableEnded) {
       runtime.jobSubscribers.delete(response)
+      continue
+    }
+    // A tab that cannot keep up would otherwise have every snapshot buffered
+    // in server memory. Every event is a complete snapshot, so skipping this
+    // one and sending the newest after the socket drains loses nothing.
+    if (response.writableNeedDrain) {
+      if (!drainingSubscribers.has(response)) {
+        drainingSubscribers.add(response)
+        response.once('drain', () => {
+          drainingSubscribers.delete(response)
+          if (response.destroyed || response.writableEnded) return
+          try {
+            response.write(jobEvent(runtime))
+          } catch {
+            runtime.jobSubscribers.delete(response)
+          }
+        })
+      }
       continue
     }
     try {
@@ -1322,8 +1760,34 @@ function broadcastJobs(runtime: UiRuntime): void {
   }
 }
 
+/**
+ * Coalesce job updates. An agent emits hundreds of output chunks per second,
+ * and each one used to serialize the full job list for every subscriber.
+ */
+function scheduleJobBroadcast(runtime: UiRuntime): void {
+  if (runtime.jobBroadcastTimer) return
+  runtime.jobBroadcastTimer = setTimeout(() => {
+    runtime.jobBroadcastTimer = undefined
+    broadcastJobs(runtime)
+  }, JOB_BROADCAST_INTERVAL_MS)
+  runtime.jobBroadcastTimer.unref?.()
+}
+
+function trimJobLines(lines: string[]): string[] {
+  return lines
+    .slice(-MAX_JOB_LINES)
+    .map((line) => line.length > MAX_JOB_LINE_LENGTH
+      ? `${line.slice(0, MAX_JOB_LINE_LENGTH)}… [line truncated; open the full log]`
+      : line)
+}
+
+function appendJobLines(job: UiJob, lines: string[]): void {
+  job.lines.push(...trimJobLines(lines))
+  if (job.lines.length > MAX_JOB_LINES) job.lines.splice(0, job.lines.length - MAX_JOB_LINES)
+}
+
 function publishJobs(runtime: UiRuntime): void {
-  broadcastJobs(runtime)
+  scheduleJobBroadcast(runtime)
   if (!runtime.root) return
   if (runtime.jobPersistTimer) clearTimeout(runtime.jobPersistTimer)
   runtime.jobPersistTimer = setTimeout(() => {
@@ -1370,11 +1834,12 @@ async function flushUiJobs(runtime: UiRuntime): Promise<void> {
 
 async function persistUiJobs(runtime: UiRuntime): Promise<void> {
   if (!runtime.root) return
+  await ensureGitignoreEntries(runtime.root, [UI_JOBS_FILE, `${UI_JOB_LOG_DIRECTORY}/`])
   const path = join(runtime.root, UI_JOBS_FILE)
   const temporary = `${path}.${process.pid}.tmp`
   const jobs = [...runtime.jobs.values()]
     .slice(-MAX_PERSISTED_JOBS)
-    .map(publicJob)
+    .map(persistedJob)
   await mkdir(join(runtime.root, '.doxloop'), { recursive: true, mode: 0o700 })
   await writeFile(
     temporary,
@@ -1390,13 +1855,13 @@ async function loadUiJobs(root: string): Promise<Map<string, UiJob>> {
   const record = raw as Record<string, unknown>
   if (record.schemaVersion !== 1 || !Array.isArray(record.jobs)) return new Map()
   const jobs = record.jobs
-    .map(parsePersistedUiJob)
+    .map((job) => parsePersistedUiJob(job, root))
     .filter((job): job is UiJob => job !== undefined)
     .slice(-MAX_PERSISTED_JOBS)
   return new Map(jobs.map((job) => [job.id, job]))
 }
 
-function parsePersistedUiJob(raw: unknown): UiJob | undefined {
+function parsePersistedUiJob(raw: unknown, root: string): UiJob | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const job = raw as Record<string, unknown>
   const statuses: UiJob['status'][] = ['running', 'succeeded', 'failed', 'cancelled']
@@ -1408,8 +1873,10 @@ function parsePersistedUiJob(raw: unknown): UiJob | undefined {
     typeof job.startedAt !== 'string' ||
     !Array.isArray(job.lines)
   ) return undefined
-  const lines = job.lines
-    .filter((line): line is string => typeof line === 'string')
+  const lines = trimJobLines(job.lines.filter((line): line is string => typeof line === 'string'))
+  const retry = job.retry && typeof job.retry === 'object' && !Array.isArray(job.retry)
+    ? parseRetry(job.retry as Record<string, unknown>, root, job.type)
+    : undefined
   return {
     id: job.id,
     type: job.type,
@@ -1421,8 +1888,37 @@ function parsePersistedUiJob(raw: unknown): UiJob | undefined {
     ...(typeof job.lastOutputAt === 'string' ? { lastOutputAt: job.lastOutputAt } : {}),
     ...(typeof job.finishedAt === 'string' ? { finishedAt: job.finishedAt } : {}),
     ...(typeof job.exitCode === 'number' ? { exitCode: job.exitCode } : {}),
+    ...(typeof job.planId === 'string' && /^plan-[a-z0-9-]+$/.test(job.planId) ? { planId: job.planId } : {}),
+    ...(retry ? { retry } : {}),
+    ...(job.recovered === true ? { recovered: true } : {}),
     lines,
+    stages: Array.isArray(job.stages) ? job.stages.flatMap((stage) => parseWorkflowStage(stage) ?? []) : [],
   }
+}
+
+function parseRetry(value: Record<string, unknown>, root: string, type: string): NonNullable<UiJob['retry']> | undefined {
+  if (!Array.isArray(value.args) || typeof value.cwd !== 'string') return undefined
+  const args = (value.args as unknown[]).filter((item): item is string => typeof item === 'string').slice(0, 100)
+  if (args.length !== value.args.length) return undefined
+  const expected = expectedRetryCommand(type)
+  if (!expected || args[0] !== expected) return undefined
+  const cwd = resolve(value.cwd)
+  if (!containedBy(root, cwd)) return undefined
+  const cwdIndex = args.lastIndexOf('--cwd')
+  if (cwdIndex < 0 || !args[cwdIndex + 1] || !containedBy(root, resolve(cwd, args[cwdIndex + 1]!))) return undefined
+  return { args, cwd, ...(value.agent === 'codex' || value.agent === 'claude' || value.agent === 'gemini' ? { agent: value.agent } : {}), ...(typeof value.planId === 'string' ? { planId: value.planId } : {}) }
+}
+
+function expectedRetryCommand(type: string): string | undefined {
+  if (type.startsWith('plan:')) return 'plan'
+  if (type.startsWith('proposal:revise:') || type.startsWith('proposal:resume:')) return 'proposal'
+  if (type === 'author:review') return 'review'
+  return ['sync', 'capture', 'generator', 'deploy', 'deploy:dry-run'].includes(type) ? type.split(':')[0] : undefined
+}
+
+function containedBy(root: string, candidate: string): boolean {
+  const rel = relative(resolve(root), resolve(candidate))
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
 async function optionalProjectRoot(cwd: string): Promise<string | undefined> {
@@ -1482,9 +1978,14 @@ function requireLocalHost(request: IncomingMessage, port: number): void {
   if (!host || !allowed.has(host)) throw new DoxloopError('Invalid local UI host.')
 }
 
-function requireSession(request: IncomingMessage, session: string): void {
+export function uiSessionCookieName(port: number): string {
+  return `doxloop_ui_${port}`
+}
+
+function requireSession(request: IncomingMessage, session: string, port: number): void {
   const cookie = request.headers.cookie ?? ''
-  const valid = cookie.split(';').some((entry) => entry.trim() === `doxloop_ui=${session}`)
+  const expected = `${uiSessionCookieName(port)}=${session}`
+  const valid = cookie.split(';').some((entry) => entry.trim() === expected)
   if (!valid) throw new DoxloopError('Invalid local UI session. Reload the Doxloop UI.')
 }
 
@@ -1498,7 +1999,7 @@ function requireSameOrigin(request: IncomingMessage, port: number): void {
 function appHeaders(): Record<string, string> {
   return {
     ...baseHeaders(),
-    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:4321; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:4321; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   }
 }
 
@@ -1517,6 +2018,102 @@ function baseHeaders(): Record<string, string> {
     'Referrer-Policy': 'no-referrer',
     'X-Frame-Options': 'DENY',
   }
+}
+
+interface RunCapture {
+  run: string
+  file: string
+  url: string
+  guide?: string
+  step?: string
+  alt?: string
+  status?: string
+  /** First file with identical bytes, so the reviewer can spot faked states. */
+  duplicateOf?: string
+}
+
+/**
+ * List the PNGs a run has captured. The manifest supplies the reviewable
+ * metadata, but images are also listed before the manifest exists so a live run
+ * shows its captures as they land.
+ */
+async function listRunCaptures(root: string, requested?: string): Promise<RunCapture[]> {
+  const runs = await listSyncRuns(root)
+  const target = requested
+    ? runs.find((run) => run.id === requested)
+    : runs.find((run) => Boolean(run.id))
+  if (!target) return []
+  const workspace = runWorkspace(root, target.id)
+  if (!(await pathExists(workspace))) return []
+
+  const described = new Map<string, RunCapture>()
+  try {
+    const manifest = JSON.parse(
+      await readFile(join(workspace, '.doxloop', 'screenshot-manifest.json'), 'utf8'),
+    ) as { guides?: Array<{ page?: string; steps?: Array<Record<string, unknown>> }> }
+    for (const guide of manifest.guides ?? []) {
+      for (const step of guide.steps ?? []) {
+        const file = typeof step.file === 'string' ? step.file : undefined
+        if (!file) continue
+        described.set(file, {
+          run: target.id,
+          file,
+          url: `/api/captures/file?run=${encodeURIComponent(target.id)}&path=${encodeURIComponent(file)}`,
+          ...(guide.page ? { guide: guide.page } : {}),
+          ...(typeof step.id === 'string' ? { step: step.id } : {}),
+          ...(typeof step.alt === 'string' ? { alt: step.alt } : {}),
+          ...(typeof step.status === 'string' ? { status: step.status } : {}),
+        })
+      }
+    }
+  } catch {
+    // A run that has not written its manifest yet still shows its images.
+  }
+  for (const file of await guideImageFiles(workspace)) {
+    if (described.has(file)) continue
+    described.set(file, {
+      run: target.id,
+      file,
+      url: `/api/captures/file?run=${encodeURIComponent(target.id)}&path=${encodeURIComponent(file)}`,
+    })
+  }
+
+  const seen = new Map<string, string>()
+  const captures: RunCapture[] = []
+  for (const capture of [...described.values()].sort((left, right) => left.file.localeCompare(right.file))) {
+    const image = join(workspace, capture.file)
+    if (!(await pathExists(image))) continue
+    const digest = createHash('sha256').update(await readFile(image)).digest('hex')
+    const original = seen.get(digest)
+    if (original) capture.duplicateOf = original
+    else seen.set(digest, capture.file)
+    captures.push(capture)
+  }
+  return captures
+}
+
+/** Project-relative PNGs under any guide asset directory. */
+async function guideImageFiles(workspace: string): Promise<string[]> {
+  const files: string[] = []
+  const stack = ['']
+  while (stack.length > 0 && files.length < 500) {
+    const relativeDirectory = stack.pop()!
+    let entries
+    try {
+      entries = await readdir(join(workspace, relativeDirectory), { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const child = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        if (!['.doxloop', '.git', 'node_modules'].includes(entry.name)) stack.push(child)
+      } else if (/\.png$/i.test(entry.name) && child.includes('guides/')) {
+        files.push(child)
+      }
+    }
+  }
+  return files
 }
 
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
@@ -1540,9 +2137,9 @@ function mimeType(path: string): string {
   }
 }
 
-function normalizeInitialPage(value: string | undefined): string {
-  const page = value ?? 'home'
-  const allowed = new Set(['home', 'sources', 'authoring', 'sync', 'proposals', 'quality', 'preview', 'publish', 'settings'])
+export function normalizeInitialPage(value: string | undefined): string {
+  const page = value ?? 'overview'
+  const allowed = new Set(['overview', 'sources', 'authoring', 'proposals', 'publish', 'settings'])
   if (!allowed.has(page)) throw new DoxloopError(`Unknown UI page "${page}".`)
   return page
 }

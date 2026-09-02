@@ -1,6 +1,7 @@
 import { access, readFile } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { EVIDENCE_MAP_FILE, readEvidenceMap } from './evidence.js'
+import { readSyncState } from './sync.js'
 import { pathExists, resolveContainedDirectory } from './fs.js'
 import type { GeneratorAdapter } from './generator-api.js'
 import { loadGeneratorAdapter } from './generators.js'
@@ -15,6 +16,7 @@ import {
 } from './project.js'
 import type {
   DoxbrixNavNode,
+  DoxloopProject,
   SourceBinding,
   ValidationIssue,
   ValidationResult,
@@ -27,6 +29,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     root,
     project.contentDir,
     'Validation content directory',
+    { allowRoot: project.generator === 'doxbrix' },
   )
   const files = await loadPages(root, project)
   const pages = files.map((path) => pageId(contentRoot, path))
@@ -35,6 +38,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     project.generator === 'doxbrix'
       ? undefined
       : await loadGeneratorAdapter(root, project)
+  const planTypes = await plannedPageTypes(root, project)
   if (project.generator === 'doxbrix') {
     const site = await loadSiteConfig(root, project)
     const configFile = relativePath(root, await siteConfigPath(root, project))
@@ -81,6 +85,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
       issues.push(...validateDoxbrixComponents(raw, file))
     }
     issues.push(...validateProfessionalContent(page.body, raw, file))
+    issues.push(...validatePageDepth(page.body, file, planTypes.get(file.replace(/\.[^./]+$/, ''))))
     if ((adapter?.project.contentFormat ?? 'markdown') === 'markdown') {
       issues.push(...(await validateLinks(path, contentRoot, raw, root, adapter)))
     }
@@ -90,7 +95,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     ...(await validateEvidenceMap(
       root,
       files.map((path) => relativePath(root, path)),
-      project.sources,
+      project,
     )),
   )
 
@@ -107,14 +112,15 @@ export async function validateProject(root: string): Promise<ValidationResult> {
 async function validateEvidenceMap(
   root: string,
   pageFiles: string[],
-  sources: SourceBinding[],
+  project: DoxloopProject,
 ): Promise<ValidationIssue[]> {
   const map = await readEvidenceMap(root)
   if (!map) return []
   const issues: ValidationIssue[] = []
   const pages = new Set(pageFiles)
-  const sourceNames = new Set(sources.map((source) => source.name))
+  const sourceNames = new Set(project.sources.map((source) => source.name))
   const pathCoverage = new Map<string, Set<string>>()
+  const syncState = project.sync.maxVerificationAgeDays ? await readSyncState(root) : undefined
 
   for (const [page, evidence] of Object.entries(map.pages)) {
     if (!pages.has(page)) {
@@ -142,6 +148,21 @@ async function validateEvidenceMap(
         const covered = pathCoverage.get(key) ?? new Set<string>()
         covered.add(page)
         pathCoverage.set(key, covered)
+      }
+      if (project.sync.maxVerificationAgeDays) {
+        const record = syncState?.sources[entry.source]
+        const revision = evidence.verifiedAt?.[entry.source]
+        const verifiedOn = evidence.verifiedOn?.[entry.source] ?? (record && revision && [record.commit, record.contentFingerprint].includes(revision) ? record.recordedAt : undefined)
+        const ageDays = verifiedOn ? Math.floor((Date.now() - Date.parse(verifiedOn)) / 86_400_000) : Number.POSITIVE_INFINITY
+        if (ageDays > project.sync.maxVerificationAgeDays) {
+          const severity = project.sync.maxVerificationAgeSeverity === 'fail' ? 'error' : 'warning'
+          issues.push({
+            severity,
+            code: 'evidence-verification-expired',
+            message: `Verification for source "${entry.source}" is ${Number.isFinite(ageDays) ? `${ageDays} days old` : 'not dated'}; the maximum is ${project.sync.maxVerificationAgeDays} days. Re-verify the page even when the source revision is unchanged.`,
+            file: page,
+          })
+        }
       }
     }
     if (evidence.confidence === 'needs-human') {
@@ -822,6 +843,83 @@ function stringAttribute(value: string | true | undefined): string {
 
 function trueAttribute(value: string | true | undefined): boolean {
   return value === true || value === 'true'
+}
+
+/**
+ * Page types from the plan staged in the workspace, keyed by extension-less
+ * page path. Direct authoring without a plan infers the type from the page.
+ */
+async function plannedPageTypes(root: string, project: DoxloopProject): Promise<Map<string, string>> {
+  const types = new Map<string, string>()
+  try {
+    const plan = JSON.parse(await readFile(join(root, '.doxloop', 'documentation-plan.json'), 'utf8')) as {
+      pages?: Array<{ path?: unknown; type?: unknown }>
+    }
+    for (const page of plan.pages ?? []) {
+      if (typeof page.path !== 'string' || typeof page.type !== 'string') continue
+      const key = join(project.contentDir, page.path).replaceAll('\\', '/').replace(/^\.\//, '')
+      types.set(key, page.type)
+    }
+  } catch {
+    // No staged plan: infer page types from content instead.
+  }
+  return types
+}
+
+const PROCEDURAL_TYPES = new Set(['how-to', 'tutorial', 'getting-started'])
+/** Minimum prose words before a page reads as a stub rather than documentation. */
+const MINIMUM_WORDS: Record<string, number> = { reference: 120, concept: 250, procedure: 250, other: 150 }
+const MINIMUM_STEPS = 3
+
+/**
+ * Depth gate. A page with a title, a sentence, and one screenshot passes every
+ * structural check yet reads as a placeholder; the agent's own quality pass
+ * cannot notice that from inside the page, so Doxloop measures it. Warnings,
+ * never errors: a genuinely small surface may legitimately produce a short
+ * page, and the authoring contract tells the agent to resolve each one.
+ */
+export function validatePageDepth(body: string, file: string, planType?: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const withoutCode = stripCodeFences(body)
+  const prose = withoutCode
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/^\s*\|?\s*-{3,}.*$/gm, ' ')
+  const words = prose.split(/\s+/).filter((token) => /[A-Za-z0-9]/.test(token)).length
+  const stepCount = (withoutCode.match(/<Step\b/g) ?? []).length
+  const orderedItems = (withoutCode.match(/^\s*\d+\.\s+\S/gm) ?? []).length
+  const type = planType ?? inferPageType(file, withoutCode, stepCount, orderedItems)
+  const procedural = PROCEDURAL_TYPES.has(type) || stepCount > 0
+  const minimum = type === 'reference' ? MINIMUM_WORDS.reference! : procedural ? MINIMUM_WORDS.procedure! : type === 'concept' ? MINIMUM_WORDS.concept! : MINIMUM_WORDS.other!
+  if (words < minimum) {
+    issues.push(
+      warning(
+        'thin-page',
+        `The page has about ${words} words of prose; a ${procedural ? 'procedural' : type} page normally needs at least ${minimum} to be complete. Add the reader outcome, prerequisites, every step with its observable result, verification, evidence-backed troubleshooting, and a next step — or merge this page into one that can be complete.`,
+        file,
+      ),
+    )
+  }
+  if (procedural && Math.max(stepCount, orderedItems) < MINIMUM_STEPS && words < 600) {
+    issues.push(
+      warning(
+        'thin-procedure',
+        `The procedure has ${Math.max(stepCount, orderedItems)} step${Math.max(stepCount, orderedItems) === 1 ? '' : 's'}; a guide normally needs at least ${MINIMUM_STEPS} ordered steps that each name the reader action, the exact control or value, and the visible result. Split combined actions into their own steps and finish the workflow through verification.`,
+        file,
+      ),
+    )
+  }
+  return issues
+}
+
+function inferPageType(file: string, body: string, stepCount: number, orderedItems: number): string {
+  const normalized = file.toLowerCase()
+  if (/(^|\/)(?:reference|api|cli|commands?|configuration)(\/|\.)/.test(normalized)) return 'reference'
+  if (/(^|\/)(?:concepts?|explanations?|architecture)(\/|\.)/.test(normalized)) return 'concept'
+  if (/(^|\/)(?:guides?|how-?to|tutorials?|getting-started|quickstart)(\/|\.)/.test(normalized)) return 'how-to'
+  if (stepCount > 0 || orderedItems >= 2) return 'how-to'
+  if (/^index\.[a-z]+$/.test(normalized) || /(^|\/)index\.[a-z]+$/.test(normalized)) return 'other'
+  return body.includes('<Steps') ? 'how-to' : 'other'
 }
 
 function validateProfessionalContent(

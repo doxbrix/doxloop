@@ -41,6 +41,7 @@ const adapter = defineGenerator({
       new URL('../skills/doxloop-markdoc', import.meta.url),
     ),
   },
+  planning: { navigationFiles: ['markdoc.config.mjs', 'src/navigation.ts'] },
   project: {
     defaultContentDir: 'docs',
     pageExtensions: ['.md'],

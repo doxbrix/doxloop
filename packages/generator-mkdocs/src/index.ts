@@ -31,6 +31,7 @@ const adapter = defineGenerator({
       new URL('../skills/doxloop-mkdocs', import.meta.url),
     ),
   },
+  planning: { navigationFiles: ['mkdocs.yml'] },
   project: {
     defaultContentDir: 'docs',
     pageExtensions: ['.md'],

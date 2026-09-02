@@ -40,6 +40,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-hugo',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-hugo', import.meta.url)),
   },
+  planning: { navigationFiles: ['hugo.toml', 'config.toml', 'config/_default/menus.toml'] },
   project: {
     defaultContentDir: 'content',
     pageExtensions: ['.md'],

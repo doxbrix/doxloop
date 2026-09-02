@@ -13,10 +13,10 @@
   --brand-tint: #cdecea;
   --brand-ink: #063b3a;
 
-  --heading: #032f7b;
-  --text: #032f7b;
-  --muted: #032f7b;
-  --faint: #032f7b;
+  --heading: #102a56;
+  --text: #29415f;
+  --muted: #637089;
+  --faint: #8993a5;
 
   --canvas: #ffffff;
   --subtle: #f7f9fc;
@@ -46,8 +46,8 @@
   line-height: 20px;
   color: var(--text);
   font-synthesis: none;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
 }
 
 /* ── Workspace normalization ─────────────────────────────────────────────
@@ -57,10 +57,10 @@ html:has(.shell .reference-sidebar-nav),
 body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
 
 .shell:has(.reference-sidebar-nav) {
-  --heading: #032f7b;
-  --text: #193b73;
-  --muted: #647392;
-  --faint: #8794ab;
+  --heading: #102a56;
+  --text: #29415f;
+  --muted: #637089;
+  --faint: #8993a5;
   --border: #e1e5ed;
   --divider: #edf0f5;
   --strong-border: #cfd7e3;
@@ -110,30 +110,30 @@ body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
   max-width: 68ch;
   margin-top: 3px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 19px;
+  font-size: 14px;
+  line-height: 20px;
 }
-.shell:has(.reference-sidebar-nav) .page-meta { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.shell:has(.reference-sidebar-nav) .page-meta { margin-top: 8px; color: var(--muted); font-size: 13px; }
 
-.shell:has(.reference-sidebar-nav) .btn.md { height: 36px; padding-inline: 13px; border-radius: 7px; font-size: 13px; font-weight: 600; }
-.shell:has(.reference-sidebar-nav) .btn.sm { height: 30px; padding-inline: 10px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .btn.md { height: 38px; padding-inline: 14px; border-radius: 7px; font-size: 14px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .btn.sm { height: 32px; padding-inline: 11px; border-radius: 6px; font-size: 13px; font-weight: 600; }
 .shell:has(.reference-sidebar-nav) .input {
   min-height: 38px;
   padding: 7px 11px;
   border-radius: 7px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
 }
-.shell:has(.reference-sidebar-nav) .textarea { min-height: 96px; padding: 10px 12px; font-size: 13px; line-height: 20px; }
+.shell:has(.reference-sidebar-nav) .textarea { min-height: 96px; padding: 10px 12px; font-size: 14px; line-height: 21px; }
 .shell:has(.reference-sidebar-nav) .field { gap: 6px; }
-.shell:has(.reference-sidebar-nav) .field-label { color: var(--heading); font-size: 12.5px; font-weight: 620; }
-.shell:has(.reference-sidebar-nav) .field small { color: var(--muted); font-size: 11.5px; }
-.shell:has(.reference-sidebar-nav) .toggle-text { color: var(--text); font-size: 12.5px; }
+.shell:has(.reference-sidebar-nav) .field-label { color: var(--heading); font-size: 14px; font-weight: 620; }
+.shell:has(.reference-sidebar-nav) .field small { color: var(--muted); font-size: 13px; }
+.shell:has(.reference-sidebar-nav) .toggle-text { color: var(--text); font-size: 14px; }
 .shell:has(.reference-sidebar-nav) .toggle-track { width: 36px; height: 22px; }
 .shell:has(.reference-sidebar-nav) .toggle-track::after { width: 18px; height: 18px; }
 .shell:has(.reference-sidebar-nav) .toggle input:checked + .toggle-track::after { transform: translateX(14px); }
 .shell:has(.reference-sidebar-nav) .custom-select-menu > button,
-.shell:has(.reference-sidebar-nav) .editable-select-menu > button { font-size: 13px; }
+.shell:has(.reference-sidebar-nav) .editable-select-menu > button { font-size: 14px; }
 
 .shell:has(.reference-sidebar-nav) .panel {
   border-radius: 10px;
@@ -142,18 +142,18 @@ body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
 }
 .shell:has(.reference-sidebar-nav) .panel-head { min-height: 54px; gap: 12px; padding: 12px 16px; }
 .shell:has(.reference-sidebar-nav) .panel-head h2 { color: var(--heading); font-size: 14px; line-height: 20px; font-weight: 650; }
-.shell:has(.reference-sidebar-nav) .panel-head p { color: var(--muted); font-size: 12px; line-height: 17px; }
+.shell:has(.reference-sidebar-nav) .panel-head p { color: var(--muted); font-size: 13px; line-height: 19px; }
 .shell:has(.reference-sidebar-nav) .panel-body { padding: 16px; gap: 16px; }
 .shell:has(.reference-sidebar-nav) .panel-body.flush { padding: 0; gap: 0; }
 .shell:has(.reference-sidebar-nav) .panel-icon { width: 30px; height: 30px; border-radius: 7px; }
-.shell:has(.reference-sidebar-nav) .badge { font-size: 11.5px; }
-.shell:has(.reference-sidebar-nav) .table th { padding: 8px 14px; font-size: 11.5px; }
-.shell:has(.reference-sidebar-nav) .table td { padding: 10px 14px; font-size: 13px; }
-.shell:has(.reference-sidebar-nav) .table .muted-cell { color: var(--muted); font-size: 12px; }
+.shell:has(.reference-sidebar-nav) .badge { font-size: 12px; }
+.shell:has(.reference-sidebar-nav) .table th { padding: 9px 14px; font-size: 12px; }
+.shell:has(.reference-sidebar-nav) .table td { padding: 11px 14px; font-size: 14px; }
+.shell:has(.reference-sidebar-nav) .table .muted-cell { color: var(--muted); font-size: 13px; }
 .shell:has(.reference-sidebar-nav) .row-copy strong,
-.shell:has(.reference-sidebar-nav) .link-rows strong { font-size: 13px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .link-rows strong { font-size: 14px; font-weight: 600; }
 .shell:has(.reference-sidebar-nav) .row-copy small,
-.shell:has(.reference-sidebar-nav) .link-rows small { color: var(--muted); font-size: 11.5px; }
+.shell:has(.reference-sidebar-nav) .link-rows small { color: var(--muted); font-size: 13px; }
 
 /* Sources, review, preview, publish, and settings use the same page scale. */
 .shell:has(.reference-sidebar-nav) .sources-page-tools > label { height: 38px; font-size: 13px; }
@@ -629,6 +629,7 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
 .history-loading { padding: 26px 18px; color: var(--muted); font-size: 13.5px; text-align: center; }
 .history-table td { vertical-align: top; }
 .history-table tr.history-row:hover td { background: var(--hover); }
+.history-action strong { color: var(--heading); font-size: 13.5px; font-weight: 650; }
 .history-request { display: grid; gap: 3px; max-width: 560px; }
 .history-request strong {
   color: var(--heading);
@@ -638,26 +639,9 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
   overflow-wrap: anywhere;
 }
 .history-request small { color: var(--muted); font-size: 12px; line-height: 16px; }
-.history-request .history-kind { text-transform: capitalize; }
 .history-request .history-error { color: var(--bad); overflow-wrap: anywhere; }
-.history-pages { margin-top: 8px; }
-.history-pages summary {
-  font-size: 12.5px;
-  color: var(--brand);
-  cursor: pointer;
-  list-style: none;
-}
-.history-pages summary::-webkit-details-marker { display: none; }
-.history-pages summary:hover { text-decoration: underline; }
-.history-pages ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
-.history-pages li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.history-pages li code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
-.history-changed { white-space: nowrap; }
-.history-lines { display: flex; gap: 8px; margin-top: 3px; font-size: 12px; font-style: normal; }
-.history-lines i { font-style: normal; color: var(--muted); }
-.history-lines i.added { color: var(--good); }
-.history-lines i.removed { color: var(--bad); }
-.history-duration { display: block; margin-top: 3px; font-size: 12px; color: var(--faint); }
+.history-result { display: grid; justify-items: start; gap: 5px; white-space: nowrap; }
+.history-result small { color: var(--muted); font-size: 12px; }
 
 .job-table .job-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .job-table .job-name .icon { color: var(--muted); }
@@ -1182,6 +1166,7 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
 }
 .toggle input:checked + .toggle-track { background: var(--brand); }
 .toggle input:checked + .toggle-track::after { transform: translateX(14px); }
+.toggle input:focus-visible + .toggle-track { outline: 3px solid color-mix(in srgb, var(--brand) 28%, transparent); outline-offset: 2px; }
 .toggle input:disabled + .toggle-track { opacity: .5; }
 .toggle-text { font-size: 13.5px; color: var(--text); }
 

@@ -211,6 +211,31 @@ describe('computeDrift', () => {
       'docs/index.md',
     ])
   })
+
+  test('fails stale pages when their independent verification age expires', async () => {
+    const expired: EvidenceMap = {
+      schemaVersion: 1,
+      pages: {
+        'docs/authentication.md': {
+          sources: [{ source: 'product', paths: ['src/auth.ts'] }],
+          verifiedOn: { product: '2020-01-01T00:00:00.000Z' },
+          confidence: 'verified',
+        },
+      },
+    }
+    const { root, project } = await makeFixture({ evidenceMap: expired, sync: { maxVerificationAgeDays: 30, maxVerificationAgeSeverity: 'fail' } })
+    const result = await computeDrift(root, project)
+    expect(result.status).toBe('stale')
+    expect(result.pages[0]?.reasons[0]).toMatchObject({ kind: 'max-age', source: 'product' })
+  })
+
+  test('warns without marking pages stale when age policy severity is warn', async () => {
+    const expired: EvidenceMap = { schemaVersion: 1, pages: { 'docs/authentication.md': { sources: [{ source: 'product', paths: ['src/auth.ts'] }], verifiedOn: { product: '2020-01-01T00:00:00.000Z' } } } }
+    const { root, project } = await makeFixture({ evidenceMap: expired, sync: { maxVerificationAgeDays: 30, maxVerificationAgeSeverity: 'warn' } })
+    const result = await computeDrift(root, project)
+    expect(result.status).toBe('current')
+    expect(result.notes.join('\n')).toContain('policy is 30 days')
+  })
 })
 
 describe('formatDrift', () => {

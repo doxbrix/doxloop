@@ -50,6 +50,10 @@ export interface GeneratorAdapter {
     skillName: string
     skillDirectory: string
   }
+  planning?: {
+    /** Generator-native files that own primary or sidebar navigation. */
+    navigationFiles: string[]
+  }
   project: {
     defaultContentDir: string
     pageExtensions: string[]

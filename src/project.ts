@@ -21,6 +21,7 @@ import matter from 'gray-matter'
 import { DoxloopError } from './errors.js'
 import {
   listFiles,
+  ensureGitignoreEntries,
   pathExists,
   readJson,
   resolveContainedDirectory,
@@ -46,6 +47,15 @@ import type {
 } from './types.js'
 
 export const PROJECT_FILE = join('.doxloop', 'project.json')
+export const ROOT_CONTENT_IGNORED_DIRECTORIES = new Set([
+  '.agents',
+  '.claude',
+  '.codex',
+  '.doxloop',
+  '.gemini',
+  '.git',
+  'node_modules',
+])
 
 export function defaultDocumentationBrief(): DocumentationBrief {
   return {
@@ -56,6 +66,7 @@ export function defaultDocumentationBrief(): DocumentationBrief {
     terminology: {},
     exclusions: [],
     accessibilityTarget: 'WCAG 2.2 AA',
+    preferredExamples: [],
   }
 }
 
@@ -114,7 +125,7 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     project.schemaVersion !== 1 ||
     typeof project.title !== 'string' ||
     typeof project.contentDir !== 'string' ||
-    !isSafeRelativeDirectory(project.contentDir) ||
+    !isSafeRelativeDirectory(project.contentDir, selectedGenerator === 'doxbrix') ||
     !Array.isArray(project.sources) ||
     (project.designReferences !== undefined &&
       !isDesignReferences(project.designReferences)) ||
@@ -137,6 +148,7 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
   ) {
     throw new DoxloopError(`${PROJECT_FILE} has an unsupported format.`)
   }
+  validateSourceScopes(project.sources)
   const generator = selectedGenerator
   return {
     schemaVersion: 1,
@@ -203,6 +215,7 @@ export async function siteConfigPath(
     root,
     loaded.contentDir,
     'Documentation content directory',
+    { allowRoot: loaded.generator === 'doxbrix' },
   )
   const insideContent = join(contentRoot, 'docs.json')
   if (await pathExists(insideContent)) return insideContent
@@ -325,16 +338,35 @@ export async function validateProjectSourceBoundaries(
   projectRoot: string,
   sources: SourceBinding[],
 ): Promise<void> {
+  validateSourceScopes(sources)
   for (const source of sources) {
     if (sourceKind(source) === 'openapi') {
-      if (isSpecUrl(source.path)) continue
-      await assertSpecFile(resolve(projectRoot, source.path))
+      await (await import('./openapi.js')).loadOpenApiSource(projectRoot, source)
       continue
     }
     const sourceRoot = resolve(projectRoot, source.path)
     await assertSourceDirectory(sourceRoot)
     await assertSeparateDirectories(sourceRoot, projectRoot)
   }
+}
+
+export function validateSourceScopes(sources: SourceBinding[]): void {
+  const prefixes = sources.flatMap((source) => source.scope?.routePrefix ? [{ source: source.name, prefix: normalizeScopePath(source.scope.routePrefix) }] : [])
+  for (let index = 0; index < prefixes.length; index += 1) {
+    for (let other = index + 1; other < prefixes.length; other += 1) {
+      const left = prefixes[index]!
+      const right = prefixes[other]!
+      if (left.prefix === right.prefix || left.prefix.startsWith(`${right.prefix}/`) || right.prefix.startsWith(`${left.prefix}/`)) {
+        throw new DoxloopError(`Source scopes for "${left.source}" and "${right.source}" overlap at "${left.prefix}" and "${right.prefix}". Give each source a distinct route prefix; use sharedPages for intentional shared pages.`)
+      }
+    }
+  }
+}
+
+function normalizeScopePath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  if (!normalized || normalized.split('/').includes('..')) throw new DoxloopError('Source route prefixes must be safe relative paths.')
+  return normalized
 }
 
 export async function assertNewProjectDirectory(projectRoot: string): Promise<void> {
@@ -475,7 +507,7 @@ export async function scaffoldProject(options: {
     generator === 'doxbrix'
       ? undefined
       : await loadGeneratorAdapter(root, generator, configuredPackage)
-  const contentDir = adapter?.project.defaultContentDir ?? 'docs'
+  const contentDir = adapter?.project.defaultContentDir ?? ''
   await mkdir(join(root, '.doxloop'), { recursive: true })
   await mkdir(join(root, contentDir), { recursive: true })
 
@@ -503,13 +535,20 @@ export async function scaffoldProject(options: {
       },
     })
   } else {
-    await scaffoldDoxbrix(root, title)
+    await scaffoldDoxbrix(root, title, contentDir)
   }
   await mergeGitignore(root, [
     '.doxloop/cache/',
     '.doxloop/runs/',
     '.doxloop/last-run.json',
     '.doxloop/sync.log',
+    '.doxloop/quality-reports/',
+    '.doxloop/quality-artifacts/',
+    '.doxloop/evaluations/',
+    '.doxloop/ui-jobs.json',
+    '.doxloop/ui-job-logs/',
+    '.doxloop/review-preferences.json',
+    '.doxloop/deliveries/',
     '.doxloop/doxloop.db',
     '.doxloop/doxloop.db-wal',
     '.doxloop/doxloop.db-shm',
@@ -523,9 +562,14 @@ export async function loadPages(root: string, project: DoxloopProject): Promise<
     root,
     project.contentDir,
     'Documentation content directory',
+    { allowRoot: project.generator === 'doxbrix' },
   )
   await access(contentRoot)
-  return listFiles(contentRoot, await pageExtensions(root, project))
+  return listFiles(contentRoot, await pageExtensions(root, project), {
+    ...(contentRoot === resolve(root)
+      ? { ignoredDirectories: ROOT_CONTENT_IGNORED_DIRECTORIES }
+      : {}),
+  })
 }
 
 /**
@@ -546,7 +590,8 @@ export async function pageExtensions(
   }
 }
 
-function isSafeRelativeDirectory(value: string): boolean {
+function isSafeRelativeDirectory(value: string, allowRoot = false): boolean {
+  if (value === '') return allowRoot
   if (value.trim() === '' || isAbsolute(value)) return false
   const normalized = normalize(value)
   return (
@@ -583,17 +628,7 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 async function mergeGitignore(root: string, entries: string[]): Promise<void> {
-  const path = join(root, '.gitignore')
-  const existing = (await pathExists(path)) ? await readFile(path, 'utf8') : ''
-  const lines = existing.split(/\r?\n/).filter(Boolean)
-  const seen = new Set(lines)
-  for (const entry of entries) {
-    if (!seen.has(entry)) {
-      lines.push(entry)
-      seen.add(entry)
-    }
-  }
-  await writeFile(path, `${lines.join('\n')}\n`, 'utf8')
+  await ensureGitignoreEntries(root, entries)
 }
 
 function titleFromDirectory(directory: string): string {
@@ -604,7 +639,12 @@ function titleFromDirectory(directory: string): string {
     .join(' ')
 }
 
-async function scaffoldDoxbrix(root: string, title: string): Promise<void> {
+async function scaffoldDoxbrix(
+  root: string,
+  title: string,
+  contentDir: string,
+): Promise<void> {
+  const contentRoot = contentDir ? join(root, contentDir) : root
   const site: DoxbrixSiteConfig = {
     version: 1,
     name: title,
@@ -645,14 +685,14 @@ async function scaffoldDoxbrix(root: string, title: string): Promise<void> {
       codeFont: 'ui-monospace',
     },
   }
-  await writeJson(join(root, 'docs', 'docs.json'), site)
+  await writeJson(join(contentRoot, 'docs.json'), site)
   await writeFile(
-    join(root, 'docs', 'index.mdx'),
+    join(contentRoot, 'index.mdx'),
     `---\ntitle: ${JSON.stringify(title)}\ndescription: "Understand what ${title} helps you accomplish and choose your first workflow."\nicon: compass\n---\n\n# ${title}\n\n<!-- doxloop:starter-page -->\n\n<Info>The authoring agent will replace this starter with an evidence-backed product overview.</Info>\n\n<CardGroup cols="2">\n<Card title="Quickstart" icon="🚀" href="/quickstart">Reach your first successful result.</Card>\n<Card title="Explore the product" icon="🧭">Discover the workflows supported by the configured source.</Card>\n</CardGroup>\n`,
     { encoding: 'utf8', flag: 'wx' },
   )
   await writeFile(
-    join(root, 'docs', 'quickstart.mdx'),
+    join(contentRoot, 'quickstart.mdx'),
     `---\ntitle: "Quickstart"\ndescription: "Reach your first successful result with verified product instructions."\nicon: bolt\n---\n\n# Quickstart\n\n<!-- doxloop:starter-page -->\n\n<Steps>\n<Step title="Confirm the prerequisites">Use the authoring agent to identify supported requirements from source.</Step>\n<Step title="Complete the first workflow">Replace this starter with commands or code verified against the product.</Step>\n<Step title="Verify success">Show the observable result a reader should expect.</Step>\n</Steps>\n`,
     { encoding: 'utf8', flag: 'wx' },
   )
@@ -802,9 +842,19 @@ function isSourceBindings(value: unknown): value is SourceBinding[] {
         ((source as Partial<SourceBinding>).kind === undefined ||
           (source as Partial<SourceBinding>).kind === 'directory' ||
           (source as Partial<SourceBinding>).kind === 'openapi') &&
+        isSourceScope((source as Partial<SourceBinding>).scope) &&
         isRemoteSource((source as Partial<SourceBinding>).remote),
     )
   )
+}
+
+function isSourceScope(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const scope = value as NonNullable<SourceBinding['scope']>
+  const optionalText = (item: unknown): boolean => item === undefined || (typeof item === 'string' && item.trim() !== '')
+  return optionalText(scope.space) && optionalText(scope.routePrefix) && optionalText(scope.navigationGroup) &&
+    (scope.sharedPages === undefined || (Array.isArray(scope.sharedPages) && scope.sharedPages.every((item) => typeof item === 'string' && item.trim() !== '')))
 }
 
 function isRemoteSource(value: unknown): boolean {
@@ -913,6 +963,14 @@ function isApplicationConfig(
   if (screenshots.highlight !== undefined && typeof screenshots.highlight !== 'boolean') {
     return false
   }
+  if (
+    screenshots.startPath !== undefined &&
+    (typeof screenshots.startPath !== 'string' || !validApplicationPath(screenshots.startPath))
+  ) return false
+  if (
+    screenshots.workflow !== undefined &&
+    (typeof screenshots.workflow !== 'string' || screenshots.workflow.trim().length < 12)
+  ) return false
   if (screenshots.viewport === undefined) return true
   return (
     Number.isInteger(screenshots.viewport.width) &&
@@ -922,6 +980,16 @@ function isApplicationConfig(
     screenshots.viewport.height >= 320 &&
     screenshots.viewport.height <= 2160
   )
+}
+
+function validApplicationPath(value: string): boolean {
+  if (!value.startsWith('/') || value.startsWith('//')) return false
+  try {
+    const parsed = new URL(value, 'https://application.invalid')
+    return parsed.origin === 'https://application.invalid' && !parsed.hash
+  } catch {
+    return false
+  }
 }
 
 function isDeploymentConfig(value: unknown): value is DeploymentConfig {
@@ -1032,6 +1100,8 @@ function isSyncConfig(value: unknown): value is SyncConfig {
     (Array.isArray(candidate) &&
       candidate.every((item) => typeof item === 'string' && item.trim() !== ''))
   if (!patternList(sync.watch) || !patternList(sync.ignore)) return false
+  if (sync.maxVerificationAgeDays !== undefined && (!Number.isInteger(sync.maxVerificationAgeDays) || sync.maxVerificationAgeDays < 1 || sync.maxVerificationAgeDays > 3650)) return false
+  if (sync.maxVerificationAgeSeverity !== undefined && !['warn', 'fail'].includes(sync.maxVerificationAgeSeverity)) return false
   if (sync.budget === undefined) return true
   if (!sync.budget || typeof sync.budget !== 'object' || Array.isArray(sync.budget)) {
     return false
@@ -1073,6 +1143,8 @@ function isDocumentationBrief(value: unknown): value is DocumentationBrief {
       )) &&
     (brief.priorityOutcomes === undefined ||
       textList(brief.priorityOutcomes)) &&
+    (brief.preferredExamples === undefined || textList(brief.preferredExamples)) &&
+    optionalText(brief.designDirection) &&
     typeof brief.locale === 'string' &&
     brief.locale.trim() !== '' &&
     textList(brief.tone) &&

@@ -18,7 +18,9 @@
   "files": [
     "dist",
     "assets",
+    "contracts",
     "docs",
+    "scripts/test-auto-screenshot.mjs",
     "skills/doxloop-authoring",
     "skills/doxloop-doxbrix",
     "README.md",
@@ -48,6 +50,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.ui.json && pnpm --filter './packages/*' run typecheck",
     "pretest": "pnpm run build",
     "test": "vitest run",
+    "test:screenshot": "node scripts/test-auto-screenshot.mjs",
+    "test:e2e": "playwright test",
     "eval:agents": "pnpm run build && node scripts/run-authoring-evals.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run validate:skill && pnpm run check:boundary",
     "release:local": "node scripts/release-local.mjs",
@@ -56,11 +60,18 @@
     "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary"
   },
   "dependencies": {
+    "@playwright/mcp": "0.0.79",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "axe-core": "^4.13.0",
     "chokidar": "^4.0.3",
     "cross-spawn": "^7.0.6",
     "fflate": "^0.8.2",
     "gray-matter": "^4.0.3",
-    "highlight.js": "^11.11.1"
+    "highlight.js": "^11.11.1",
+    "pixelmatch": "^7.1.0",
+    "pngjs": "^7.0.0",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@doxbrix/doxloop-generator-docusaurus": "workspace:*",
@@ -73,9 +84,11 @@
     "@doxbrix/doxloop-generator-starlight": "workspace:*",
     "@doxbrix/doxloop-generator-static": "workspace:*",
     "@doxbrix/doxloop-generator-vitepress": "workspace:*",
+    "@playwright/test": "^1.62.1",
+    "@preact/preset-vite": "^2.10.2",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.15.3",
-    "@preact/preset-vite": "^2.10.2",
+    "@types/pngjs": "^6.0.5",
     "preact": "^10.27.2",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
@@ -83,7 +96,7 @@
     "vitest": "^3.1.2"
   },
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.13.0"
   },
   "packageManager": "pnpm@10.33.0",
   "main": "index.js",

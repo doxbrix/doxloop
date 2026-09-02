@@ -1,5 +1,5 @@
-import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { lstat, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DoxloopError } from './errors.js'
 
 export function assertInside(root: string, candidate: string): string {
@@ -16,9 +16,11 @@ export async function resolveContainedDirectory(
   root: string,
   configuredPath: string,
   label = 'Directory',
+  options: { allowRoot?: boolean } = {},
 ): Promise<string> {
+  const rootContent = configuredPath === '' && options.allowRoot === true
   if (
-    configuredPath.trim() === '' ||
+    (!rootContent && configuredPath.trim() === '') ||
     isAbsolute(configuredPath) ||
     configuredPath === '.' ||
     configuredPath === '..'
@@ -26,8 +28,10 @@ export async function resolveContainedDirectory(
     throw new DoxloopError(`${label} must be a project-relative directory.`)
   }
   const absoluteRoot = resolve(root)
-  const candidate = assertInside(absoluteRoot, resolve(absoluteRoot, configuredPath))
-  if (candidate === absoluteRoot) {
+  const candidate = rootContent
+    ? absoluteRoot
+    : assertInside(absoluteRoot, resolve(absoluteRoot, configuredPath))
+  if (candidate === absoluteRoot && !rootContent) {
     throw new DoxloopError(`${label} cannot be the project root.`)
   }
 
@@ -50,9 +54,10 @@ export async function resolveContainedDirectory(
 export async function listFiles(
   root: string,
   extensions: ReadonlySet<string>,
+  options: { ignoredDirectories?: ReadonlySet<string> } = {},
 ): Promise<string[]> {
   const output: string[] = []
-  await walk(root, root, extensions, output)
+  await walk(root, root, extensions, output, options.ignoredDirectories)
   return output.sort()
 }
 
@@ -61,6 +66,7 @@ async function walk(
   directory: string,
   extensions: ReadonlySet<string>,
   output: string[],
+  ignoredDirectories?: ReadonlySet<string>,
 ): Promise<void> {
   const entries = await readdir(directory, { withFileTypes: true })
   for (const entry of entries) {
@@ -68,7 +74,9 @@ async function walk(
     if (entry.isSymbolicLink()) {
       throw new DoxloopError(`Symbolic links are not allowed in documentation: ${path}`)
     }
-    if (entry.isDirectory()) await walk(root, path, extensions, output)
+    if (entry.isDirectory() && !ignoredDirectories?.has(entry.name)) {
+      await walk(root, path, extensions, output, ignoredDirectories)
+    }
     else if (entry.isFile() && extensions.has(extname(entry.name))) output.push(path)
   }
 }
@@ -90,4 +98,22 @@ export async function pathExists(path: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
     throw error
   }
+}
+
+const gitignoreQueues = new Map<string, Promise<void>>()
+
+/** Add machine-local artifacts to .gitignore without losing concurrent additions. */
+export async function ensureGitignoreEntries(root: string, entries: string[]): Promise<void> {
+  const key = resolve(root)
+  const previous = gitignoreQueues.get(key) ?? Promise.resolve()
+  const queued = previous.catch(() => undefined).then(async () => {
+    const path = join(key, '.gitignore')
+    const existing = (await pathExists(path)) ? await readFile(path, 'utf8') : ''
+    const lines = existing.split(/\r?\n/).filter(Boolean)
+    const seen = new Set(lines)
+    for (const entry of entries) if (!seen.has(entry)) { lines.push(entry); seen.add(entry) }
+    await writeFile(path, `${lines.join('\n')}\n`, 'utf8')
+  })
+  gitignoreQueues.set(key, queued)
+  try { await queued } finally { if (gitignoreQueues.get(key) === queued) gitignoreQueues.delete(key) }
 }

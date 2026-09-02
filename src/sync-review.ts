@@ -112,6 +112,7 @@ async function handle(
         await syncReviewComparisonDocument(options.root, run, requireSyncReviewChange(run, preview[2]!), {
           layout: url.searchParams.get('layout') === 'unified' ? 'unified' : 'split',
           onlyChanges: url.searchParams.get('only') === '1',
+          theme: url.searchParams.get('theme') === 'dark' ? 'dark' : 'light',
         }),
       )
       return
@@ -177,7 +178,7 @@ export async function syncReviewComparisonDocument(
   root: string,
   run: SyncRun,
   change: SyncFileChange,
-  view: { layout: 'split' | 'unified'; onlyChanges: boolean },
+  view: { layout: 'split' | 'unified'; onlyChanges: boolean; theme?: 'light' | 'dark' },
 ): Promise<string> {
   const beforePath = join(runBeforeRoot(root, run.id), change.path)
   const afterPath = join(runWorkspace(root, run.id), change.path)
@@ -191,6 +192,7 @@ export async function syncReviewComparisonDocument(
     diff: renderedDiff({ before, after }),
     layout: view.layout,
     onlyChanges: view.onlyChanges,
+    theme: view.theme ?? 'light',
     ...(notice ? { notice } : {}),
   })
 }

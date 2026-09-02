@@ -10,6 +10,7 @@ interface EvaluationManifest {
   cases: Array<{
     id: string
     productType: string
+    scenarioTags?: string[]
     minimumSignalGroups: number
     minimumEvidenceGroups: number
     signalGroups: string[][]
@@ -20,18 +21,25 @@ interface EvaluationManifest {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 describe('authoring evaluation fixtures', () => {
-  test('cover the four professional documentation surfaces', async () => {
+  test('cover the release-grade product and adversarial scenarios', async () => {
     const manifest = JSON.parse(
       await readFile(join(root, 'evals', 'cases.json'), 'utf8'),
     ) as EvaluationManifest
 
-    expect(manifest.schemaVersion).toBe(1)
-    expect(manifest.cases.map((entry) => entry.productType).sort()).toEqual([
-      'cli',
-      'library',
-      'rest-api',
-      'web-app',
-    ])
+    expect(manifest.schemaVersion).toBe(2)
+    expect(manifest.cases).toHaveLength(10)
+    const scenarios = new Set(manifest.cases.flatMap((entry) => entry.scenarioTags ?? []))
+    expect(scenarios).toEqual(new Set([
+      'authentication-security',
+      'multi-package-monorepo',
+      'evolving-rest-api',
+      'ui-heavy-saas',
+      'data-infrastructure-tools',
+      'migration-release-documentation',
+      'misleading-source-comments',
+      'incomplete-contradictory-evidence',
+      'localized-existing-doc-update',
+    ]))
 
     for (const entry of manifest.cases) {
       expect(entry.minimumSignalGroups).toBeGreaterThan(0)
@@ -47,11 +55,12 @@ describe('authoring evaluation fixtures', () => {
       expect(project.documentation.primaryAudience).toBeTruthy()
       expect(project.documentation.priorityOutcomes).not.toHaveLength(0)
       const result = await validateProject(projectRoot)
-      expect(result.pages).toEqual(['index'])
+      expect(result.pages.length).toBeGreaterThan(0)
       expect(
         result.issues.filter(
           (issue) =>
-            !['missing-image-alt', 'weak-link-text'].includes(issue.code),
+            // Fixture pages are deliberately small; depth is measured on real runs.
+            !['missing-image-alt', 'weak-link-text', 'thin-page', 'thin-procedure'].includes(issue.code),
         ),
       ).toHaveLength(0)
     }

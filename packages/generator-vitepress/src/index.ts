@@ -41,6 +41,7 @@ const adapter = defineGenerator({
       new URL('../skills/doxloop-vitepress', import.meta.url),
     ),
   },
+  planning: { navigationFiles: ['docs/.vitepress/config.mts'] },
   project: {
     defaultContentDir: 'docs',
     pageExtensions: ['.md'],

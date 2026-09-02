@@ -7,6 +7,8 @@ import chokidar from 'chokidar'
 import { renderMarkdown, type TocEntry } from './doxbrix-markdown.js'
 import { DoxloopError } from './errors.js'
 import { resolveContainedDirectory } from './fs.js'
+import { loadQualityConfig } from './quality-config.js'
+import { readVerificationMetadata } from './quality-claims.js'
 import { loadGeneratorAdapter } from './generators.js'
 import {
   loadPages,
@@ -14,6 +16,7 @@ import {
   loadSiteConfig,
   pageId,
   readPage,
+  ROOT_CONTENT_IGNORED_DIRECTORIES,
   siteConfigPath,
 } from './project.js'
 import type {
@@ -87,9 +90,13 @@ async function startDoxbrixPreview(
     options.root,
     project.contentDir,
     'Preview content directory',
+    { allowRoot: project.generator === 'doxbrix' },
   )
   const css = await readFile(DOXBRIX_CSS, 'utf8')
   const clients = new Set<ServerResponse>()
+  const ignoredDirectories = contentRoot === resolve(options.root)
+    ? ROOT_CONTENT_IGNORED_DIRECTORIES
+    : undefined
 
   const server = createServer(async (request, response) => {
     try {
@@ -110,7 +117,7 @@ async function startDoxbrixPreview(
         return
       }
 
-      const staticPath = safeStaticPath(contentRoot, url.pathname)
+      const staticPath = safeStaticPath(contentRoot, url.pathname, ignoredDirectories)
       if (staticPath && STATIC_TYPES[extname(staticPath).toLowerCase()]) {
         try {
           send(
@@ -125,9 +132,11 @@ async function startDoxbrixPreview(
         }
       }
 
-      const [pages, site] = await Promise.all([
+      const [pages, site, qualityConfig, verificationMetadata] = await Promise.all([
         loadPages(options.root, project),
         loadSiteConfig(options.root, project),
+        loadQualityConfig(options.root),
+        readVerificationMetadata(options.root),
       ])
       const pagesById = new Map(pages.map((path) => [pageId(contentRoot, path), path]))
       if (url.pathname === '/__doxloop/search-index') {
@@ -168,6 +177,9 @@ async function startDoxbrixPreview(
           ...(page.description ? { description: page.description } : {}),
           current: requested,
           rendered,
+          ...(qualityConfig.readerVerification?.enabled && verificationMetadata?.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')]
+            ? { verification: verificationMetadata.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')] }
+            : {}),
         }),
       )
     } catch (error) {
@@ -190,7 +202,12 @@ async function startDoxbrixPreview(
   if (options.open) openBrowser(url)
 
   const configPath = await siteConfigPath(options.root, project)
-  const watcher = chokidar.watch([contentRoot, configPath], { ignoreInitial: true })
+  const watcher = chokidar.watch([contentRoot, configPath], {
+    ignoreInitial: true,
+    ...(ignoredDirectories
+      ? { ignored: (path: string) => isIgnoredDirectoryPath(contentRoot, path, ignoredDirectories) }
+      : {}),
+  })
   watcher.on('all', () => {
     for (const client of clients) client.write('event: reload\ndata: now\n\n')
   })
@@ -224,6 +241,7 @@ export function doxbrixDocument(input: {
   description?: string
   current: string
   rendered: { html: string; toc: TocEntry[] }
+  verification?: { state: string; verifiedOn?: string; revisions: Record<string, string>; locale: string }
 }): string {
   const visibleSpaces = input.site.spaces.filter((space) => hasVisibleNavigation(space.nav))
   const showTabs = visibleSpaces.length > 1
@@ -277,7 +295,7 @@ export function doxbrixDocument(input: {
   const first = firstSitePage(input.site) ?? ''
   const logoHref = safeHref(themeString(input.site, 'logoHref', `/${first}`), `/${first}`)
   const leftnav = activeSpace
-    ? `<aside class="dp-leftnav"><div class="dp-nav-tree">${navTree(activeSpace.nav, input.current)}</div></aside>`
+    ? `<aside class="dp-leftnav" aria-label="Documentation navigation"><div class="dp-nav-tree">${navTree(activeSpace.nav, input.current)}</div></aside>`
     : ''
   const toc = tocHtml(input.rendered.toc)
   const groupLabel = activeSpace
@@ -297,6 +315,7 @@ export function doxbrixDocument(input: {
   const eyebrow = groupLabel
     ? `<div class="dxb-atlas-eyebrow">${escapeHtml(groupLabel)}</div>`
     : ''
+  const verification = input.verification ? verificationBadge(input.verification) : ''
 
   return `<!doctype html>
 <html lang="en">
@@ -312,6 +331,7 @@ export function doxbrixDocument(input: {
   <style>
     ${fontFaces}
     body{margin:0}.dp-tab-panel{display:none}.dp-tab-panel.active{display:block}
+    .dxb-verification{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:6px 9px;border:1px solid #cbd5e1;border-radius:999px;font-size:12px;color:#475569;background:#f8fafc}.dxb-verification strong{font-size:12px}.dxb-verification--verified{border-color:#99e1cb;color:#08745d;background:#effcf8}.dxb-verification--contradicted,.dxb-verification--needs-human{border-color:#fecaca;color:#a61b29;background:#fff5f5}
     .dp-nav-chevron{transition:transform .15s}.dp-nav-chevron:not(.open){transform:rotate(-90deg)}
     .dp-root--published{--project-primary:${escapeAttr(primary)};--project-primary-hover:${escapeAttr(primary)};
       --project-primary-rgb:${hexToRgb(primary)};--primary:${escapeAttr(primary)};--primary-rgb:${hexToRgb(primary)};
@@ -353,7 +373,7 @@ export function doxbrixDocument(input: {
     ${leftnav}
     <main class="dp-main"><div class="dp-content-wrap">
       <div class="dxb-atlas-title-row">
-        <div class="dxb-atlas-title-copy">${eyebrow}<h1 class="dp-page-title">${escapeHtml(input.title)}</h1>${description}</div>
+        <div class="dxb-atlas-title-copy">${eyebrow}<h1 class="dp-page-title">${escapeHtml(input.title)}</h1>${description}${verification}</div>
         <button class="dxb-atlas-copy-page" type="button" data-copy-page>${icon('copy', 16)}<span>Copy page</span>${icon('chevron-down', 14)}</button>
       </div>
       <div class="dp-blocks">${input.rendered.html}</div>
@@ -837,8 +857,38 @@ export function doxbrixDocument(input: {
     }
   });
 </script>
+${MERMAID_PREVIEW_SCRIPT}
 </body>
 </html>`
+}
+
+/**
+ * Render `<Mermaid>` blocks in the local preview. The published site renders
+ * diagrams itself; without this the preview showed the diagram source as
+ * plain text, so a concept page looked broken before it was ever published.
+ * Loaded only when a page contains a diagram, and a failed load (offline)
+ * leaves the readable source in place.
+ */
+const MERMAID_PREVIEW_SCRIPT = `<script type="module">
+  const diagrams = document.querySelectorAll('pre.mermaid');
+  if (diagrams.length > 0) {
+    try {
+      const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs');
+      const dark = document.querySelector('.dp-root--published')?.dataset.colorTheme === 'dark';
+      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' });
+      await mermaid.run({ nodes: diagrams });
+    } catch (error) {
+      console.warn('Doxloop preview could not render Mermaid diagrams; the published site renders them.', error);
+    }
+  }
+</script>`
+
+function verificationBadge(verification: { state: string; verifiedOn?: string; revisions: Record<string, string>; locale: string }): string {
+  const label = verification.state === 'verified' ? 'Verified' : verification.state === 'inferred' ? 'Evidence inferred' : verification.state === 'contradicted' ? 'Contradicted — review required' : 'Needs review'
+  const revisions = Object.entries(verification.revisions).map(([source, revision]) => `${source} ${revision.slice(0, 12)}`).join(', ')
+  const date = verification.verifiedOn ? new Intl.DateTimeFormat(verification.locale, { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(verification.verifiedOn)) : ''
+  const detail = [date, revisions].filter(Boolean).join(' · ')
+  return `<aside class="dxb-verification dxb-verification--${escapeAttr(verification.state)}" aria-label="Documentation verification"><strong>${escapeHtml(label)}</strong>${detail ? `<span>${escapeHtml(detail)}</span>` : ''}</aside>`
 }
 
 function navTree(nodes: DoxbrixNavNode[], current: string, depth = 0): string {
@@ -871,8 +921,8 @@ function navTree(nodes: DoxbrixNavNode[], current: string, depth = 0): string {
 }
 
 function tocHtml(entries: TocEntry[]): string {
-  if (entries.length === 0) return '<aside class="dp-toc"></aside>'
-  return `<aside class="dp-toc"><div class="dp-toc-header">${icon('list', 16)} On this page</div>${entries
+  if (entries.length === 0) return '<aside class="dp-toc" aria-label="On this page"></aside>'
+  return `<aside class="dp-toc" aria-label="On this page"><div class="dp-toc-header">${icon('list', 16)} On this page</div>${entries
     .map(
       (entry, index) =>
         `<a class="dp-toc-entry level-${entry.level}${index === 0 ? ' active' : ''}" href="#${escapeAttr(entry.id)}">${escapeHtml(entry.title)}</a>`,
@@ -1201,7 +1251,11 @@ function labelFromId(id: string): string {
     .join(' ')
 }
 
-function safeStaticPath(contentRoot: string, pathname: string): string | undefined {
+function safeStaticPath(
+  contentRoot: string,
+  pathname: string,
+  ignoredDirectories?: ReadonlySet<string>,
+): string | undefined {
   let decoded: string
   try {
     decoded = decodeURIComponent(pathname)
@@ -1210,7 +1264,20 @@ function safeStaticPath(contentRoot: string, pathname: string): string | undefin
   }
   const path = resolve(contentRoot, decoded.replace(/^\/+/, ''))
   const rel = relative(contentRoot, path)
-  return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? undefined : path
+  return rel === '' || rel.startsWith('..') || isAbsolute(rel)
+    || isIgnoredDirectoryPath(contentRoot, path, ignoredDirectories)
+    ? undefined
+    : path
+}
+
+function isIgnoredDirectoryPath(
+  contentRoot: string,
+  path: string,
+  ignoredDirectories?: ReadonlySet<string>,
+): boolean {
+  if (!ignoredDirectories) return false
+  const first = relative(contentRoot, path).split(/[\\/]/)[0]
+  return first !== undefined && ignoredDirectories.has(first)
 }
 
 function errorPage(requested: string, site: DoxbrixSiteConfig): string {

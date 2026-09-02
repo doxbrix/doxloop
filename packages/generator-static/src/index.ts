@@ -35,6 +35,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-static',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-static', import.meta.url)),
   },
+  planning: { navigationFiles: ['scripts/build.mjs'] },
   project: {
     defaultContentDir: 'site',
     pageExtensions: ['.html'],

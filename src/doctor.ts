@@ -6,6 +6,7 @@ import {
   skillStatus,
 } from './agents.js'
 import { DoxloopError } from './errors.js'
+import { historyAvailable, historyRuntimeStatus } from './db.js'
 import { diagnoseGenerator } from './generator-manager.js'
 import {
   findProjectRoot,
@@ -72,6 +73,13 @@ export async function runDoctor(options: {
   }
 
   await inspectAgent(options.agent, checks, preflight ? undefined : options.cwd)
+  const runtime = historyRuntimeStatus(process.versions.node)
+  const historyDisabled = process.env.DOXLOOP_NO_HISTORY === '1'
+  checks.push({
+    status: historyDisabled ? 'warning' : runtime.available && await historyAvailable() ? 'pass' : 'fail',
+    label: runtime.available ? 'Request history runtime is available' : 'Request history runtime',
+    detail: historyDisabled ? 'History is explicitly disabled by DOXLOOP_NO_HISTORY=1; requests and deployments will not appear in the UI history.' : runtime.detail,
+  })
   checks.push(await previewPortCheck())
   return {
     ready: checks.every((check) => check.status !== 'fail'),

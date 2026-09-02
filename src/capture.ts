@@ -18,11 +18,16 @@ const VIEWPORTS = [
 ] as const
 const COLOR_SCHEMES = ['light', 'dark'] as const
 
-interface PlaywrightPage {
+export interface PlaywrightPage {
   goto(url: string, options?: object): Promise<{ url(): string } | null>
   waitForTimeout(milliseconds: number): Promise<void>
   screenshot(options: object): Promise<unknown>
+  setContent(html: string, options?: object): Promise<void>
   evaluate<T>(script: string): Promise<T>
+  evaluate<T, A>(callback: (argument: A) => T | Promise<T>, argument: A): Promise<T>
+  evaluate<T>(callback: () => T | Promise<T>): Promise<T>
+  addScriptTag(options: { content: string }): Promise<unknown>
+  keyboard: { press(key: string): Promise<void> }
   route(
     pattern: string,
     handler: (route: PlaywrightRoute) => Promise<void>,
@@ -39,17 +44,17 @@ interface PlaywrightRoute {
   continue(): Promise<void>
 }
 
-interface PlaywrightContext {
+export interface PlaywrightContext {
   newPage(): Promise<PlaywrightPage>
   close(): Promise<void>
 }
 
-interface PlaywrightBrowser {
+export interface PlaywrightBrowser {
   newContext(options: object): Promise<PlaywrightContext>
   close(): Promise<void>
 }
 
-interface PlaywrightModule {
+export interface PlaywrightModule {
   chromium: { launch(options?: object): Promise<PlaywrightBrowser> }
 }
 
@@ -339,7 +344,7 @@ async function extractStyles(page: PlaywrightPage): Promise<Record<string, unkno
   return page.evaluate(EXTRACT_SCRIPT)
 }
 
-async function ensurePlaywright(): Promise<PlaywrightModule> {
+export async function ensurePlaywright(): Promise<PlaywrightModule> {
   const directory = toolsDir()
   const entry = join(directory, 'node_modules', 'playwright', 'index.js')
   const browserSentinel = join(directory, '.chromium-ready')

@@ -37,11 +37,11 @@ export function PageHeader({ title, description, icon, actions, meta }: {
   actions?: ComponentChildren
   meta?: ComponentChildren
 }) {
-  return <header class="page-head">
+  return <div class="page-head">
     {icon && <span class="page-head-icon"><Icon name={icon} size={30} /></span>}
     <div class="page-head-copy"><h1>{title}</h1>{description && <p>{description}</p>}{meta && <div class="page-meta">{meta}</div>}</div>
     {actions && <div class="page-head-actions">{actions}</div>}
-  </header>
+  </div>
 }
 
 export function Tabs<T extends string>({ value, onChange, items }: {

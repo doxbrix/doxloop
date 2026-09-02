@@ -67,12 +67,11 @@ describe('specification source parsing', () => {
     )
   })
 
-  test('boundary validation accepts URLs and existing spec files only', async () => {
+  test('boundary validation accepts valid existing spec files only', async () => {
     const root = await makeRoot()
     await writeFile(join(root, 'openapi.json'), OPENAPI_DOCUMENT, 'utf8')
     await expect(
       validateProjectSourceBoundaries(root, [
-        { name: 'api', path: 'https://example.com/openapi.json', kind: 'openapi' },
         { name: 'local', path: './openapi.json', kind: 'openapi' },
       ]),
     ).resolves.toBeUndefined()
@@ -104,21 +103,6 @@ describe('specification synchronization', () => {
     expect(formatSourceChanges(changed)).toContain('API specification changed')
   })
 
-  test('reports remote specifications for agent comparison', async () => {
-    const root = await makeRoot()
-    const sources = [
-      {
-        name: 'api',
-        path: 'https://example.com/openapi.json',
-        kind: 'openapi' as const,
-      },
-    ]
-    const changes = await collectSourceChanges(root, sources)
-    expect(changes[0]?.kind).toBe('spec-remote')
-    expect(formatSourceChanges(changes)).toContain('remote API specification')
-    const state = await recordSyncState(root, sources)
-    expect(Object.keys(state.sources)).toHaveLength(0)
-  })
 })
 
 describe('specification evidence in the author prompt', () => {

@@ -242,10 +242,11 @@ export async function recordSyncRun(
            request_text, agent, model, reasoning_effort, status, pages_changed, lines_added,
            lines_removed, validation_pages, validation_errors, validation_warnings,
            source_summary, stale_pages_count, error_message, run_dir)
-         VALUES (?, ?, ?, ?, 'update', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            finished_at = excluded.finished_at,
            duration_ms = excluded.duration_ms,
+           kind = excluded.kind,
            status = excluded.status,
            pages_changed = excluded.pages_changed,
            lines_added = excluded.lines_added,
@@ -265,6 +266,7 @@ export async function recordSyncRun(
         run.createdAt,
         finishedAt,
         finishedAt ? elapsed(run.createdAt, finishedAt) : null,
+        run.authoringMode ?? 'update',
         run.trigger,
         text(context.requestText),
         text(context.agent),
@@ -614,7 +616,9 @@ export async function backfillHistory(root: string, force = false): Promise<numb
   if (!database) return 0
   try {
     if (!force) {
-      const marker = database.prepare("SELECT value FROM meta WHERE key = 'backfilled_at'").get()
+      // Version 2 re-imports retained run manifests once so older create runs
+      // that were incorrectly stored as updates receive the right action.
+      const marker = database.prepare("SELECT value FROM meta WHERE key = 'backfilled_at_v2'").get()
       if (marker) return 0
     }
     let imported = 0
@@ -627,9 +631,9 @@ export async function backfillHistory(root: string, force = false): Promise<numb
         const manifest = join(runsRoot, entry.name, 'run.json')
         if (!(await pathExists(manifest))) continue
         try {
-          const run = JSON.parse(await readFile(manifest, 'utf8')) as SyncRun
-          if (run.schemaVersion !== 1 || !Array.isArray(run.changes)) continue
-          await recordSyncRun(root, run, { runDir: join('.doxloop', 'runs', entry.name) })
+          const raw = JSON.parse(await readFile(manifest, 'utf8')) as { schemaVersion?: number; changes?: unknown }
+          if ((raw.schemaVersion !== 1 && raw.schemaVersion !== 2) || !Array.isArray(raw.changes)) continue
+          await recordSyncRun(root, raw as unknown as SyncRun, { runDir: join('.doxloop', 'runs', entry.name) })
           imported += 1
         } catch {
           // An interrupted run directory is not history worth importing.
@@ -648,7 +652,7 @@ export async function backfillHistory(root: string, force = false): Promise<numb
 
     await syncPageRegistry(root)
     database
-      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled_at', ?)")
+      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('backfilled_at_v2', ?)")
       .run(now())
     return imported
   } catch {

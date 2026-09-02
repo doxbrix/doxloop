@@ -39,6 +39,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-nextra',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-nextra', import.meta.url)),
   },
+  planning: { navigationFiles: ['theme.config.tsx', 'pages/_meta.json'] },
   project: {
     defaultContentDir: 'content',
     pageExtensions: ['.md', '.mdx'],

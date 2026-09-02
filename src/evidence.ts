@@ -46,7 +46,7 @@ export function pagesForChange(
 ): Map<string, string[]> {
   const matches = new Map<string, string[]>()
   for (const [page, evidence] of Object.entries(map.pages)) {
-    const patterns = evidencePatterns(evidence, source)
+    const patterns = evidenceIdentifiers(evidence, source)
     if (patterns === undefined) continue
     const matched =
       patterns.length === 0
@@ -69,13 +69,13 @@ export function trackedSources(map: EvidenceMap): Set<string> {
 }
 
 /** Patterns recorded for one source, or undefined when the page ignores it. */
-function evidencePatterns(
+function evidenceIdentifiers(
   evidence: PageEvidence,
   source: string,
 ): string[] | undefined {
   const entries = evidence.sources.filter((entry) => entry.source === source)
   if (entries.length === 0) return undefined
-  return entries.flatMap((entry) => entry.paths ?? [])
+  return entries.flatMap((entry) => [...(entry.paths ?? []), ...(entry.operations ?? [])])
 }
 
 /**
@@ -116,8 +116,15 @@ function isPageEvidence(value: unknown): value is PageEvidence {
     return false
   }
   if (evidence.claims !== undefined && !isTextList(evidence.claims)) return false
-  if (evidence.verifiedAt === undefined) return true
-  return (
+  if (evidence.claimVerification !== undefined && (
+    !evidence.claimVerification ||
+    typeof evidence.claimVerification !== 'object' ||
+    Array.isArray(evidence.claimVerification) ||
+    !Object.entries(evidence.claimVerification).every(([claim, state]) =>
+      claim.trim() !== '' && ['verified', 'inferred', 'contradicted', 'needs-human'].includes(String(state)),
+    )
+  )) return false
+  const revisionMapValid = evidence.verifiedAt === undefined || (
     typeof evidence.verifiedAt === 'object' &&
     !Array.isArray(evidence.verifiedAt) &&
     Object.entries(evidence.verifiedAt).every(
@@ -125,6 +132,14 @@ function isPageEvidence(value: unknown): value is PageEvidence {
         source.trim() !== '' && typeof revision === 'string' && revision.trim() !== '',
     )
   )
+  const dateMapValid = evidence.verifiedOn === undefined || (
+    typeof evidence.verifiedOn === 'object' &&
+    !Array.isArray(evidence.verifiedOn) &&
+    Object.entries(evidence.verifiedOn).every(
+      ([source, timestamp]) => source.trim() !== '' && typeof timestamp === 'string' && !Number.isNaN(Date.parse(timestamp)),
+    )
+  )
+  return revisionMapValid && dateMapValid
 }
 
 function isPageEvidenceSource(value: unknown): value is PageEvidenceSource {

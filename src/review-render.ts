@@ -155,6 +155,7 @@ export interface ComparisonDocument {
   /** Layout and density are owned by the surrounding screen, not by this frame. */
   layout: 'split' | 'unified'
   onlyChanges: boolean
+  theme: 'light' | 'dark'
   notice?: string
 }
 
@@ -172,14 +173,14 @@ export function renderedDiffDocument(input: ComparisonDocument): string {
   <link rel="stylesheet" href="/reader.css">
   <style>${renderedDiffCss()}</style>
 </head>
-<body class="rd-body${input.onlyChanges ? ' rd-only-changes' : ''}" data-mode="${input.layout}">
+<body class="rd-body${input.onlyChanges ? ' rd-only-changes' : ''}" data-mode="${input.layout}" data-theme="${input.theme}">
   ${input.notice ? `<div class="rd-notice">${escapeHtml(input.notice)}</div>` : ''}
   <div class="rd-scroll">
     <div class="rd-heads">
       <div class="rd-head rd-head--before"><span class="rd-dot rd-dot--before"></span>Current documentation</div>
       <div class="rd-head rd-head--after"><span class="rd-dot rd-dot--after"></span>Proposed update</div>
     </div>
-    <div class="dp-root rd-root" data-color-theme="light" data-code-theme="auto">${input.diff.html}</div>
+    <div class="dp-root rd-root" data-color-theme="${input.theme}" data-code-theme="auto">${input.diff.html}</div>
     ${input.diff.added + input.diff.removed + input.diff.changed === 0
       ? '<div class="rd-none">Nothing in the rendered page changed. The difference is in the file itself — open the source diff to see it.</div>'
       : ''}
@@ -194,6 +195,8 @@ function renderedDiffCss(): string {
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body.rd-body{margin:0;background:var(--rv-page);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:var(--rv-text);-webkit-font-smoothing:antialiased}
+body.rd-body[data-theme='dark']{--rv-border:#334155;--rv-text:#cbd5e1;--rv-heading:#f8fafc;--rv-muted:#94a3b8;--rv-added:#6ee7a8;--rv-added-soft:#102a20;--rv-added-line:#245c43;--rv-removed:#fda4b4;--rv-removed-soft:#32151c;--rv-removed-line:#713141;--rv-changed:#f5cf75;--rv-changed-line:#705a25;--rv-page:#0f172a;color-scheme:dark}
+body.rd-body[data-theme='dark'] .rd-none,body.rd-body[data-theme='dark'] .rd-head,body.rd-body[data-theme='dark'] .rd-cell{background:#172033}
 .rd-notice{margin:16px 18px 0;padding:10px 14px;border-radius:7px;background:#FFFAEB;border:1px solid var(--rv-changed-line);color:var(--rv-changed);font-size:12.5px;font-weight:600}
 .rd-none{margin:18px auto;max-width:560px;padding:22px;text-align:center;border:1px solid var(--rv-border);border-radius:8px;color:var(--rv-muted);font-size:13px;background:#fff}
 

@@ -15,6 +15,29 @@ Run the installer and verify the executable.
 </Steps>
 ```
 
+A `<Step>` renders full block content, so a step's screenshot belongs inside
+that step — never collected after the `<Steps>` block. Put the image directly
+under the instruction it proves:
+
+```mdx
+<Steps>
+<Step title="Open the control center">
+Open the Overview screen at `/`.
+
+<Frame caption="The Overview dashboard lists every workflow stage.">
+![Doxloop Overview showing the documentation workflow](/assets/guides/quickstart/01-overview.png)
+</Frame>
+</Step>
+<Step title="Start an authoring request">
+Select **Update** and describe a reader outcome.
+
+<Frame caption="The Update form captures the reader outcome.">
+![Doxloop Update documentation form](/assets/guides/quickstart/02-update.png)
+</Frame>
+</Step>
+</Steps>
+```
+
 ````mdx
 <CodeGroup>
 ```bash npm

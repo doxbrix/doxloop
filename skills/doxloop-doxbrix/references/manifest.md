@@ -1,7 +1,8 @@
 # Doxbrix project format
 
-The canonical manifest is `docs/docs.json` for a Doxloop project whose
-`contentDir` is `docs`.
+The canonical manifest is `docs.json` at the project root for a new native
+Doxbrix project whose `contentDir` is empty. Existing projects with
+`contentDir: "docs"` keep the manifest at `docs/docs.json`.
 
 ```json
 {

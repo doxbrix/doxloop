@@ -233,6 +233,9 @@ function validateAdapter(
     !adapter.authoring ||
     typeof adapter.authoring.skillName !== 'string' ||
     typeof adapter.authoring.skillDirectory !== 'string' ||
+    (adapter.planning !== undefined &&
+      (!Array.isArray(adapter.planning.navigationFiles) ||
+        !adapter.planning.navigationFiles.every((file) => typeof file === 'string'))) ||
     !adapter.project ||
     !Array.isArray(adapter.project.pageExtensions) ||
     !Array.isArray(adapter.project.gitignore) ||

@@ -134,8 +134,12 @@ describe('pagesForChange', () => {
   })
 
   test('ignores pages bound to a different source', () => {
-    expect(pagesForChange(map, 'api', ['src/auth.ts'])).toEqual(
-      new Map([['docs/reference/api.md', ['src/auth.ts']]]),
+    expect(pagesForChange(map, 'api', ['src/auth.ts'])).toEqual(new Map())
+  })
+
+  test('matches exact OpenAPI operation evidence', () => {
+    expect(pagesForChange(map, 'api', ['POST /oauth/token'])).toEqual(
+      new Map([['docs/reference/api.md', ['POST /oauth/token']]]),
     )
   })
 

@@ -98,11 +98,11 @@ describe('doctor', () => {
     })
     await installSkill({ root, agent: 'codex' })
     await writeFile(
-      join(root, 'docs', 'index.mdx'),
+      join(root, 'index.mdx'),
       '---\ntitle: Overview\ndescription: Understand the product.\n---\n\n# Overview\n\nChoose a workflow.\n',
     )
     await writeFile(
-      join(root, 'docs', 'quickstart.mdx'),
+      join(root, 'quickstart.mdx'),
       '---\ntitle: Quickstart\ndescription: Complete the first workflow.\n---\n\n# Quickstart\n\nComplete the first workflow and verify the result.\n',
     )
     await fakeCodex(parent, true)
