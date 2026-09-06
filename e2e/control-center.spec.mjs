@@ -652,6 +652,37 @@ test('importing an existing folder inspects it before adopting it', async ({ pag
   expect(importBody).toMatchObject({ path: '/tmp/widget-site', generator: 'mkdocs', contentDir: 'docs', title: 'Widget manual v2', installGenerator: false })
 })
 
+test('new-project setup offers the location field and explains a rejected source folder', async ({ page }) => {
+  await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null, cwd: '/tmp/widget' }, { handle: ({ method, path, request }) => {
+    if (method === 'POST' && path === '/api/setup/validate') {
+      const body = request.postDataJSON()
+      if (body.sourcePath === '/tmp/widget') return { directoryPath: '/tmp/widget/my-product-docs', sourcePath: '/tmp/widget', sourcePathError: 'The product source and documentation project must be separate directories.\n\nCreate them as sibling projects.' }
+      if (body.sourcePath) return { directoryPath: '/tmp/widget/my-product-docs', sourcePath: body.sourcePath }
+      return { directoryPath: '/tmp/widget/my-product-docs' }
+    }
+    return undefined
+  } })
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+  await expect(page.getByLabel('Location')).toHaveValue('/tmp/widget')
+  await page.getByRole('button', { name: /Continue/ }).click()
+  await page.getByRole('button', { name: 'Add source' }).click()
+  await page.getByRole('button', { name: 'Source code' }).click()
+  await page.getByRole('button', { name: /^Local folder/ }).click()
+  const dialog = page.locator('.sources-reference-dialog')
+  await dialog.getByLabel('Local folder').fill('/tmp/widget')
+  await dialog.getByRole('button', { name: 'Add source' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('must be separate directories')
+  await dialog.getByLabel('Local folder').fill('/tmp/widget-source')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Add source' }).click()
+  const toast = page.getByText('Source added successfully!')
+  await expect(toast).toBeVisible()
+  await expect(page.getByText('widget-source', { exact: true })).toBeVisible()
+  await expect(toast).toHaveCount(0, { timeout: 8000 })
+  await expect(page.getByRole('button', { name: /Continue/ })).toBeEnabled()
+})
+
 test('new-project setup can adopt an existing documentation folder instead of scaffolding', async ({ page }) => {
   await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null }, { handle: ({ method, path }) => {
     if (method === 'GET' && path === '/api/projects') return { current: null, recent: [], generators: [{ id: 'doxbrix', displayName: 'Doxbrix', installed: true }] }

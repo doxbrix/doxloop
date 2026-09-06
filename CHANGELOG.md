@@ -108,6 +108,15 @@ uses semantic versioning after its first stable release.
 
 ### Fixed
 
+- **The setup wizard explains a rejected source folder.** Starting `doxloop ui`
+  inside the product checkout and adding that folder as a source used to fail
+  with no message, because the new workspace defaults to a folder inside the
+  source. The **Add source** dialog now shows the server's explanation with both
+  paths, the error clears as you type, and the **Location** field is offered on
+  a fresh start so the workspace can be moved beside the checkout. The
+  **Source added successfully** notice also dismisses itself after four seconds
+  and sits above the wizard footer, so it no longer covers **Continue** on a
+  short window.
 - **A Claude API failure mid-run no longer fails the run.** When Claude's API
   request breaks off mid-response (a server error, an overload, a rate limit,
   or a dropped connection), Claude exits and the run used to fail with the

@@ -226,7 +226,7 @@
 .reference-setup .setup-actions { margin-right: -34px; margin-left: -34px; padding-right: 34px; padding-left: 34px; }
 .reference-setup .setup-sources-header, .reference-setup .setup-sources-table { width: 100%; }
 .reference-setup .setup-sources-table .sources-table-empty { min-height: 245px; }
-.reference-setup .source-added-success { position: fixed; z-index: 110; right: 26px; bottom: 26px; box-shadow: 0 8px 24px rgb(30 40 60 / 12%); }
+.reference-setup .source-added-success { position: fixed; z-index: 110; right: 26px; bottom: 96px; box-shadow: 0 8px 24px rgb(30 40 60 / 12%); }
 .reference-setup .setup-home-body { min-height: 700px; padding: 38px 34px 0; background: #fbfcff; }
 .setup-home-card { width: 100%; min-height: 530px; display: grid; align-content: start; gap: 42px; border: 0; background: transparent; box-shadow: none; }
 .setup-home-heading { display: flex; align-items: center; gap: 28px; padding: 3px 8px; }
@@ -686,3 +686,6 @@
 .setup-cancel-button:hover { background: var(--brand-soft); }
 .setup-cancel-button .icon { transform: rotate(180deg); }
 @media (max-width: 720px) { .setup-mode-choice { grid-template-columns: minmax(0, 1fr); } }
+
+/* Validation feedback inside the Add source dialog; the server message is multi-line. */
+.sources-dialog-body > .field-error { margin: 0; color: var(--bad); font-size: 12px; line-height: 1.45; white-space: pre-line; }

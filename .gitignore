@@ -25,3 +25,9 @@ evals/results/
 /test-results/
 /playwright-report/
 .doxloop/monitor-interval.json
+
+# Local planning and review notes; never committed.
+PLAN-*.md
+REVIEW-*.md
+IMPLEMENTATION-*.md
+CLAUDE-*.md
