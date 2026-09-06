@@ -16,3 +16,17 @@ test('untrusted file names cannot inject headings, markup, or mentions into the 
   assert.ok(!body.includes('<b>'))
   assert.ok(!body.includes('\n# @'))
 })
+
+test('recursive globs include root files and exact source-file changes flag referenced pages', () => {
+  const project = { sources: [{ name: 'code', path: '.' }, { name: 'api', path: 'openapi.yaml' }, { name: 'external', path: 'https://example.com/api.yaml' }] }
+  const evidence = { pages: {
+    'docs/code.md': { sources: [{ source: 'code', paths: ['**/*.ts'] }] },
+    'docs/api.md': { sources: [{ source: 'api', paths: ['/users'] }] },
+  } }
+  const result = affectedPages(project, evidence, ['index.ts', 'src/nested.ts', 'openapi.yaml'])
+  assert.deepEqual(result.affected, [
+    { page: 'docs/code.md', source: 'code', paths: ['index.ts', 'src/nested.ts'] },
+    { page: 'docs/api.md', source: 'api', paths: ['openapi.yaml'] },
+  ])
+  assert.deepEqual(result.unavailable, ['external'])
+})
