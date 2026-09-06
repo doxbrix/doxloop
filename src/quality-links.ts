@@ -1,3 +1,4 @@
+import { contentLinks } from './content-links.js'
 import { lookup } from 'node:dns/promises'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
@@ -21,7 +22,7 @@ export async function checkExternalLinks(
   options: { offline?: boolean; fetch?: typeof globalThis.fetch; resolveHostname?: (hostname: string) => Promise<string[]> } = {},
 ): Promise<QualityCheck[]> {
   const references = await externalReferences(root, project)
-  if (references.size === 0) return [{ code: QUALITY_CODES.linkOk, category: 'links', status: 'pass', message: 'No external links require checking.' }]
+  if (references.size === 0) return [{ code: QUALITY_CODES.linkOk, category: 'links', status: 'pass', message: 'No literal external links were found in Markdown, HTML attributes, or reStructuredText. Dynamic links and cross-reference roles require the native generator check.' }]
   const cache = await readCache(root)
   const checks: QualityCheck[] = []
   const links = config.links ?? {}
@@ -66,9 +67,8 @@ async function externalReferences(root: string, project: DoxloopProject): Promis
   const output = new Map<string, Set<string>>()
   for (const path of await loadPages(root, project)) {
     const raw = await readFile(path, 'utf8')
-    for (const match of raw.matchAll(/(?:!\[[^\]]*]|\[[^\]]+])\((https?:\/\/[^)\s]+)(?:\s+["'][^"']*["'])?\)|<(https?:\/\/[^>\s]+)>/gi)) {
-      const rawUrl = match[1] ?? match[2]
-      if (!rawUrl) continue
+    for (const rawUrl of contentLinks(raw)) {
+      if (!/^https?:\/\//i.test(rawUrl)) continue
       let url: URL
       try { url = new URL(rawUrl) } catch { continue }
       url.hash = ''

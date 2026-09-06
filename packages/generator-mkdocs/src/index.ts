@@ -1,16 +1,34 @@
-import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DoxloopError,
   defineGenerator,
+  type GeneratorNavigationContext,
+  type GeneratorNavigationTree,
+  type GeneratorNavigationTreeContext,
+  type GeneratorNavigationTreeNode,
   type GeneratorPreviewOptions,
   type GeneratorScaffoldContext,
+  type GeneratorValidationContext,
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
-import { parse as parseYaml } from 'yaml'
+import {
+  contentRelativePages,
+  ensurePythonDependencies,
+  isRecord,
+  navigationUnverifiedIssue,
+  openBrowser,
+  pathExists,
+  readPackageJson,
+  runPreviewProcess,
+  shownHost,
+  slugFromTitle,
+  venvExecutable,
+  writeJsonFile,
+} from '@doxbrix/doxloop/generator-runtime'
+import { isMap, isSeq, parse as parseYaml, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 
 const PACKAGE_NAME = '@doxbrix/doxloop-generator-mkdocs'
 const PACKAGE_VERSION = (
@@ -36,6 +54,7 @@ const adapter = defineGenerator({
     defaultContentDir: 'docs',
     pageExtensions: ['.md'],
     gitignore: ['site/', '.doxloop/venv/'],
+    contentFormat: 'markdown' as const,
   },
   build: {
     command: 'mkdocs build --strict',
@@ -44,6 +63,9 @@ const adapter = defineGenerator({
   scaffold: scaffoldMkDocs,
   preview: startMkDocsPreview,
   validate: validateMkDocs,
+  writeNavigation: writeMkDocsNavigation,
+  readNavigationTree: readMkDocsNavigationTree,
+  writeNavigationTree: writeMkDocsNavigationTree,
 })
 
 export default adapter
@@ -52,14 +74,9 @@ export function mkdocsPreviewInvocation(options: GeneratorPreviewOptions): {
   command: string
   args: string[]
 } {
-  const binary = mkdocsBinary(options.root)
   return {
-    command: binary,
-    args: [
-      'serve',
-      '--dev-addr',
-      `${options.host}:${options.port}`,
-    ],
+    command: venvExecutable(options.root, 'mkdocs'),
+    args: ['serve', '--dev-addr', `${options.host}:${options.port}`],
   }
 }
 
@@ -67,7 +84,7 @@ async function scaffoldMkDocs(context: GeneratorScaffoldContext): Promise<void> 
   const { root, title, contentDir } = context
   await mkdir(join(root, contentDir, 'stylesheets'), { recursive: true })
   const existing = await readPackageJson(root)
-  await writeJson(join(root, 'package.json'), {
+  await writeJsonFile(join(root, 'package.json'), {
     ...existing,
     name:
       typeof existing.name === 'string' && existing.name
@@ -133,7 +150,11 @@ markdown_extensions:
   - attr_list
   - md_in_html
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -190,15 +211,13 @@ description: "Reach your first successful result with verified product instructi
   )
 }
 
-async function validateMkDocs(context: {
-  root: string
-  contentRoot: string
-  pages: string[]
-  pageIds: string[]
-}): Promise<ValidationIssue[]> {
+async function validateMkDocs(
+  context: GeneratorValidationContext,
+): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  for (const file of ['package.json', 'requirements.txt', 'mkdocs.yml']) {
-    if (!(await exists(join(context.root, file)))) {
+  // Existing Python-only sites need no Node manifest or dependency lockfile.
+  for (const file of ['mkdocs.yml']) {
+    if (!(await pathExists(join(context.root, file)))) {
       issues.push({
         severity: 'error',
         code: 'missing-generator-file',
@@ -208,11 +227,11 @@ async function validateMkDocs(context: {
     }
   }
   const configPath = join(context.root, 'mkdocs.yml')
-  if (!(await exists(configPath))) return issues
+  if (!(await pathExists(configPath))) return issues
 
   let config: unknown
   try {
-    config = parseYaml(await readFile(configPath, 'utf8'))
+    config = parseYaml(await readFile(configPath, 'utf8'), { logLevel: 'silent' })
   } catch (error) {
     issues.push({
       severity: 'error',
@@ -241,36 +260,54 @@ async function validateMkDocs(context: {
       file: 'mkdocs.yml',
     })
   }
-  if (config.nav !== undefined) {
-    const navFiles = new Set<string>()
-    collectNavFiles(config.nav, navFiles)
-    const pageFiles = new Set(
-      context.pages.map((page) =>
-        relative(context.contentRoot, page).split('\\').join('/'),
+  if (config.nav === undefined) return issues
+  const navigationPlugin = navigationPluginName(config.plugins)
+  if (navigationPlugin) {
+    issues.push(
+      navigationUnverifiedIssue(
+        'MkDocs',
+        'mkdocs.yml',
+        `the ${navigationPlugin} plugin builds the navigation.`,
       ),
     )
-    for (const file of navFiles) {
-      if (!pageFiles.has(file)) {
-        issues.push({
-          severity: 'error',
-          code: 'missing-page',
-          message: `MkDocs navigation references missing page "${file}".`,
-          file: 'mkdocs.yml',
-        })
-      }
+    return issues
+  }
+  const navFiles = new Set<string>()
+  collectNavFiles(config.nav, navFiles)
+  const pageFiles = new Set(contentRelativePages(context.contentRoot, context.pages))
+  for (const file of navFiles) {
+    if (!pageFiles.has(file)) {
+      issues.push({
+        severity: 'error',
+        code: 'missing-page',
+        message: `MkDocs navigation references missing page "${file}".`,
+        file: 'mkdocs.yml',
+      })
     }
-    for (const file of pageFiles) {
-      if (!navFiles.has(file)) {
-        issues.push({
-          severity: 'error',
-          code: 'unnavigated-page',
-          message: `Page "${file}" is not in MkDocs navigation.`,
-          file,
-        })
-      }
+  }
+  for (const file of pageFiles) {
+    if (!navFiles.has(file)) {
+      issues.push({
+        severity: 'error',
+        code: 'unnavigated-page',
+        message: `Page "${file}" is not in MkDocs navigation.`,
+        file: `${docsDir.replace(/\/+$/, '')}/${file}`,
+      })
     }
   }
   return issues
+}
+
+/** Plugins that generate or rewrite `nav`, so the literal list is not the whole story. */
+function navigationPluginName(plugins: unknown): string | undefined {
+  if (!Array.isArray(plugins)) return undefined
+  for (const plugin of plugins) {
+    const name = typeof plugin === 'string' ? plugin : isRecord(plugin) ? Object.keys(plugin)[0] : undefined
+    if (name && /^(?:awesome-pages|awesome-nav|literate-nav|section-index|gen-files|monorepo|mkdocs-simple-hooks)$/.test(name)) {
+      return name
+    }
+  }
+  return undefined
 }
 
 function collectNavFiles(value: unknown, output: Set<string>): void {
@@ -289,164 +326,147 @@ function collectNavFiles(value: unknown, output: Set<string>): void {
   }
 }
 
-async function startMkDocsPreview(options: GeneratorPreviewOptions): Promise<void> {
-  await ensureMkDocsDependencies(options.root)
-  const invocation = mkdocsPreviewInvocation(options)
-  process.stdout.write(
-    `Starting MkDocs preview at http://${shownHost(options.host)}:${options.port}\n`,
-  )
-  if (options.open) {
-    setTimeout(() => {
-      void openBrowser(`http://${shownHost(options.host)}:${options.port}`)
-    }, 800)
+/**
+ * Edits the `nav` list in place through the YAML document model so comments,
+ * anchors, and the Python tags Material relies on survive the rewrite. A
+ * missing `nav` means MkDocs lists every page itself, so nothing is written.
+ */
+async function writeMkDocsNavigation(context: GeneratorNavigationContext): Promise<void> {
+  const configPath = join(context.root, 'mkdocs.yml')
+  if (!(await pathExists(configPath))) {
+    throw new DoxloopError('mkdocs.yml is missing, so the navigation cannot be updated.', 2)
   }
-  await runPreview(invocation.command, invocation.args, options.root)
-}
-
-async function ensureMkDocsDependencies(root: string): Promise<void> {
-  const binary = mkdocsBinary(root)
-  if (await exists(binary)) return
-  if (!(await exists(join(root, 'requirements.txt')))) {
-    throw new DoxloopError('This MkDocs project has no requirements.txt.', 2)
+  const document = parseDocument(await readFile(configPath, 'utf8'), { logLevel: 'silent' })
+  const nav = document.get('nav', true)
+  if (nav === undefined) return
+  if (!isSeq(nav)) {
+    throw new DoxloopError('mkdocs.yml nav must be a list to update it.', 2)
   }
-  const python = process.platform === 'win32' ? 'python' : 'python3'
-  process.stdout.write(
-    'Creating .doxloop/venv and installing MkDocs dependencies (first preview only)...\n',
-  )
-  const venv = join(root, '.doxloop', 'venv')
-  let code = await runChild(python, ['-m', 'venv', venv], root)
-  if (code === 0) {
-    code = await runChild(
-      venvExecutable(root, 'python'),
-      ['-m', 'pip', 'install', '-r', 'requirements.txt'],
-      root,
-    )
+  const { action, page } = context
+  const target = page.path.replace(/^\.\//, '')
+  if (action === 'remove' || action === 'rename') {
+    removeNavEntry(nav, action === 'rename' ? (context.from ?? target) : target)
   }
-  if (code !== 0 || !(await exists(binary))) {
-    throw new DoxloopError(
-      'MkDocs dependency installation did not complete. Create a Python virtual environment and run `pip install -r requirements.txt`.',
-      2,
-    )
-  }
-}
-
-async function runPreview(
-  command: string,
-  args: string[],
-  root: string,
-): Promise<void> {
-  const child = spawn(command, args, { cwd: root, stdio: 'inherit' })
-  const forward = (signal: NodeJS.Signals): void => {
-    if (!child.killed) child.kill(signal)
-  }
-  const onSigint = (): void => forward('SIGINT')
-  const onSigterm = (): void => forward('SIGTERM')
-  process.once('SIGINT', onSigint)
-  process.once('SIGTERM', onSigterm)
-  try {
-    const result = await new Promise<{
-      code: number | null
-      signal: NodeJS.Signals | null
-    }>((resolveExit, reject) => {
-      child.once('error', reject)
-      child.once('exit', (code, signal) => resolveExit({ code, signal }))
-    })
-    if (result.code !== 0 && result.signal === null) {
-      throw new DoxloopError(`MkDocs preview exited with code ${result.code ?? 1}.`)
+  if (action === 'add' || action === 'rename') {
+    if (!navContains(nav, target)) {
+      const entry = document.createNode({ [page.title]: target })
+      const section = page.section ? findSection(nav, page.section) : undefined
+      if (page.section && !section) {
+        nav.add(document.createNode({ [page.section]: [{ [page.title]: target }] }))
+      } else {
+        ;(section ?? nav).add(entry)
+      }
     }
-  } finally {
-    process.off('SIGINT', onSigint)
-    process.off('SIGTERM', onSigterm)
+  }
+  await writeFile(configPath, document.toString(), 'utf8')
+}
+
+/**
+ * The `nav` list as a tree. MkDocs accepts plain paths, `Title: path` pairs,
+ * and `Section: [...]` pairs; every shape maps onto page and group nodes so
+ * the control center can reorder and regroup it.
+ */
+async function readMkDocsNavigationTree(context: GeneratorNavigationTreeContext): Promise<GeneratorNavigationTree> {
+  const configPath = join(context.root, 'mkdocs.yml')
+  if (!(await pathExists(configPath))) return { nodes: [] }
+  // Python tags such as `!!python/name:` are common in mkdocs.yml; a silent
+  // document parse keeps them from logging warnings on every read.
+  const config = parseDocument(await readFile(configPath, 'utf8'), { logLevel: 'silent' }).toJS() as Record<string, unknown> | null
+  const nav = config?.nav
+  return { nodes: Array.isArray(nav) ? mkdocsNavToTree(nav) : [] }
+}
+
+export function mkdocsNavToTree(entries: unknown[]): GeneratorNavigationTreeNode[] {
+  const nodes: GeneratorNavigationTreeNode[] = []
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      nodes.push({ type: 'page', file: entry })
+      continue
+    }
+    if (!isRecord(entry)) continue
+    for (const [label, value] of Object.entries(entry)) {
+      if (typeof value === 'string') nodes.push({ type: 'page', file: value, title: label })
+      else if (Array.isArray(value)) nodes.push({ type: 'group', label, items: mkdocsNavToTree(value) })
+    }
+  }
+  return nodes
+}
+
+export function treeToMkdocsNav(nodes: GeneratorNavigationTreeNode[]): unknown[] {
+  return nodes.map((node) => (node.type === 'group'
+    ? { [node.label]: treeToMkdocsNav(node.items) }
+    : node.title ? { [node.title]: node.file } : node.file))
+}
+
+async function writeMkDocsNavigationTree(context: GeneratorNavigationTreeContext & { tree: GeneratorNavigationTree }): Promise<void> {
+  const configPath = join(context.root, 'mkdocs.yml')
+  if (!(await pathExists(configPath))) {
+    throw new DoxloopError('mkdocs.yml is missing, so the navigation cannot be updated.', 2)
+  }
+  const document = parseDocument(await readFile(configPath, 'utf8'), { logLevel: 'silent' })
+  document.set('nav', document.createNode(treeToMkdocsNav(context.tree.nodes)))
+  await writeFile(configPath, document.toString(), 'utf8')
+}
+
+function findSection(nav: YAMLSeq, label: string): YAMLSeq | undefined {
+  for (const item of nav.items) {
+    if (!isMap(item)) continue
+    for (const pair of (item as YAMLMap).items) {
+      if (String(pair.key) === label && isSeq(pair.value)) return pair.value as YAMLSeq
+    }
+  }
+  return undefined
+}
+
+function navContains(nav: YAMLSeq, target: string): boolean {
+  for (const item of nav.items) {
+    if (typeof item === 'string' ? item === target : isMap(item)
+      ? (item as YAMLMap).items.some((pair) => {
+        const value = pair.value
+        if (isSeq(value)) return navContains(value as YAMLSeq, target)
+        return String((value as { value?: unknown })?.value ?? value) === target
+      })
+      : String((item as { value?: unknown })?.value ?? item) === target) {
+      return true
+    }
+  }
+  return false
+}
+
+function removeNavEntry(nav: YAMLSeq, target: string): void {
+  for (let index = nav.items.length - 1; index >= 0; index -= 1) {
+    const item = nav.items[index]
+    const scalar = String((item as { value?: unknown })?.value ?? item)
+    if (!isMap(item)) {
+      if (scalar === target) nav.items.splice(index, 1)
+      continue
+    }
+    const map = item as YAMLMap
+    for (let pairIndex = map.items.length - 1; pairIndex >= 0; pairIndex -= 1) {
+      const pair = map.items[pairIndex]!
+      if (isSeq(pair.value)) {
+        removeNavEntry(pair.value as YAMLSeq, target)
+        if ((pair.value as YAMLSeq).items.length === 0) map.items.splice(pairIndex, 1)
+        continue
+      }
+      const value = String((pair.value as { value?: unknown })?.value ?? pair.value)
+      if (value === target) map.items.splice(pairIndex, 1)
+    }
+    if (map.items.length === 0) nav.items.splice(index, 1)
   }
 }
 
-async function openBrowser(url: string): Promise<void> {
-  const invocation =
-    process.platform === 'darwin'
-      ? { command: 'open', args: [url] }
-      : process.platform === 'win32'
-        ? { command: 'cmd', args: ['/c', 'start', '', url] }
-        : { command: 'xdg-open', args: [url] }
-  await new Promise<void>((resolveOpen) => {
-    const child = spawn(invocation.command, invocation.args, {
-      stdio: 'ignore',
-      detached: true,
-    })
-    child.once('error', () => resolveOpen())
-    child.once('spawn', () => {
-      child.unref()
-      resolveOpen()
-    })
-  })
-}
-
-async function runChild(command: string, args: string[], root: string): Promise<number> {
-  return new Promise((resolveExit, reject) => {
-    const child = spawn(command, args, { cwd: root, stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code) => resolveExit(code ?? 1))
-  })
-}
-
-function mkdocsBinary(root: string): string {
-  return venvExecutable(root, 'mkdocs')
-}
-
-function venvExecutable(root: string, name: string): string {
-  return join(
-    root,
-    '.doxloop',
-    'venv',
-    process.platform === 'win32' ? 'Scripts' : 'bin',
-    process.platform === 'win32' ? `${name}.exe` : name,
-  )
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await readFile(path)
-    return true
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    throw error
-  }
-}
-
-async function readPackageJson(root: string): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<
-      string,
-      unknown
-    >
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
-    throw error
-  }
-}
-
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
-function slugFromTitle(title: string): string {
-  return (
-    title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'documentation'
-  )
+async function startMkDocsPreview(options: GeneratorPreviewOptions): Promise<void> {
+  await ensurePythonDependencies(options.root, 'mkdocs', 'MkDocs')
+  const invocation = mkdocsPreviewInvocation(options)
+  const url = `http://${shownHost(options.host)}:${options.port}`
+  process.stdout.write(`Starting MkDocs preview at ${url}\n`)
+  if (options.open) setTimeout(() => void openBrowser(url), 800)
+  await runPreviewProcess(invocation.command, invocation.args, options.root, 'MkDocs')
 }
 
 function yamlString(value: string): string {
   return JSON.stringify(value)
-}
-
-function shownHost(host: string): string {
-  return host === '0.0.0.0' || host === '::' ? 'localhost' : host
 }
 
 function errorMessage(error: unknown): string {

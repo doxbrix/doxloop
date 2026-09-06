@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { auditDocumentation, backfillEvidence } from './workspace-tools.js'
 
 import { mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
@@ -51,6 +52,7 @@ import {
 } from './history.js'
 import { formatDoctorReport, runDoctor } from './doctor.js'
 import { DoxloopError, UsageError } from './errors.js'
+import { exportStaticSite } from './site-export.js'
 import { approveEvaluationBaseline, evaluateWorkspace, formatEvaluation } from './evaluation.js'
 import {
   addGenerator,
@@ -88,10 +90,12 @@ import {
   scaffoldProject,
   validateProjectSourceBoundaries,
 } from './project.js'
+import { importExistingDocumentation } from './project-import.js'
 import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
+import { listPages as listDocumentationPages } from './pages.js'
 import { startPreview } from './preview.js'
 import { startUiServer } from './ui-server.js'
-import { formatSyncRunHistory, listSyncRuns, readSyncRun, recoverSyncRun, resumeSyncRun, reviseSyncRun } from './sync-runs.js'
+import { createSyncRun, formatSyncRunHistory, listSyncRuns, readSyncRun, recoverSyncRun, resumeSyncRun, reviseSyncRun } from './sync-runs.js'
 import {
   effectiveDeployment,
   formatProjectSettings,
@@ -130,6 +134,14 @@ async function main(): Promise<number> {
       return agentCommand(args, cwd)
     case 'generator':
       return generatorCommand(args, cwd)
+    case 'audit': {
+      const root = await findProjectRoot(cwd)
+      if (booleanFlag(args, 'backfill-evidence')) await backfillEvidence(root)
+      const result = await auditDocumentation(root)
+      if (flag(args, 'format') === 'json') process.stdout.write(JSON.stringify(result, null, 2) + '\n')
+      else process.stdout.write(`${result.generator}: ${result.pages.length} pages, ${result.drift.pages.length} stale, ${result.unverified.length} unverified, ${result.unmapped.length} unmapped.\n${result.message}\n`)
+      return 0
+    }
     case 'doctor': {
       const source = flag(args, 'source')
       const output = flag(args, 'output')
@@ -184,6 +196,8 @@ async function main(): Promise<number> {
       return documentationPlanCommand(args, cwd)
     case 'proposal':
       return proposalCommand(args, cwd)
+    case 'pages':
+      return pagesCommand(args, cwd)
     case 'capture': {
       const root = await findProjectRoot(cwd)
       await capture({ root, urls: args.positionals })
@@ -244,11 +258,13 @@ async function main(): Promise<number> {
       return syncCommand(args, cwd)
     case 'ui': {
       const page = flag(args, 'page')
+      const project = flag(args, 'project')
       await startUiServer({
         cwd,
         port: numberFlag(args, 'port', 4317),
         open: !booleanFlag(args, 'no-open'),
         ...(page ? { page } : {}),
+        ...(project ? { project } : {}),
       })
       return 0
     }
@@ -299,9 +315,18 @@ async function main(): Promise<number> {
       const project = await loadProject(root)
       const userConfig = await loadUserConfig()
       const savedDeployment = effectiveDeployment(project, userConfig.apiUrl)
+      const rawTarget = flag(args, 'target') ?? savedDeployment.target
+      if (!['doxbrix', 'github-pages', 'netlify', 'vercel'].includes(rawTarget)) throw new UsageError('--target must be doxbrix, github-pages, netlify, or vercel.')
+      const target = rawTarget as typeof savedDeployment.target
       const name = flag(args, 'name') ?? savedDeployment.name
       const slug = flag(args, 'slug') ?? savedDeployment.slug
-      const apiOverride = flag(args, 'api-url') ?? savedDeployment.apiUrl
+      const defaultTargetApi = target === 'netlify' ? 'https://api.netlify.com' : target === 'vercel' ? 'https://api.vercel.com' : savedDeployment.apiUrl
+      const apiOverride = flag(args, 'api-url') ?? (target === savedDeployment.target ? savedDeployment.apiUrl : defaultTargetApi)
+      const siteId = flag(args, 'site-id') ?? savedDeployment.siteId
+      const projectId = flag(args, 'project-id') ?? savedDeployment.projectId
+      const teamId = flag(args, 'team-id') ?? savedDeployment.teamId
+      const branch = flag(args, 'branch') ?? savedDeployment.branch
+      const basePath = flag(args, 'base-path') ?? savedDeployment.basePath
       const dryRun = booleanFlag(args, 'dry-run')
       const publicSite =
         flag(args, 'public') !== undefined
@@ -315,16 +340,16 @@ async function main(): Promise<number> {
           )
         }
         process.stdout.write(
-          `\nDeployment summary\n\n  Project:      ${name}\n  Slug:         ${slug}\n  Destination:  ${apiOverride}\n  Visibility:   ${publicSite ? 'PUBLIC' : 'Private'}\n  Pages:        ${validation.pages.length}\n  Warnings:     ${validation.warnings}\n  Product files: 0\n\n`,
+          `\nDeployment summary\n\n  Project:      ${name}\n  Slug:         ${slug}\n  Target:       ${target}\n  Destination:  ${apiOverride}\n  Visibility:   ${publicSite ? 'PUBLIC' : 'Private'}\n  Pages:        ${validation.pages.length}\n  Warnings:     ${validation.warnings}\n  Product files: 0\n\n`,
         )
-        if (publicSite) {
+        if (target === 'doxbrix' && publicSite) {
           process.stdout.write(
             'Anyone on the internet will be able to access this documentation.\n\n',
           )
         }
         const proceed = await promptConfirm({
-          message: publicSite ? 'Deploy publicly?' : 'Deploy now?',
-          initial: !publicSite,
+          message: target === 'doxbrix' && publicSite ? 'Deploy publicly?' : 'Deploy now?',
+          initial: target !== 'doxbrix' || !publicSite,
         })
         if (!proceed) {
           process.stdout.write('Deployment canceled. No data was uploaded.\n')
@@ -333,7 +358,7 @@ async function main(): Promise<number> {
 
         const token =
           userConfig.token ?? process.env.DOXLOOP_TOKEN ?? process.env.DOXBRIX_TOKEN
-        if (!token) {
+        if (target === 'doxbrix' && !token) {
           process.stdout.write('You are not signed in to Doxbrix.\n')
           const signIn = await promptConfirm({
             message: 'Sign in now?',
@@ -348,12 +373,36 @@ async function main(): Promise<number> {
       }
       await deploy({
         root,
+        target,
         name,
         slug,
         dryRun,
         public: publicSite,
         apiUrl: apiOverride,
+        ...(siteId ? { siteId } : {}),
+        ...(projectId ? { projectId } : {}),
+        ...(teamId ? { teamId } : {}),
+        ...(branch ? { branch } : {}),
+        ...(basePath ? { basePath } : {}),
       })
+      return 0
+    }
+    case 'export': {
+      const root = await findProjectRoot(cwd)
+      const rawOut = flag(args, 'out')
+      if (!rawOut) throw new UsageError('doxloop export requires --out <directory>.')
+      const basePath = flag(args, 'base-path')
+      const siteUrl = flag(args, 'site-url')
+      const result = await exportStaticSite({
+        root,
+        out: resolve(cwd, rawOut),
+        zip: booleanFlag(args, 'zip'),
+        ...(basePath ? { basePath } : {}),
+        ...(siteUrl ? { siteUrl } : {}),
+      })
+      process.stdout.write(
+        `Exported ${result.files} files to ${result.outputDir}\n${result.zipPath ? `Archive: ${result.zipPath}\n` : ''}SHA-256: ${result.sha256}\n`,
+      )
       return 0
     }
     default:
@@ -364,6 +413,7 @@ async function main(): Promise<number> {
 }
 
 async function initCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  if (booleanFlag(args, 'existing')) return importExistingCommand(args, cwd)
   const providedDirectory = args.positionals[0]
   let sources = [
     ...flags(args, 'source').map(parseSource),
@@ -414,6 +464,37 @@ async function initCommand(args: ParsedArgs, cwd: string): Promise<number> {
   process.stdout.write(
     `\nNext:\n  cd ${directory}\n  doxloop create\n  doxloop preview --open\n  doxloop test\n`,
   )
+  return 0
+}
+
+/**
+ * Adopt a folder that already holds a documentation site. Nothing in the
+ * folder is converted or rewritten; Doxloop only adds its own project files.
+ */
+async function importExistingCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  if (args.positionals.length > 1) throw new UsageError('The init command accepts one documentation directory.')
+  if (flags(args, 'source').length > 0 || flags(args, 'spec').length > 0 || flags(args, 'reference').length > 0) {
+    throw new UsageError('`doxloop init --existing` adopts the folder as it is. Connect sources afterwards from the control center.')
+  }
+  const generator = parseGenerator(flag(args, 'generator'))
+  const contentDir = flag(args, 'content-dir')
+  const title = flag(args, 'title')
+  const result = await importExistingDocumentation({
+    directory: resolve(cwd, args.positionals[0] ?? '.'),
+    ...(generator ? { generator } : {}),
+    ...(contentDir !== undefined ? { contentDir } : {}),
+    ...(title ? { title } : {}),
+  })
+  const entry = generatorCatalogEntry(result.generator)
+  process.stdout.write(
+    `Imported existing documentation at ${result.root}\n` +
+    `  Generator: ${entry?.displayName ?? result.generator}\n` +
+    `  Content directory: ${result.contentDir || '.'}\n` +
+    `  Pages: ${result.pageCount}\n`,
+  )
+  for (const install of result.skills) process.stdout.write(`${install.action}: ${install.path}\n`)
+  for (const warning of result.warnings) process.stdout.write(`Warning: ${warning}\n`)
+  process.stdout.write(`\nNo page was changed. Open the control center with:\n  doxloop ui --project ${result.root}\n`)
   return 0
 }
 
@@ -757,6 +838,63 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
   return 0
 }
 
+async function pagesCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const action = args.positionals[0]
+  if (action !== 'list' && action !== 'edit') {
+    throw new UsageError('Usage: doxloop pages <list|edit> [--path <page> --request <instruction>]')
+  }
+  if (args.positionals.length > 1) throw new UsageError(`The pages ${action} command does not accept positional arguments.`)
+  const root = await findProjectRoot(cwd)
+  if (action === 'list') {
+    const pages = await listDocumentationPages(root)
+    if (outputFormat(flag(args, 'format')) === 'json') {
+      process.stdout.write(`${JSON.stringify(pages, null, 2)}\n`)
+    } else if (pages.length === 0) {
+      process.stdout.write('No documentation pages found.\n')
+    } else {
+      process.stdout.write(`${formatPageList(pages)}\n`)
+    }
+    return 0
+  }
+
+  const paths = [...new Set(flags(args, 'path').map((path) => path.trim()).filter(Boolean))]
+  const request = flag(args, 'request')?.trim()
+  if (paths.length === 0) throw new UsageError('pages edit requires at least one --path <page>.')
+  if (!request) throw new UsageError('pages edit requires --request <instruction>.')
+  if (request.length < 8) throw new UsageError('pages edit requires an instruction of at least 8 characters.')
+  if (paths.length > 10) throw new UsageError('pages edit accepts at most 10 --path values.')
+  const project = await loadProject(root)
+  const selectedAgent = parseAgent(flag(args, 'agent'))
+  const run = await createSyncRun({
+    ...(flag(args, 'run-id') ? { id: flag(args, 'run-id')! } : {}),
+    root,
+    project,
+    drift: await computeConfiguredDrift(root, project),
+    sourceChanges: await collectSourceChanges(root, project.sources),
+    trigger: 'edit',
+    editRequest: { instruction: request, paths, allowRelated: booleanFlag(args, 'allow-related'), followUps: [] },
+    authoring: {
+      mode: 'update',
+      historyRequest: request,
+      ...(selectedAgent ? { agent: selectedAgent } : {}),
+      ...(flag(args, 'model') ? { model: flag(args, 'model')! } : {}),
+      ...(flag(args, 'reasoning') ? { reasoning: parseReasoning(flag(args, 'reasoning'))! } : {}),
+      ...(flag(args, 'effort') ? { effort: parseClaudeEffort(flag(args, 'effort'))! } : {}),
+      screenshots: booleanFlag(args, 'screenshots') ? 'enabled' : 'disabled',
+    },
+  })
+  process.stdout.write(`Documentation edit ${run.id} is ${run.status}.\n`)
+  if (run.status === 'failed') throw new DoxloopError(run.error ?? 'The documentation edit failed.')
+  return 0
+}
+
+function formatPageList(pages: Awaited<ReturnType<typeof listDocumentationPages>>): string {
+  const headings = ['Path', 'Title', 'Section', 'Words', 'Evidence']
+  const rows = pages.map((page) => [page.path, page.title, page.section ?? 'Not in navigation', String(page.wordCount), page.evidence])
+  const widths = headings.map((heading, index) => Math.max(heading.length, ...rows.map((row) => row[index]!.length)))
+  return [headings, ...rows].map((row) => row.map((cell, index) => cell.padEnd(widths[index]!)).join('  ').trimEnd()).join('\n')
+}
+
 async function agentCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const action = args.positionals[0]
   if (!action || !['setup', 'status', 'update'].includes(action)) {
@@ -1035,16 +1173,18 @@ async function historyCommand(args: ParsedArgs, cwd: string): Promise<number> {
 
 function validateCommandArguments(args: ParsedArgs): void {
   const allowed: Record<string, string[]> = {
-    init: ['title', 'source', 'spec', 'reference', 'generator'],
+    init: ['title', 'source', 'spec', 'reference', 'generator', 'existing', 'content-dir'],
     agent: ['agent'],
     generator: [],
     doctor: ['source', 'output', 'agent'],
+    audit: ['format', 'backfill-evidence'],
     demo: ['port', 'no-open', 'no-preview', 'keep'],
     create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
     update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
     plan: ['id', 'feedback', 'strategy'],
     proposal: ['id', 'change', 'hunk', 'request', 'ignore-screenshot-problems'],
+    pages: ['format', 'path', 'request', 'allow-related', 'screenshots', 'run-id', 'agent', 'model', 'reasoning', 'effort'],
     capture: [],
     test: ['format'],
     check: ['format', 'quiet'],
@@ -1052,7 +1192,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     quality: ['format', 'offline', 'rendered', 'examples', 'fix', 'update-visuals', 'warnings-as-errors', 'approve-quality-baseline'],
     evaluate: ['format', 'mode', 'before', 'expected-change', 'max-pages', 'regression-threshold', 'approve-baseline'],
     sync: ['mode', 'on', 'branch', 'quiet', 'trigger', 'host', 'port', 'open', 'request', 'agent', 'model', 'reasoning', 'effort', 'screenshots', 'no-screenshots'],
-    ui: ['port', 'page', 'no-open'],
+    ui: ['port', 'page', 'no-open', 'project'],
     status: ['format'],
     history: ['format', 'limit', 'page', 'deployments'],
     settings: [],
@@ -1060,7 +1200,8 @@ function validateCommandArguments(args: ParsedArgs): void {
     login: ['api-url', 'token'],
     logout: [],
     whoami: ['api-url'],
-    deploy: ['dry-run', 'public', 'name', 'slug', 'api-url'],
+    deploy: ['dry-run', 'public', 'name', 'slug', 'api-url', 'target', 'site-id', 'project-id', 'team-id', 'branch', 'base-path'],
+    export: ['out', 'zip', 'base-path', 'site-url'],
   }
   if (args.command === undefined) {
     assertAllowedFlags(args, new Set())
@@ -1079,6 +1220,7 @@ function validateCommandArguments(args: ParsedArgs): void {
       'review',
       'plan',
       'proposal',
+      'pages',
       'capture',
       'sync',
     ].includes(args.command) &&
@@ -1205,6 +1347,8 @@ Try without installing:
 
 Create a local documentation project and install the authoring and format skills.
 Run without arguments in a terminal to answer a short set of setup questions.
+With --existing, adopt a folder that already holds a documentation site: the
+generator is detected from its configuration files and no page is changed.
 
 Options:
   --title <title>          Documentation site title
@@ -1212,6 +1356,8 @@ Options:
   --spec <name=file|url>   Add an OpenAPI specification as API evidence; may be repeated
   --reference <url>        Add a documentation design reference; may be repeated
   --generator <name>       Generator: ${GENERATOR_CATALOG.map((entry) => entry.id).join(', ')}
+  --existing               Adopt the existing documentation in [directory] (default: current folder)
+  --content-dir <path>     With --existing, the folder that holds the pages when detection is wrong
   --yes                    Never prompt; fail instead of asking
   --cwd <directory>        Resolve paths from this directory
 
@@ -1219,6 +1365,7 @@ Examples:
   doxloop init
   doxloop init my-docs --source product=../my-app
   doxloop init api-docs --spec https://example.com/openapi.json
+  doxloop init --existing ./website
 `
   }
   if (command === 'agent') {
@@ -1300,6 +1447,27 @@ configured design-reference origin; with no URLs, the configured reference
 pages are captured.
 
 Options:
+  --cwd <directory>        Run from this project directory
+`
+  }
+  if (command === 'pages') {
+    return `Usage:
+  doxloop pages list [--format text|json]
+  doxloop pages edit --path <page> [--path <page> ...] --request <instruction> [options]
+
+List documentation pages or ask the agent for an isolated, reviewable edit.
+
+Options:
+  --path <page>            Existing page to edit; may be repeated
+  --request <text>         Describe what should change
+  --allow-related          Allow navigation and page-related image changes
+  --screenshots            Capture application screenshots when configured
+  --run-id <id>            Use a caller-supplied proposal id
+  --agent <name>           codex, claude, or gemini
+  --model <name>           Model passed to the selected agent CLI
+  --reasoning <level>      Codex reasoning effort
+  --effort <level>         Claude effort
+  --format <text|json>     Page-list output format (default: text)
   --cwd <directory>        Run from this project directory
 `
   }
@@ -1497,30 +1665,51 @@ starts with the new-project setup wizard. Project files and credentials stay on
 this computer.
 
 Options:
-  --page <name>            Open overview, sources, authoring, proposals, publish, or settings
+  --page <name>            Open overview, sources, update, pages, review, deploy, or settings
+  --project <directory>    Open this documentation project instead of the current folder
   --port <port>            Local UI port (default: 4317)
   --no-open                Start the server without opening a browser
   --cwd <directory>        Run from this directory
 
 Examples:
   doxloop ui
-  doxloop ui --page quality
+  doxloop ui --page review
+  doxloop ui --project ~/work/product-docs
   doxloop ui --no-open --port 4400
 `
   }
   if (command === 'deploy') {
     return `Usage: doxloop deploy [options]
 
-Validate and publish documentation through the public Doxbrix HTTP API.
+Validate and publish documentation to Doxbrix or a configured static host.
 
 Options:
   --dry-run                Validate and summarize without uploading
+  --target <target>        doxbrix, github-pages, netlify, or vercel
   --public                 Deploy publicly after an explicit confirmation
   --name <name>            Hosted project name
   --slug <slug>            Hosted project slug
   --api-url <url>          Override the Doxbrix API base URL
+  --site-id <id>           Netlify site ID
+  --project-id <id>        Vercel project ID or name
+  --team-id <id>           Optional Vercel team ID
+  --branch <name>          GitHub Pages branch (default: gh-pages)
+  --base-path <path>       Static site mount path, such as /repository
   --yes                    Use saved settings without prompting
   --cwd <directory>        Run from this project directory
+`
+  }
+  if (command === 'export') {
+    return `Usage: doxloop export --out <directory> [options]
+
+Build a portable static site for any configured generator.
+
+Options:
+  --out <directory>       Write the static site to this directory
+  --zip                   Also write <directory>.zip
+  --base-path <path>      Host below an origin path, such as /repository
+  --site-url <url>        Public URL used by the sitemap and canonical metadata
+  --cwd <directory>       Run from this project directory
 `
   }
   return `Doxloop ${VERSION}
@@ -1539,6 +1728,7 @@ Author:
   agent      Set up project-local agent skills
   generator  Install and inspect generator packages
   capture    Capture rendered design-reference evidence
+  pages      List pages or ask the agent for a scoped page edit
 
 Maintain:
   check      Report documentation stale since the last source change
@@ -1550,6 +1740,7 @@ Visual:
 
 Verify:
   doctor     Check runtime, source, agent, generator, skills, and documentation
+  audit      Inspect existing docs without an agent; optionally backfill unverified evidence
   quality    Run the versioned release-quality contract
   evaluate   Score generation/update quality and regressions
   status     Summarize the documentation project
@@ -1563,6 +1754,7 @@ Publish:
   logout     Remove the local token
   whoami     Show the current Doxbrix account
   deploy     Publish through the public Doxbrix HTTP API
+  export     Build a self-hostable static folder or zip archive
 
 Global options:
   --cwd <directory>  Run as if started in this directory

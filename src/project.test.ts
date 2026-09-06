@@ -444,6 +444,7 @@ describe('project scaffolding', () => {
               startPath: '/settings/team',
               workflow: 'Use the signed-in demo workspace and synthetic team members only.',
             },
+            authentication: { loginPath: '/login' },
           },
         },
         null,
@@ -463,7 +464,12 @@ describe('project scaffolding', () => {
         startPath: '/settings/team',
         workflow: 'Use the signed-in demo workspace and synthetic team members only.',
       },
+      authentication: { loginPath: '/login' },
     })
+
+    // The sign-in route is a path on the application, never a foreign URL or a fragment.
+    await writeFile(projectPath, `${JSON.stringify({ ...project, application: { baseUrl: 'http://localhost:3000', authentication: { loginPath: '//evil.example/login' } } })}\n`)
+    await expect(loadProject(root)).rejects.toThrow('unsupported format')
   })
 
   test('rejects unsafe application screenshot configuration', async () => {
@@ -605,7 +611,7 @@ describe('sync configuration', () => {
       on: ['every@1h'],
       watch: ['src/**'],
       ignore: ['**/*.test.ts'],
-      budget: { maxRunsPerDay: 8, maxMinutes: 15 },
+      budget: { maxRunsPerDay: 8, maxMinutes: 15, maxUsd: 12.5 },
     })
 
     expect((await loadProject(root)).sync).toEqual({
@@ -614,7 +620,7 @@ describe('sync configuration', () => {
       on: ['every@1h'],
       watch: ['src/**'],
       ignore: ['**/*.test.ts'],
-      budget: { maxRunsPerDay: 8, maxMinutes: 15 },
+      budget: { maxRunsPerDay: 8, maxMinutes: 15, maxUsd: 12.5 },
     })
   })
 
@@ -626,6 +632,8 @@ describe('sync configuration', () => {
     ['an empty branch', { branch: '  ' }],
     ['a non-string watch pattern', { watch: [3] }],
     ['a zero run budget', { budget: { maxRunsPerDay: 0 } }],
+    ['a negative spending cap', { budget: { maxUsd: -1 } }],
+    ['a textual spending cap', { budget: { maxUsd: '10' } }],
     ['a non-object sync block', ['propose']],
   ])('rejects %s', async (_label, sync) => {
     const { root, projectPath } = await scaffold()

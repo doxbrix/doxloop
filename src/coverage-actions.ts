@@ -1,3 +1,4 @@
+import { withProjectLock } from './project-lock.js'
 import { writeCoverageResolution } from './coverage-resolutions.js'
 import { DoxloopError } from './errors.js'
 import { readEvidenceMap, writeEvidenceMap } from './evidence.js'
@@ -10,6 +11,9 @@ export async function resolveCoverageItem(
   root: string,
   input: { id: string; action: CoverageResolutionAction; page?: string; reason?: string },
 ): Promise<void> {
+  return withProjectLock(root, 'write', () => resolveCoverageItemLocked(root, input))
+}
+async function resolveCoverageItemLocked(root: string, input: { id: string; action: CoverageResolutionAction; page?: string; reason?: string }): Promise<void> {
   const report = await buildSourceIntelligence(root)
   const item = report.coverage.metrics.flatMap((metric) => metric.items).find((candidate) => candidate.id === input.id)
   if (!item) throw new DoxloopError('The requested coverage item no longer exists. Refresh coverage and try again.')
@@ -24,6 +28,7 @@ export async function resolveCoverageItem(
     return
   }
   if (input.action === 'exclude') {
+    if (item.surface === 'verified-pages') throw new DoxloopError('Page verification cannot be excluded. Reverify the page or decide later.')
     if (item.surface === 'reader-journeys') throw new DoxloopError('Remove a reader journey from priority outcomes instead of excluding it as a product surface.')
     if (!reason) throw new DoxloopError('Explain why this item is not part of the supported public surface.')
     await writeCoverageResolution(root, item.id, { disposition: 'excluded', reason })

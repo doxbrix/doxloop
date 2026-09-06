@@ -40,6 +40,25 @@ describe('argument parsing', () => {
     expect(args.positionals).toEqual([])
   })
 
+  test('keeps repeated page paths and treats related edits as boolean', () => {
+    const args = parseArgs([
+      'pages',
+      'edit',
+      '--path',
+      'index.mdx',
+      '--path',
+      'guides/install.mdx',
+      '--allow-related',
+      '--request',
+      'Add clearer examples.',
+    ])
+
+    expect(args.positionals).toEqual(['edit'])
+    expect(args.flags.get('path')).toEqual(['index.mdx', 'guides/install.mdx'])
+    expect(booleanFlag(args, 'allow-related')).toBe(true)
+    expect(args.flags.get('request')).toEqual(['Add clearer examples.'])
+  })
+
   test('rejects options outside a command schema', () => {
     const args = parseArgs(['test', '--formt', 'json'])
 

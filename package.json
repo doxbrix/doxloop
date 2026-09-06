@@ -26,7 +26,10 @@
     "README.md",
     "CHANGELOG.md",
     "SECURITY.md",
-    "LICENSE"
+    "LICENSE",
+    "!dist/**/*.map",
+    "!assets/marketing/**",
+    "!assets/social/**"
   ],
   "exports": {
     "./generator-api": {
@@ -48,8 +51,10 @@
     "build:generators": "pnpm --filter './packages/*' run build",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.ui.json && pnpm --filter './packages/*' run typecheck",
-    "pretest": "pnpm run build",
+    "build:test": "tsc -p tsconfig.json && pnpm run build:generators",
+    "pretest": "pnpm run build:test",
     "test": "vitest run",
+    "test:generator": "node scripts/ci-generator-smoke.mjs",
     "test:screenshot": "node scripts/test-auto-screenshot.mjs",
     "test:e2e": "playwright test",
     "eval:agents": "pnpm run build && node scripts/run-authoring-evals.mjs",
@@ -57,7 +62,9 @@
     "release:local": "node scripts/release-local.mjs",
     "validate:skill": "node scripts/validate-skills.mjs",
     "check:boundary": "node scripts/check-boundary.mjs",
-    "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary"
+    "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary",
+    "test:existing-sites": "node scripts/ci-existing-sites.mjs",
+    "test:python-boundary": "node scripts/ci-python-sandbox.mjs"
   },
   "dependencies": {
     "@playwright/mcp": "0.0.79",
@@ -99,10 +106,13 @@
     "node": ">=22.13.0"
   },
   "packageManager": "pnpm@10.33.0",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
-  "keywords": [],
-  "author": ""
+  "keywords": [
+    "documentation",
+    "documentation-maintenance",
+    "cli",
+    "markdown",
+    "docusaurus",
+    "mkdocs"
+  ],
+  "author": "Doxbrix"
 }

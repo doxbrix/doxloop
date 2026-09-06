@@ -10,8 +10,10 @@ import {
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
 import {
+  contentRelativePages,
   ensureNodeDependencies,
   isRecord,
+  navigationUnverifiedIssue,
   openBrowser,
   pathExists,
   readPackageJson,
@@ -28,6 +30,7 @@ const PACKAGE_VERSION = (
     version: string
   }
 ).version
+const ASTRO_CONFIG_FILES = ['astro.config.mjs', 'astro.config.ts', 'astro.config.js', 'astro.config.mts']
 
 const adapter = defineGenerator({
   apiVersion: 1,
@@ -210,24 +213,30 @@ async function startStarlightPreview(options: GeneratorPreviewOptions): Promise<
   const url = `http://${shownHost(options.host)}:${options.port}`
   process.stdout.write(`Starting Starlight preview at ${url}\n`)
   if (options.open) setTimeout(() => void openBrowser(url), 800)
+  // Astro 7 daemonises `astro dev` when it detects a coding agent in the
+  // environment, which would end this command at once and leave a server
+  // Doxloop cannot stop. Its own guard against double daemonising keeps the
+  // server in the foreground.
   await runPreviewProcess(
     invocation.command,
     invocation.args,
     options.root,
     'Starlight',
+    { ...process.env, ASTRO_DEV_BACKGROUND: '1' },
   )
 }
 
+/**
+ * Reads the sidebar Starlight would build: no `sidebar` option lists every
+ * page, an `autogenerate` group covers a whole directory, and `slug` or
+ * `link` entries name single pages. A sidebar assembled by code or a plugin is
+ * reported as unverified rather than guessed at.
+ */
 async function validateStarlight(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  for (const file of [
-    'package.json',
-    'astro.config.mjs',
-    'src/content.config.ts',
-    'tsconfig.json',
-  ]) {
+  for (const file of ['package.json', 'src/content.config.ts']) {
     if (!(await pathExists(join(context.root, file)))) {
       issues.push({
         severity: 'error',
@@ -237,32 +246,132 @@ async function validateStarlight(
       })
     }
   }
-  const configPath = join(context.root, 'astro.config.mjs')
-  if (!(await pathExists(configPath))) return issues
-  const source = await readFile(configPath, 'utf8')
-  const navigation = new Set<string>()
-  for (const match of source.matchAll(/\bslug\s*:\s*["']([^"']+)["']/g)) {
-    if (match[1]) navigation.add(match[1])
+  let configFile: string | undefined
+  for (const candidate of ASTRO_CONFIG_FILES) {
+    if (await pathExists(join(context.root, candidate))) {
+      configFile = candidate
+      break
+    }
   }
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
+  if (!configFile) {
+    issues.push({
+      severity: 'error',
+      code: 'missing-generator-file',
+      message: 'Starlight project is missing astro.config.mjs.',
+      file: 'astro.config.mjs',
+    })
+    return issues
+  }
+  const source = await readFile(join(context.root, configFile), 'utf8')
+  const sidebar = readStarlightSidebar(source)
+  if (sidebar.unverified) {
+    issues.push(navigationUnverifiedIssue('Starlight', configFile, sidebar.unverified))
+    return issues
+  }
+  const pages = contentRelativePages(context.contentRoot, context.pages)
+  const slugs = new Map<string, string>()
+  for (const page of pages) slugs.set(starlightSlug(page), page)
+  if (sidebar.everything) return issues
+  for (const slug of sidebar.slugs) {
+    if (!slugs.has(slug)) {
       issues.push({
         severity: 'error',
         code: 'missing-page',
-        message: `Starlight sidebar references missing page "${id}".`,
-        file: 'astro.config.mjs',
+        message: `Starlight sidebar references missing page "${slug || 'index'}".`,
+        file: configFile,
       })
     }
   }
-  for (const id of context.pageIds) {
-    if (!navigation.has(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'unnavigated-page',
-        message: `Page "${id}" is not in the Starlight sidebar.`,
-        file: `${id}.md`,
-      })
-    }
+  for (const [slug, page] of slugs) {
+    if (sidebar.slugs.has(slug)) continue
+    if (sidebar.directories.some((directory) => slug === directory || slug.startsWith(`${directory}/`))) continue
+    const raw = await readFile(join(context.contentRoot, page), 'utf8')
+    if (isStarlightPageHidden(raw)) continue
+    issues.push({
+      severity: 'error',
+      code: 'unnavigated-page',
+      message: `Page "${slug || 'index'}" is not in the Starlight sidebar.`,
+      file: `${context.project.contentDir}/${page}`,
+    })
   }
   return issues
+}
+
+export function readStarlightSidebar(source: string): {
+  everything: boolean
+  slugs: Set<string>
+  directories: string[]
+  unverified?: string
+} {
+  const slugs = new Set<string>()
+  const directories: string[] = []
+  const body = source.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm, '$1')
+  if (/[{,]\s*sidebar\s*(?:[,}]|$)/m.test(body)) {
+    return { everything: false, slugs, directories, unverified: 'the sidebar is built by code rather than listed in the configuration.' }
+  }
+  const sidebarIndex = body.search(/\bsidebar\s*:/)
+  if (sidebarIndex === -1) {
+    if (/\bplugins\s*:\s*\[\s*[^\]]/.test(body)) {
+      return { everything: false, slugs, directories, unverified: 'a Starlight plugin may change the sidebar.' }
+    }
+    return { everything: true, slugs, directories }
+  }
+  const afterKey = body.slice(sidebarIndex).replace(/^sidebar\s*:\s*/, '')
+  if (!afterKey.startsWith('[')) {
+    return { everything: false, slugs, directories, unverified: 'the sidebar is built by code rather than listed in the configuration.' }
+  }
+  const literal = balancedArray(afterKey)
+  if (literal === undefined || /\.\.\.|=>|\.map\(|\bfunction\b/.test(literal)) {
+    return { everything: false, slugs, directories, unverified: 'the sidebar is built by code rather than listed in the configuration.' }
+  }
+  for (const match of literal.matchAll(/\bslug\s*:\s*["']([^"']*)["']/g)) {
+    slugs.add(normaliseStarlightSlug(match[1] ?? ''))
+  }
+  for (const match of literal.matchAll(/\blink\s*:\s*["']\/([^"'#?]*)["']/g)) {
+    slugs.add(normaliseStarlightSlug(match[1] ?? ''))
+  }
+  for (const match of literal.matchAll(/\bautogenerate\s*:\s*\{[^}]*\bdirectory\s*:\s*["']([^"']+)["']/g)) {
+    directories.push(normaliseStarlightSlug(match[1] ?? ''))
+  }
+  if (/\bplugins\s*:\s*\[\s*[^\]]/.test(body)) {
+    return { everything: false, slugs, directories, unverified: 'a Starlight plugin may change the sidebar.' }
+  }
+  return { everything: false, slugs, directories }
+}
+
+function balancedArray(source: string): string | undefined {
+  let depth = 0
+  let quote: string | undefined
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!
+    if (quote) {
+      if (character === '\\') index += 1
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character
+      continue
+    }
+    if (character === '[' || character === '{' || character === '(') depth += 1
+    if (character === ']' || character === '}' || character === ')') {
+      depth -= 1
+      if (depth === 0) return source.slice(0, index + 1)
+    }
+  }
+  return undefined
+}
+
+function normaliseStarlightSlug(value: string): string {
+  const clean = value.replace(/^\/+|\/+$/g, '')
+  return clean === 'index' ? '' : clean.replace(/\/index$/, '')
+}
+
+export function starlightSlug(page: string): string {
+  return normaliseStarlightSlug(page.replace(/\.(?:md|mdx)$/i, ''))
+}
+
+function isStarlightPageHidden(raw: string): boolean {
+  const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? ''
+  return /^template\s*:\s*splash\s*$/m.test(frontmatter) || /^\s+hidden\s*:\s*true\s*$/m.test(frontmatter)
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { settledPlanJobs } from './job-transitions'
+import { settledPageEditJobs, settledPlanJobs } from './job-transitions'
 import type { UiJob } from './types'
 
 function job(id: string, type: string, status: UiJob['status']): UiJob {
@@ -19,6 +19,24 @@ describe('plan job transitions', () => {
     expect(settledPlanJobs(
       [job('handled', 'plan:revise', 'succeeded'), job('author', 'author:update', 'succeeded')],
       new Set(['handled', 'author']),
+      new Set(['handled']),
+    )).toEqual([])
+  })
+})
+
+describe('page edit job transitions', () => {
+  test.each(['succeeded', 'failed', 'cancelled'] as const)(
+    'refreshes an edit after it %s',
+    (status) => {
+      const settled = job('edit-job', 'page-edit:run-page-edit', status)
+      expect(settledPageEditJobs([settled], new Set(['edit-job']), new Set())).toEqual([settled])
+    },
+  )
+
+  test('ignores unrelated and already handled jobs', () => {
+    expect(settledPageEditJobs(
+      [job('handled', 'page-edit:run-one', 'succeeded'), job('revision', 'proposal:revise:run-two', 'succeeded')],
+      new Set(['handled', 'revision']),
       new Set(['handled']),
     )).toEqual([])
   })

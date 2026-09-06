@@ -79,3 +79,26 @@ full Tabs component is unnecessary.
 
 Never assume a custom React component exists. Inspect `src/components` and
 existing imports before using one.
+
+## Images and assets
+
+Keep images under `static/img/` and reference them root-relative:
+
+```markdown
+![Settings page with the API keys tab selected](/img/settings-api-keys.png)
+```
+
+## Diagrams
+
+The scaffold enables `@docusaurus/theme-mermaid` with `markdown.mermaid: true`
+in `docusaurus.config.js`, so a `mermaid` fence renders as a diagram:
+
+````markdown
+```mermaid
+flowchart LR
+  Client --> API --> Database
+```
+````
+
+In an adopted project, confirm the theme is listed under `themes` before using
+the fence; otherwise add it, since the build ignores the fence silently.

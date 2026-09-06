@@ -30,6 +30,19 @@ const proposal = {
   changes: [{ id: 'change-1', title: 'Events API', path: 'reference/events.mdx', category: 'page', kind: 'modified', hunks: [{ id: 'hunk-1' }], rationale: { reason: 'The accepted response changed.', evidence: [{ source: 'pulse-api', operation: 'POST /events', revision: '1234567890', available: true }], affectedInterfaces: ['POST /events'], claims: { added: [], changed: ['The accepted response is 202.'], removed: [] }, validation: { errors: 0, warnings: 0 }, confidence: 'verified', assumptions: [], authorship: 'agent' } }],
 }
 
+const documentationPages = [
+  { path: 'index.mdx', title: 'Overview', description: 'Start here.', section: 'Getting started', route: '/', wordCount: 126, updatedAt: '2026-08-26T08:00:00.000Z', evidence: 'verified', inNavigation: true },
+  { path: 'reference/events.mdx', title: 'Events API', description: 'Send events.', section: 'Reference', route: '/reference/events', wordCount: 284, evidence: 'needs-review', inNavigation: true },
+]
+
+const editProposal = {
+  ...proposal,
+  id: 'run-page-edit',
+  trigger: 'edit',
+  summary: 'Clarified the Events API example.',
+  editRequest: { instruction: 'Add a clearer curl example.', paths: ['reference/events.mdx'], allowRelated: false, followUps: [] },
+}
+
 const readyPlan = {
   schemaVersion: 2, id: 'plan-test', version: 1, mode: 'create', status: 'ready-for-review', scope: 'comprehensive',
   createdAt: '2026-08-26T08:00:00.000Z', updatedAt: '2026-08-26T08:01:00.000Z', request: 'Create complete API documentation', sourceSnapshot: 'source-snapshot',
@@ -49,10 +62,16 @@ async function mockWorkspace(page, overrides = {}, apiOverrides = {}) {
     const url = new URL(route.request().url())
     const method = route.request().method()
     calls.push(`${method} ${url.pathname}`)
-    const custom = await apiOverrides.handle?.({ method, path: url.pathname })
+    const custom = await apiOverrides.handle?.({ method, path: url.pathname, request: route.request(), url })
     if (custom !== undefined) return route.fulfill({ json: custom })
     if (url.pathname === '/api/state') return route.fulfill({ json: { ...state, ...overrides, ...(apiOverrides.state?.() ?? {}) } })
     if (url.pathname === '/api/source-intelligence') return route.fulfill({ json: apiOverrides.intelligence ?? intelligence })
+    if (['/api/comments', '/api/pages/search', '/api/direct-edits'].includes(url.pathname)) return route.fulfill({ json: [] })
+    if (url.pathname === '/api/collections') return route.fulfill({ json: [{ directory: '', version: 'current', locale: 'default', native: true }] })
+    if (url.pathname === '/api/authoring-estimate') return route.fulfill({ json: { samples: 0, message: 'No comparable completed runs yet.', cost: 'Provider billing applies.' } })
+    if (url.pathname === '/api/pages') return route.fulfill({ json: documentationPages })
+    if (url.pathname === '/api/preview/start') return route.fulfill({ json: { job: { id: 'preview-job', status: 'running' }, url: 'http://127.0.0.1:45991' } })
+    if (/^\/api\/proposals\/[a-z0-9-]+\/preview\/start$/.test(url.pathname)) return route.fulfill({ json: { job: { id: 'proposal-preview-job', status: 'running' }, url: 'http://127.0.0.1:45992' } })
     if (url.pathname.endsWith('/diff')) return route.fulfill({ json: { binary: false, added: 1, removed: 1, rows: [{ type: 'delete', oldNumber: 4, html: 'Returns 200', hunkId: 'hunk-1', hunkState: 'pending' }, { type: 'insert', newNumber: 4, html: 'Returns 202', hunkId: 'hunk-1', hunkState: 'pending' }] } })
     if (url.pathname === '/api/jobs') return route.fulfill({ json: apiOverrides.state?.().jobs ?? overrides.jobs ?? [] })
     if (url.pathname === '/api/jobs/stream') return route.abort()
@@ -62,11 +81,19 @@ async function mockWorkspace(page, overrides = {}, apiOverrides = {}) {
 }
 
 test.describe('stable workspace routes', () => {
-  for (const [route, heading] of [['overview', 'Your documentation loop'], ['sources', 'Sources'], ['authoring', 'Update documentation'], ['proposals', 'Review Changes'], ['publish', 'Deploy'], ['settings', 'Settings']]) {
+  for (const [route, heading] of [['overview', 'Your documentation loop'], ['sources', 'Sources'], ['update', 'Update documentation'], ['pages', 'Pages'], ['review', 'Review'], ['deploy', 'Deploy'], ['settings', 'Settings']]) {
     test(`${route} has a direct URL`, async ({ page }) => {
       await mockWorkspace(page)
       await page.goto(`/${route}`)
       await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible()
+      await expect(page).toHaveURL(new RegExp(`/${route}$`))
+    })
+  }
+
+  for (const [legacy, route] of [['authoring', 'update'], ['proposals', 'review'], ['publish', 'deploy']]) {
+    test(`/${legacy} redirects to /${route}`, async ({ page }) => {
+      await mockWorkspace(page)
+      await page.goto(`/${legacy}`)
       await expect(page).toHaveURL(new RegExp(`/${route}$`))
     })
   }
@@ -76,17 +103,120 @@ test.describe('stable workspace routes', () => {
     await page.goto('/unsupported')
     await expect(page.getByRole('heading', { name: 'Workspace page not found' })).toBeVisible()
     await page.getByRole('button', { name: 'Open documentation update' }).click()
-    await expect(page).toHaveURL(/\/authoring$/)
+    await expect(page).toHaveURL(/\/update$/)
     await page.goBack()
     await expect(page.getByRole('heading', { name: 'Workspace page not found' })).toBeVisible()
   })
+
+  test('the selected proposal, file, and settings section survive a refresh', async ({ page }) => {
+    await mockWorkspace(page, { runs: [proposal] })
+    await page.goto('/review')
+    await page.getByText('Document event ingestion').click()
+    await expect(page).toHaveURL(/\/review\?proposal=proposal-1$/)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Review proposal' })).toBeVisible()
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: 'Review', exact: true })).toBeVisible()
+
+    await page.goto('/settings?section=capture')
+    await expect(page.getByRole('heading', { name: 'Application screenshots' })).toBeVisible()
+    await page.getByRole('button', { name: /Audience and voice/ }).click()
+    await expect(page).toHaveURL(/\/settings\?section=experience$/)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Audience and voice', exact: true })).toBeVisible()
+  })
+})
+
+test('review opens on the first documentation page with supporting files folded', async ({ page }) => {
+  const mixed = {
+    ...proposal,
+    changes: [
+      { ...proposal.changes[0], id: 'change-1', title: 'evidence-map.json', path: '.doxloop/evidence-map.json', category: 'evidence' },
+      { ...proposal.changes[0], id: 'change-2', title: 'SKILL.md', path: '.claude/skills/doxloop-authoring/SKILL.md', category: 'configuration' },
+      { ...proposal.changes[0], id: 'change-3', title: 'docs.json', path: 'docs.json', category: 'navigation' },
+      { ...proposal.changes[0], id: 'change-4' },
+    ],
+  }
+  await mockWorkspace(page, { runs: [mixed] })
+  await page.goto('/review?proposal=proposal-1')
+  await expect(page.getByRole('heading', { name: 'Review proposal' })).toBeVisible()
+  await expect(page.getByTitle('Review Events API')).toBeVisible()
+  await expect(page).toHaveURL(/\/review\?proposal=proposal-1$/)
+  await page.getByRole('button', { name: /events\.mdx/ }).click()
+  const menu = page.getByRole('dialog', { name: 'Changed files' })
+  await expect(menu.getByText('Documentation', { exact: true })).toBeVisible()
+  await expect(menu.getByText('docs.json')).toBeVisible()
+  await expect(menu.getByText('evidence-map.json')).toHaveCount(0)
+  await menu.getByRole('button', { name: 'Show 2 supporting files' }).click()
+  await expect(menu.getByText('evidence-map.json')).toBeVisible()
+  await menu.getByRole('button', { name: 'docs.json' }).click()
+  await expect(page).toHaveURL(/\/review\?proposal=proposal-1&file=change-3$/)
+})
+
+test('a file edited while the agent ran is grouped and needs confirmation before Accept all', async ({ page }) => {
+  let acceptBody
+  const concurrent = { ...proposal, changes: [{ ...proposal.changes[0], changedDuringRun: true }] }
+  await mockWorkspace(page, { runs: [concurrent] }, {
+    handle: async ({ method, path, request }) => {
+      if (method === 'POST' && path === '/api/proposals/proposal-1/accept') { acceptBody = request.postDataJSON(); return { ...concurrent, status: 'applied' } }
+    },
+  })
+  await page.goto('/review?proposal=proposal-1')
+  await expect(page.getByText('This file was edited in the project while the agent ran.')).toBeVisible()
+  await page.getByRole('button', { name: /events\.mdx/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Changed files' }).getByText('Changed while the agent ran')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Accept all' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Apply these documentation changes?' })
+  await expect(dialog.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
+  await dialog.getByText('Replace my edits to these files').click()
+  await dialog.getByRole('button', { name: 'Apply changes' }).click()
+  await expect.poll(() => acceptBody).toMatchObject({ scope: 'all', confirmChangedDuringRun: true })
+})
+
+test('the ready dialog opens the finished proposal', async ({ page }) => {
+  const running = { id: 'update-job', type: 'author:update', status: 'running', startedAt: '2026-08-26T08:00:00.000Z', lines: [], stages: [] }
+  let jobs = [running]
+  let runs = []
+  await mockWorkspace(page, {}, {
+    state: () => ({ jobs, runs }),
+    handle: async ({ method, path }) => {
+      if (method === 'GET' && path === '/api/proposals') return runs
+    },
+  })
+  await page.goto('/update')
+  jobs = [{ ...running, status: 'succeeded', finishedAt: '2026-08-26T08:05:00.000Z' }]
+  runs = [proposal]
+  const dialog = page.getByRole('dialog', { name: 'Documentation changes are ready' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Review changes', exact: true }).click()
+  await expect(page).toHaveURL(/\/review\?proposal=proposal-1$/)
+  await expect(page.getByRole('heading', { name: 'Review proposal' })).toBeVisible()
+})
+
+test('a validation failure degrades to a notice instead of a blank workspace', async ({ page }) => {
+  await mockWorkspace(page, { validation: { error: 'docs.json is not valid JSON' } })
+  await page.goto('/overview')
+  await expect(page.getByRole('heading', { name: 'Your documentation loop' })).toBeVisible()
+  await expect(page.getByText('Validation unavailable')).toBeVisible()
+  await expect(page.getByText(/docs\.json is not valid JSON/)).toBeVisible()
+  await expect(page.getByText(/is signed in/)).toBeVisible()
+})
+
+test('Sources shows stale pages from drift', async ({ page }) => {
+  await mockWorkspace(page, { drift: { status: 'stale', trackedPages: 2, pages: [{ page: 'reference/events.mdx', reasons: [{ source: 'pulse-api', paths: ['openapi.json'] }] }], sources: [{ name: 'pulse-api', changedPaths: ['openapi.json'], filteredPaths: 0 }] } })
+  await page.goto('/sources')
+  await expect(page.getByText('1 page behind the sources')).toBeVisible()
+  await expect(page.getByText('pulse-api: 1 changed path')).toBeVisible()
+  await page.getByRole('button', { name: 'Plan an update' }).click()
+  await expect(page).toHaveURL(/\/update$/)
 })
 
 test('workspace pages stay fluid, readable, and expose usable buttons', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 })
   await mockWorkspace(page)
 
-  for (const route of ['overview', 'sources', 'authoring', 'proposals', 'publish', 'settings']) {
+  for (const route of ['overview', 'sources', 'update', 'pages', 'review', 'deploy', 'settings']) {
     await page.goto(`/${route}`)
 
     const workspaceWidth = await page.locator('.workspace-main').evaluate((element) => element.getBoundingClientRect().width)
@@ -110,22 +240,102 @@ test('workspace pages stay fluid, readable, and expose usable buttons', async ({
     expect(blackText, `${route} contains black body copy`).toEqual([])
   }
 
-  await page.goto('/authoring')
-  await page.getByRole('button', { name: /Planning agent:/ }).click()
+  await page.goto('/update')
+  await page.getByRole('button', { name: /Agent:/ }).click()
   const authoringPanelHeight = await page.locator('.authoring-request').evaluate((element) => element.getBoundingClientRect().height)
-  expect(authoringPanelHeight).toBeLessThan(520)
+  expect(authoringPanelHeight).toBeLessThan(720)
   const optionBoxes = await page.locator('.authoring-options > *').evaluateAll((elements) => elements.map((element) => {
     const box = element.getBoundingClientRect()
     return { x: box.x, y: box.y, width: box.width }
   }))
-  expect(optionBoxes).toHaveLength(5)
+  expect(optionBoxes).toHaveLength(4)
   expect(Math.max(...optionBoxes.map((box) => box.y)) - Math.min(...optionBoxes.map((box) => box.y))).toBeLessThan(2)
   expect(Math.min(...optionBoxes.map((box) => box.width))).toBeGreaterThan(180)
 
   await page.goto('/sources')
+  await expect(page.locator('.source-coverage-row-heading').first()).toBeVisible()
   const coverageHeadings = await page.locator('.source-coverage-row-heading').evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))
   expect(coverageHeadings.length).toBeGreaterThan(0)
   expect(Math.min(...coverageHeadings)).toBeGreaterThanOrEqual(18)
+})
+
+test('Pages selects multiple pages and submits one scoped edit request', async ({ page }) => {
+  let editBody
+  const calls = await mockWorkspace(page, {}, {
+    handle: async ({ method, path, request }) => {
+      if (method === 'POST' && path === '/api/pages/edit') {
+        editBody = request.postDataJSON()
+        return { job: { id: 'edit-job', type: 'page-edit:run-page-edit', status: 'running', startedAt: '2026-08-26T08:00:00.000Z', lines: [], stages: [] } }
+      }
+    },
+  })
+  await page.goto('/pages')
+  await expect(page.getByRole('checkbox', { name: 'Select Overview' })).toBeChecked()
+  await page.getByRole('checkbox', { name: 'Select Events API' }).check()
+  await expect(page.getByLabel('What should change on these 2 pages?')).toBeVisible()
+  await expect(page.getByLabel('Pages selected for this update')).toContainText('2 pages in this edit')
+  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page')
+  await page.getByLabel('What should change on these 2 pages?').fill('Add a clearer curl example.')
+  await page.getByText('Also allow related changes', { exact: true }).click()
+  await page.getByRole('button', { name: 'Ask the agent to edit' }).click()
+
+  await expect.poll(() => calls.includes('POST /api/pages/edit')).toBe(true)
+  expect(editBody).toMatchObject({
+    paths: ['reference/events.mdx', 'index.mdx'],
+    instruction: 'Add a clearer curl example.',
+    allowRelated: true,
+    screenshots: 'disabled',
+  })
+})
+
+test('Pages selects a single page on click and previews it', async ({ page }) => {
+  await mockWorkspace(page)
+  await page.goto('/pages')
+  await expect(page.getByRole('checkbox', { name: 'Select Overview' })).toBeChecked()
+  await page.getByRole('option', { name: /Events API/ }).click()
+  await expect(page.getByRole('checkbox', { name: 'Select Overview' })).not.toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'Select Events API' })).toBeChecked()
+  await expect(page.getByLabel('What should change on this page?')).toBeVisible()
+  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page')
+  await expect(page).toHaveURL(/\/pages\?path=reference%2Fevents\.mdx$/)
+})
+
+test('Pages shows a running edit with live output and Stop', async ({ page }) => {
+  const running = {
+    ...editProposal,
+    status: 'generating',
+    changes: [],
+  }
+  const job = { id: 'edit-job', type: 'page-edit:run-page-edit', agent: 'codex', status: 'running', startedAt: '2026-08-26T08:00:00.000Z', lines: ['Reading reference/events.mdx'], stages: [] }
+  const calls = await mockWorkspace(page, { runs: [running], jobs: [job] })
+  await page.goto('/pages?run=run-page-edit')
+
+  await expect(page.getByRole('heading', { name: 'Editing Events API' })).toBeVisible()
+  await expect(page.getByText('Reading reference/events.mdx')).toBeVisible()
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await expect.poll(() => calls.includes('POST /api/jobs/edit-job/cancel')).toBe(true)
+})
+
+test('Pages reviews, accepts, and undoes an agent edit', async ({ page }) => {
+  const calls = await mockWorkspace(page, { runs: [editProposal] }, {
+    handle: async ({ method, path }) => {
+      if (method === 'GET' && path === '/api/proposals') return [editProposal]
+      if (method === 'POST' && path === '/api/proposals/run-page-edit/accept') return { ...editProposal, status: 'applied', undo: { status: 'available' } }
+      if (method === 'POST' && path === '/api/proposals/run-page-edit/undo') return { ...editProposal, status: 'undone', undo: { status: 'undone' } }
+    },
+  })
+  await page.goto('/pages?run=run-page-edit')
+
+  await expect(page.getByRole('heading', { name: 'Review this edit' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Accept', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reject', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Refine', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Accept', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('Page updated')
+  await page.getByRole('status').getByRole('button', { name: 'Undo' }).click()
+
+  await expect.poll(() => calls.includes('POST /api/proposals/run-page-edit/accept')).toBe(true)
+  await expect.poll(() => calls.includes('POST /api/proposals/run-page-edit/undo')).toBe(true)
 })
 
 test('source health refresh and project-wide monitoring expose both budgets', async ({ page }) => {
@@ -150,7 +360,7 @@ test('source health refresh and project-wide monitoring expose both budgets', as
 
 test('proposal review switches rendered/source views and accepts hunk, file, or complete scope', async ({ page }) => {
   const calls = await mockWorkspace(page, { runs: [proposal] })
-  await page.goto('/proposals')
+  await page.goto('/review')
   await page.getByText('Document event ingestion').click()
   await expect(page.getByRole('heading', { name: 'Review proposal' })).toBeVisible()
   await expect(page.getByTitle('Review Events API')).toBeVisible()
@@ -170,7 +380,7 @@ test('proposal review switches rendered/source views and accepts hunk, file, or 
 test('running work exposes structured stages and a cancel action', async ({ page }) => {
   const job = { id: 'job-1', type: 'plan:propose', agent: 'codex', status: 'running', startedAt: '2026-08-26T08:00:00.000Z', lines: ['Inspecting OpenAPI source'], stages: [{ id: 'sources', label: 'Inspect sources', status: 'running' }] }
   const calls = await mockWorkspace(page, { jobs: [job], receipt: null })
-  await page.goto('/authoring')
+  await page.goto('/update')
   await expect(page.getByRole('list', { name: 'Documentation workflow stages' })).toContainText('Inspect sources')
   await page.getByRole('button', { name: 'Stop update' }).click()
   await expect.poll(() => calls.includes('POST /api/jobs/job-1/cancel')).toBe(true)
@@ -187,14 +397,16 @@ test('create uses the complete plan-review-approval-generation workflow', async 
       if (method === 'GET' && path === '/api/plans/plan-test/versions') return []
     },
   })
-  await page.goto('/authoring')
+  await page.goto('/update')
   await expect(page.getByRole('heading', { name: 'Create documentation' })).toBeVisible()
   await page.getByPlaceholder(/Help developers install/).fill('Create complete event API documentation.')
   await page.getByRole('button', { name: /Comprehensive/ }).click()
   await page.getByRole('button', { name: 'Create documentation plan' }).click()
   await expect(page.getByRole('heading', { name: 'Review documentation structure' })).toBeVisible()
-  await expect(page.getByText('Quickstart', { exact: true })).toBeVisible()
-  await expect(page.getByText('Events API', { exact: true })).toBeVisible()
+  // The navigation panel lists the same pages, so scope to the structure list.
+  await expect(page.locator('.plan-tree-page').getByText('Quickstart', { exact: true })).toBeVisible()
+  await expect(page.locator('.plan-tree-page').getByText('Events API', { exact: true })).toBeVisible()
+  await expect(page.getByRole('tree', { name: 'Navigation' }).getByRole('treeitem')).toHaveCount(4)
   await page.getByRole('button', { name: 'Approve & generate 2 pages' }).click()
   await expect.poll(() => calls.includes('POST /api/plans/plan-test/approve')).toBe(true)
   await expect.poll(() => calls.includes('POST /api/plans/plan-test/generate')).toBe(true)
@@ -206,8 +418,8 @@ test('generated creation points to review instead of reopening the create form',
     documentationPlan: { ...readyPlan, status: 'generated', proposalId: proposal.id },
     runs: [proposal],
   })
-  await page.goto('/authoring')
-  await expect(page.getByRole('heading', { name: 'Documentation proposal', exact: true })).toBeVisible()
+  await page.goto('/update')
+  await expect(page.getByRole('heading', { name: 'Documentation plan', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Documentation proposal is ready' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Review generated files' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Create documentation plan' })).toHaveCount(0)
@@ -220,7 +432,7 @@ test('accepted plan-first creation becomes an update workflow without a legacy r
     documentationPlan: { ...readyPlan, status: 'generated', proposalId: proposal.id },
     runs: [{ ...proposal, status: 'applied' }],
   })
-  await page.goto('/authoring')
+  await page.goto('/update')
   await expect(page.getByRole('heading', { name: 'Update documentation' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Plan documentation update' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Create documentation plan' })).toHaveCount(0)
@@ -229,7 +441,7 @@ test('accepted plan-first creation becomes an update workflow without a legacy r
 test('an interrupted authoring job offers a durable stage retry', async ({ page }) => {
   const job = { id: 'deadbeef', type: 'plan:propose', agent: 'codex', status: 'failed', startedAt: '2026-08-26T08:00:00.000Z', finishedAt: '2026-08-26T08:01:00.000Z', lines: ['Doxloop recovered this interrupted job. Retry the stage when ready.'], stages: [{ id: 'sources', label: 'Inspect sources', status: 'failed' }], retryable: true, recovered: true }
   const calls = await mockWorkspace(page, { jobs: [job], receipt: null })
-  await page.goto('/authoring')
+  await page.goto('/update')
   await page.getByRole('button', { name: /Live activity/ }).click()
   await expect(page.getByRole('button', { name: 'Retry stage' })).toBeVisible()
   await page.getByRole('button', { name: 'Retry stage' }).click()
@@ -302,7 +514,7 @@ test('coverage gaps are selected before one batch update plan starts', async ({ 
 
 test('preview starts explicitly and first deployment requires a visibility decision', async ({ page }) => {
   const calls = await mockWorkspace(page, { account: { signedIn: true, apiUrl: 'https://app.doxbrix.com', user: { email: 'dev@example.com', name: 'Developer' } } })
-  await page.goto('/publish')
+  await page.goto('/deploy')
   await page.getByRole('button', { name: 'Preview docs' }).click()
   await expect.poll(() => calls.includes('POST /api/preview/start')).toBe(true)
   await page.getByRole('button', { name: 'Deploy to Doxbrix' }).click()
@@ -317,4 +529,229 @@ test('new-project setup presents the complete guided workflow', async ({ page })
   await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Setup navigation' }).getByRole('button')).toHaveCount(5)
   await expect(page.getByRole('button', { name: /Sources/ })).toBeDisabled()
+})
+
+test('the activity feed names every job type and can stop a running one', async ({ page }) => {
+  const jobs = [
+    { id: 'login-1', type: 'login', status: 'running', startedAt: '2026-08-26T08:05:00.000Z', lines: ['Open the browser to finish signing in.'], stages: [] },
+    { id: 'sync-1', type: 'sync', status: 'failed', startedAt: '2026-08-26T08:03:00.000Z', finishedAt: '2026-08-26T08:04:00.000Z', lines: ['doxloop: The configured source is unreachable.'], stages: [] },
+    { id: 'install-1', type: 'agent:install', agent: 'codex', status: 'succeeded', startedAt: '2026-08-26T08:00:00.000Z', finishedAt: '2026-08-26T08:01:00.000Z', lines: [], stages: [] },
+  ]
+  const calls = await mockWorkspace(page, { jobs })
+  await page.goto('/overview')
+  const feed = page.locator('.overview-activity-card')
+  await expect(feed).toContainText('Signing in to Doxbrix is running')
+  await expect(feed).toContainText('Checking sources for changes needs attention: The configured source is unreachable.')
+  await expect(feed).toContainText('Installing the agent completed successfully')
+  await feed.getByRole('button', { name: 'Stop' }).click()
+  await expect.poll(() => calls.includes('POST /api/jobs/login-1/cancel')).toBe(true)
+})
+
+test('running work shows pending stages and a pages-written counter', async ({ page }) => {
+  const job = { id: 'job-2', type: 'plan:generate', agent: 'claude', status: 'running', startedAt: '2026-08-26T08:00:00.000Z', lines: ['→ Writing guides/setup.mdx'], stages: [
+    { id: 'inspecting-sources', label: 'Confirming approved evidence', status: 'completed' },
+    { id: 'authoring-pages', label: 'Authoring approved pages', status: 'running', progress: { done: 3, total: 12 } },
+    { id: 'updating-navigation', label: 'Updating navigation and theme', status: 'pending' },
+    { id: 'validating', label: 'Validating generated documentation', status: 'pending' },
+  ] }
+  await mockWorkspace(page, { jobs: [job], receipt: null })
+  await page.goto('/update')
+  const stages = page.getByRole('list', { name: 'Documentation workflow stages' })
+  await expect(stages).toContainText('Authoring approved pages')
+  await expect(stages).toContainText('3 of 12')
+  await expect(stages.locator('li.pending')).toHaveCount(2)
+})
+
+test('a proposal revision shows its live run and a failure banner on Review', async ({ page }) => {
+  const running = { id: 'rev-1', type: 'proposal:revise:proposal-1', agent: 'codex', status: 'running', startedAt: '2026-08-26T08:10:00.000Z', lines: ['Revising reference/events.mdx'], stages: [] }
+  const calls = await mockWorkspace(page, { runs: [proposal], jobs: [running] })
+  await page.goto('/review')
+  await page.getByText('Document event ingestion').click()
+  await expect(page.getByText('Revising reference/events.mdx')).toBeVisible()
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await expect.poll(() => calls.includes('POST /api/jobs/rev-1/cancel')).toBe(true)
+
+  const failed = { ...running, status: 'failed', finishedAt: '2026-08-26T08:12:00.000Z', lines: ['Revising reference/events.mdx', 'doxloop: The revision changed files outside the selected scope.'] }
+  await mockWorkspace(page, { runs: [proposal], jobs: [failed] })
+  await page.goto('/review')
+  await page.getByText('Document event ingestion').click()
+  const banner = page.getByRole('alert').filter({ hasText: 'The agent could not complete this revision.' })
+  await expect(banner).toContainText('The revision changed files outside the selected scope.')
+  await banner.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(banner).toHaveCount(0)
+})
+
+test('a failed deployment keeps its progress panel and the sign-in wait state is explained', async ({ page }) => {
+  const finished = new Date(Date.now() - 60_000).toISOString()
+  const deploy = { id: 'deploy-1', type: 'deploy', status: 'failed', startedAt: finished, finishedAt: finished, lines: ['Uploading snapshot', 'doxloop: The Doxbrix API rejected the upload (401).'], stages: [] }
+  const login = { id: 'login-2', type: 'login', status: 'running', startedAt: finished, lines: ['Waiting for browser approval'], stages: [] }
+  const calls = await mockWorkspace(page, { jobs: [login, deploy] })
+  await page.goto('/deploy')
+  await expect(page.getByText('Deployment failed')).toBeVisible()
+  await expect(page.getByText('The Doxbrix API rejected the upload (401).')).toBeVisible()
+  await expect(page.getByText('Finish signing in in your browser.')).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel sign-in' }).click()
+  await expect.poll(() => calls.includes('POST /api/jobs/login-2/cancel')).toBe(true)
+  await page.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(page.getByText('Deployment failed')).toHaveCount(0)
+})
+
+const recentProjects = [
+  { path: '/tmp/pulse-docs', title: 'Pulse documentation', generator: 'doxbrix', lastOpenedAt: '2026-09-04T08:00:00.000Z' },
+  { path: '/tmp/widget-manual', title: 'Widget manual', generator: 'mkdocs', lastOpenedAt: '2026-09-03T08:00:00.000Z' },
+  { path: '/tmp/gone-docs', title: 'Gone docs', generator: 'doxbrix', lastOpenedAt: '2026-09-01T08:00:00.000Z', missing: true },
+]
+
+const mkdocsInspection = {
+  root: '/tmp/widget-site', alreadyProject: false,
+  detection: { candidates: [{ generator: 'mkdocs', contentDir: 'docs', markers: ['mkdocs.yml'], title: 'Widget site' }], recommended: { generator: 'mkdocs', contentDir: 'docs', markers: ['mkdocs.yml'], title: 'Widget site' } },
+  generator: 'mkdocs', contentDir: 'docs', title: 'Widget site', markers: ['mkdocs.yml'], pageCount: 12,
+  pages: ['docs/index.md', 'docs/guide/setup.md'], generatorInstalled: true, generatorPackage: '@doxbrix/doxloop-generator-mkdocs',
+}
+
+test('the sidebar project switcher lists recent projects and opens one', async ({ page }) => {
+  const calls = await mockWorkspace(page, { recentProjects }, { handle: ({ method, path }) => {
+    if (method === 'POST' && path === '/api/projects/open') return { ...state, recentProjects }
+    return undefined
+  } })
+  await page.goto('/overview')
+  await page.getByRole('button', { name: /Current workspace: Pulse documentation/ }).click()
+  const menu = page.getByRole('menu', { name: 'Projects' })
+  await expect(menu.getByText('Widget manual')).toBeVisible()
+  await expect(menu.getByText('Gone docs')).toBeVisible()
+  await expect(menu.getByRole('menuitem', { name: /Gone docs/ })).toBeDisabled()
+  await expect(menu.getByRole('menuitem', { name: /Open folder/ })).toBeVisible()
+  await expect(menu.getByRole('menuitem', { name: /Import existing documentation/ })).toBeVisible()
+  await menu.getByRole('menuitem', { name: /Widget manual/ }).click()
+  await expect.poll(() => calls.filter((call) => call === 'POST /api/projects/open').length).toBe(1)
+  await expect(page).toHaveURL(/\/overview$/)
+})
+
+test('importing an existing folder inspects it before adopting it', async ({ page }) => {
+  let importBody
+  const calls = await mockWorkspace(page, { recentProjects }, { handle: ({ method, path, request }) => {
+    if (method === 'GET' && path === '/api/projects') return { current: '/tmp/pulse-docs', recent: recentProjects, generators: [{ id: 'doxbrix', displayName: 'Doxbrix', installed: true }, { id: 'mkdocs', displayName: 'MkDocs Material', installed: true }] }
+    if (method === 'POST' && path === '/api/projects/inspect') return mkdocsInspection
+    if (method === 'POST' && path === '/api/projects/import') { importBody = request.postDataJSON(); return { ...state, imported: { root: '/tmp/widget-site' } } }
+    return undefined
+  } })
+  await page.goto('/overview')
+  await page.getByRole('button', { name: /Current workspace/ }).click()
+  await page.getByRole('menuitem', { name: /Import existing documentation/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'Import existing documentation' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Import and open' })).toBeDisabled()
+  await dialog.getByPlaceholder('/path/to/your/docs-site').fill('/tmp/widget-site')
+  await dialog.getByRole('button', { name: 'Check' }).click()
+  await expect(dialog.getByText('MkDocs Material site · 12 pages')).toBeVisible()
+  await expect(dialog.getByText('docs/guide/setup.md')).toBeVisible()
+  await expect(dialog.getByLabel('Documentation title')).toHaveValue('Widget site')
+  await dialog.getByLabel('Documentation title').fill('Widget manual v2')
+  await dialog.getByRole('button', { name: 'Import and open' }).click()
+  await expect.poll(() => calls.filter((call) => call === 'POST /api/projects/import').length).toBe(1)
+  expect(importBody).toMatchObject({ path: '/tmp/widget-site', generator: 'mkdocs', contentDir: 'docs', title: 'Widget manual v2', installGenerator: false })
+})
+
+test('new-project setup can adopt an existing documentation folder instead of scaffolding', async ({ page }) => {
+  await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null }, { handle: ({ method, path }) => {
+    if (method === 'GET' && path === '/api/projects') return { current: null, recent: [], generators: [{ id: 'doxbrix', displayName: 'Doxbrix', installed: true }] }
+    if (method === 'POST' && path === '/api/projects/inspect') return { ...mkdocsInspection, generator: 'doxbrix', contentDir: 'docs', markers: ['docs/docs.json'], pageCount: 1, pages: ['docs/index.md'] }
+    return undefined
+  } })
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+  await page.getByRole('radio', { name: /Use existing documentation folder/ }).click()
+  await expect(page.getByRole('heading', { name: 'Use existing documentation' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Continue/ })).toHaveCount(0)
+  await expect(page.getByText("Import above to open the folder's pages.")).toBeVisible()
+  await page.getByPlaceholder('/path/to/your/docs-site').fill('/tmp/widget-site')
+  await page.getByRole('button', { name: 'Check' }).click()
+  await expect(page.getByText('Doxbrix site · 1 page')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Import and open' })).toBeEnabled()
+  await page.getByRole('radio', { name: /Start new/ }).click()
+  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+})
+
+const navigationTree = {
+  generator: 'doxbrix', editable: true, configFile: 'docs.json', fingerprint: 'nav-1', requiresEveryPage: true,
+  supports: { icons: true, hidden: true, labels: true, links: true, dividers: true, spaces: true },
+  spaces: [{ name: 'Documentation', nav: [
+    { type: 'group', label: 'Get started', icon: 'rocket', items: [
+      { type: 'page', file: 'index', path: 'index.mdx', title: 'Overview', pageTitle: 'Overview' },
+      { type: 'page', file: 'quickstart', path: 'quickstart.mdx', pageTitle: 'Quickstart' },
+    ] },
+    { type: 'page', file: 'reference/events', path: 'reference/events.mdx', pageTitle: 'Events API' },
+  ] }],
+  orphans: [{ file: 'faq', path: 'faq.mdx', title: 'FAQ' }],
+  icons: ['book', 'rocket'],
+}
+
+test('Pages → Navigation reorders a page and saves the tree with its fingerprint', async ({ page }) => {
+  let saved
+  const calls = await mockWorkspace(page, {}, {
+    handle: async ({ method, path, request }) => {
+      if (method === 'GET' && path === '/api/navigation') return navigationTree
+      if (method === 'PUT' && path === '/api/navigation') { saved = request.postDataJSON(); return { ...navigationTree, fingerprint: 'nav-2', spaces: saved.spaces } }
+    },
+  })
+  await page.goto('/pages?view=navigation')
+  await expect(page.getByRole('heading', { name: 'Sidebar navigation' })).toBeVisible()
+  const tree = page.getByRole('tree', { name: 'Navigation' })
+  await expect(tree.getByRole('treeitem')).toHaveCount(4)
+  await expect(page.getByRole('button', { name: 'Save navigation' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Move Overview down' }).click()
+  await page.getByRole('button', { name: 'Add page' }).click()
+  await page.getByRole('button', { name: /FAQ/ }).click()
+  await expect(tree.getByRole('treeitem')).toHaveCount(5)
+  await page.getByRole('button', { name: 'Save navigation' }).click()
+  await expect.poll(() => calls.includes('PUT /api/navigation')).toBe(true)
+  expect(saved.fingerprint).toBe('nav-1')
+  expect(saved.spaces[0].nav[0].items.map((node) => node.file)).toEqual(['quickstart', 'index'])
+  expect(saved.spaces[0].nav.at(-1)).toMatchObject({ type: 'page', file: 'faq' })
+  expect(JSON.stringify(saved)).not.toContain('pageTitle')
+  await expect(page.getByRole('button', { name: 'Save navigation' })).toBeDisabled()
+})
+
+test('Settings → Branding edits the Doxbrix theme and only sends the changed fields', async ({ page }) => {
+  let saved
+  const branding = {
+    generator: 'doxbrix', editable: true, configFile: 'docs.json', fingerprint: 'brand-1',
+    site: { name: 'Pulse documentation', description: 'Docs for Pulse.' },
+    theme: { primaryColor: '#6366f1', mode: 'system', font: 'Inter' },
+    assets: [{ path: 'assets/logo.png', name: 'logo.png', publicPath: '/assets/logo.png' }],
+  }
+  const calls = await mockWorkspace(page, {}, {
+    handle: async ({ method, path, request }) => {
+      if (method === 'GET' && path === '/api/branding') return branding
+      if (method === 'PUT' && path === '/api/branding') { saved = request.postDataJSON(); return { ...branding, fingerprint: 'brand-2', theme: { ...branding.theme, ...saved.theme } } }
+    },
+  })
+  await page.goto('/settings?section=branding')
+  await expect(page.getByRole('heading', { name: 'Branding' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save branding' })).toBeDisabled()
+  const primary = page.getByLabel('Primary colour', { exact: true })
+  await primary.fill('#112233')
+  await page.getByLabel('Heading font').fill('Manrope')
+  await page.getByRole('button', { name: 'Save branding' }).click()
+  await expect.poll(() => calls.includes('PUT /api/branding')).toBe(true)
+  expect(saved).toEqual({ fingerprint: 'brand-1', theme: { primaryColor: '#112233', headingFont: 'Manrope' } })
+})
+
+test('Pages → Images & files lists assets with their uses and saves alt text', async ({ page }) => {
+  let altBody
+  const asset = { path: 'assets/team.png', name: 'team.png', publicPath: '/assets/team.png', kind: 'image', bytes: 2048, modifiedAt: '2026-08-26T08:00:00.000Z', references: [{ page: 'reference/events.mdx', alt: 'Team settings' }] }
+  const calls = await mockWorkspace(page, {}, {
+    handle: async ({ method, path, request }) => {
+      if (method === 'GET' && path === '/api/assets') return { directory: 'assets', publicPrefix: '/assets', maxBytes: 10485760, assets: [asset] }
+      if (method === 'POST' && path === '/api/assets/alt') { altBody = request.postDataJSON(); return { ...asset, references: [{ page: 'reference/events.mdx', alt: altBody.alt }] } }
+    },
+  })
+  await page.goto('/pages?view=assets')
+  await expect(page.getByRole('heading', { name: 'Images and files' })).toBeVisible()
+  await page.getByRole('listitem').filter({ hasText: 'team.png' }).click()
+  await expect(page.getByText('/assets/team.png').first()).toBeVisible()
+  await page.getByLabel('Alt text').fill('The team settings page with the invite form open')
+  await page.getByRole('button', { name: 'Save alt text' }).click()
+  await expect.poll(() => calls.includes('POST /api/assets/alt')).toBe(true)
+  expect(altBody).toEqual({ path: 'assets/team.png', alt: 'The team settings page with the invite form open' })
 })

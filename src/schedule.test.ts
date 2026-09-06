@@ -133,7 +133,7 @@ describe('job definitions', () => {
     const line = cronLine({ label: 'doxloop-acme-docs-1234abcd', root, frequency: { kind: 'daily', time } })
 
     expect(line.startsWith('0 9 * * * ')).toBe(true)
-    expect(line).toContain('sync now --trigger schedule --cwd /srv/work/acme-docs')
+    expect(line).toContain("sync now --trigger schedule --cwd '/srv/work/acme-docs'")
     expect(line.endsWith('# doxloop-acme-docs-1234abcd')).toBe(true)
   })
 
@@ -212,4 +212,10 @@ describe('sync log', () => {
     expect(lines[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     expect(await readSyncLog(root, 1)).toHaveLength(1)
   })
+})
+
+test('interval cron polls and delegates elapsed timing instead of approximating 24 hours as midnight', () => {
+  expect(cronLine({ root: '/tmp/docs with spaces', label: 'doxloop-test', frequency: { kind: 'interval', minutes: 1440 } })).toMatch(/^\* \* \* \* \*/)
+  expect(cronLine({ root: "/tmp/a'b", label: 'doxloop-test', frequency: { kind: 'interval', minutes: 17 } })).toContain("'/tmp/a'\"'\"'b'")
+  expect(() => scheduleFrequency(['every@24h', 'daily@09:00'])).toThrow('one schedule')
 })

@@ -1,0 +1,13 @@
+{
+  "image": "public.ecr.aws/docker/library/python@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a",
+  "checkedAt": "2026-09-06T10:56:18.669Z",
+  "checks": [
+    {
+      "code": "quality.example.passed",
+      "category": "examples",
+      "status": "pass",
+      "message": "real-container-boundary produced the declared result in a container with no network, a read-only filesystem, and only the declared example fixtures mounted.",
+      "file": "probe.py"
+    }
+  ]
+}

@@ -75,3 +75,27 @@ Use attributes sparingly when they improve a primary action:
 ```
 
 Never use visual button styling for ordinary navigation links.
+
+## Images and assets
+
+Keep images inside the docs directory (for example `docs/assets/`) and use
+relative links:
+
+```markdown
+![Settings page with the API keys tab selected](assets/settings-api-keys.png)
+```
+
+## Diagrams
+
+The scaffold registers a `mermaid` custom fence under `pymdownx.superfences`,
+and Material renders it as a diagram:
+
+````markdown
+```mermaid
+flowchart LR
+  Client --> API --> Database
+```
+````
+
+In an adopted project, confirm `mkdocs.yml` carries the `custom_fences` entry
+for `mermaid` before using the fence.

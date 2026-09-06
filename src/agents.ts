@@ -12,6 +12,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import spawn from 'cross-spawn'
@@ -253,19 +254,16 @@ export async function chooseAgent(preferred?: AgentName): Promise<{
   )
 }
 
+export interface AgentAuthentication {
+  status: 'authenticated' | 'unauthenticated' | 'unknown'
+  detail: string
+}
+
 export async function agentAuthenticationStatus(agent: {
   name: AgentName
   executable: string
-}): Promise<{
-  status: 'authenticated' | 'unauthenticated' | 'unknown'
-  detail: string
-}> {
-  if (agent.name === 'gemini') {
-    return {
-      status: 'unknown',
-      detail: 'Gemini authentication cannot be verified automatically; it will be checked when Gemini starts.',
-    }
-  }
+}, options: { env?: NodeJS.ProcessEnv; home?: string } = {}): Promise<AgentAuthentication> {
+  if (agent.name === 'gemini') return geminiAuthenticationStatus(options)
 
   const args =
     agent.name === 'codex'
@@ -309,6 +307,39 @@ export async function agentAuthenticationStatus(agent: {
   }
 }
 
+/**
+ * Gemini CLI has no non-interactive status command, so its sign-in is read
+ * from the places it keeps credentials: an API key or Vertex AI project in
+ * the environment, or the OAuth token file a Google sign-in leaves behind.
+ * Only presence is checked; no credential value is read into memory for
+ * longer than the parse, and none is reported.
+ */
+export async function geminiAuthenticationStatus(
+  options: { env?: NodeJS.ProcessEnv; home?: string } = {},
+): Promise<AgentAuthentication> {
+  const env = options.env ?? process.env
+  if (env.GEMINI_API_KEY?.trim() || env.GOOGLE_API_KEY?.trim()) {
+    return { status: 'authenticated', detail: 'Gemini uses the API key from the environment.' }
+  }
+  const vertex = env.GOOGLE_GENAI_USE_VERTEXAI?.trim().toLowerCase()
+  if ((vertex === 'true' || vertex === '1') && (env.GOOGLE_CLOUD_PROJECT?.trim() || env.GOOGLE_APPLICATION_CREDENTIALS?.trim())) {
+    return { status: 'authenticated', detail: 'Gemini uses Vertex AI credentials from the environment.' }
+  }
+  const credentials = join(options.home ?? homedir(), '.gemini', 'oauth_creds.json')
+  try {
+    const parsed = JSON.parse(await readFile(credentials, 'utf8')) as { refresh_token?: unknown; access_token?: unknown }
+    if (typeof parsed.refresh_token === 'string' || typeof parsed.access_token === 'string') {
+      return { status: 'authenticated', detail: 'Gemini is signed in with a Google account.' }
+    }
+  } catch {
+    // No token file, or one Gemini itself would not accept.
+  }
+  return {
+    status: 'unauthenticated',
+    detail: 'Gemini is not signed in. Run `gemini` once in a terminal and complete the sign-in, or set GEMINI_API_KEY.',
+  }
+}
+
 async function runAgentStatus(
   executable: string,
   args: string[],
@@ -345,6 +376,22 @@ async function runAgentStatus(
 }
 
 async function findExecutable(name: string): Promise<string | undefined> {
+  if (name === 'codex' || name === 'claude' || name === 'gemini') {
+    const override = process.env[`DOXLOOP_AGENT_EXECUTABLE_${name.toUpperCase()}`]
+    if (override) {
+      const candidate = resolve(override)
+      try {
+        const stats = await stat(candidate)
+        if (stats.isFile()) {
+          if (process.platform !== 'win32') await access(candidate, constants.X_OK)
+          return candidate
+        }
+        throw new Error('not a file')
+      } catch {
+        throw new DoxloopError(`The test agent executable for ${name} is not runnable: ${candidate}`)
+      }
+    }
+  }
   const path = process.env.PATH
   if (!path) return undefined
   const suffixes =

@@ -17,3 +17,11 @@ evals/results/
 .env
 .env.*
 !.env.example
+
+.doxloop/locks/
+.doxloop/direct-edits/
+.doxloop/monitor-budget.json
+
+/test-results/
+/playwright-report/
+.doxloop/monitor-interval.json

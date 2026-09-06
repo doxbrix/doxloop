@@ -12,9 +12,11 @@ semantic HTML; no framework or compilation step will repair incomplete markup.
 
 1. Confirm `.doxloop/project.json` selects `static`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect shared CSS, scripts, navigation, and existing route structure.
-4. Keep the deployable site under `site/` with directory indexes.
-5. Give every page a unique `<title>`, meta description, one `<h1>`, landmarks,
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect shared CSS, scripts, navigation, and existing route structure.
+5. Keep the deployable site under `site/` with directory indexes.
+6. Give every page a unique `<title>`, meta description, one `<h1>`, landmarks,
    and consistent descriptive navigation.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` as

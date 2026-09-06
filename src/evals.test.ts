@@ -56,11 +56,14 @@ describe('authoring evaluation fixtures', () => {
       expect(project.documentation.priorityOutcomes).not.toHaveLength(0)
       const result = await validateProject(projectRoot)
       expect(result.pages.length).toBeGreaterThan(0)
+      if (entry.id === 'web-app') expect(result.issues).toContainEqual(expect.objectContaining({ code: 'broken-link', message: 'Local link target does not exist: /invite-dialog.png' }))
       expect(
         result.issues.filter(
           (issue) =>
             // Fixture pages are deliberately small; depth is measured on real runs.
-            !['missing-image-alt', 'weak-link-text', 'thin-page', 'thin-procedure'].includes(issue.code),
+            !['missing-image-alt', 'weak-link-text', 'thin-page', 'thin-procedure'].includes(issue.code) &&
+            // The web-app fixture intentionally references an absent screenshot.
+            !(entry.id === 'web-app' && issue.code === 'broken-link' && issue.message === 'Local link target does not exist: /invite-dialog.png'),
         ),
       ).toHaveLength(0)
     }

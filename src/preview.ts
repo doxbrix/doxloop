@@ -1,3 +1,4 @@
+import { readRedirects } from './page-operations.js'
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
@@ -8,7 +9,7 @@ import { renderMarkdown, type TocEntry } from './doxbrix-markdown.js'
 import { DoxloopError } from './errors.js'
 import { resolveContainedDirectory } from './fs.js'
 import { loadQualityConfig } from './quality-config.js'
-import { readVerificationMetadata } from './quality-claims.js'
+import { reverifyClaims } from './quality-claims.js'
 import { loadGeneratorAdapter } from './generators.js'
 import {
   loadPages,
@@ -101,6 +102,15 @@ async function startDoxbrixPreview(
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+      if (url.pathname === '/__doxloop/identity') {
+        send(
+          response,
+          200,
+          'application/json; charset=utf-8',
+          JSON.stringify({ root: resolve(options.root) }),
+        )
+        return
+      }
       if (url.pathname === '/__doxloop/events') {
         response.writeHead(200, {
           'Content-Type': 'text/event-stream',
@@ -117,6 +127,8 @@ async function startDoxbrixPreview(
         return
       }
 
+      const redirect = (await readRedirects(options.root))[url.pathname.replace(/\/$/, '') || '/']
+      if (redirect) { response.writeHead(302, { Location: redirect }); response.end(); return }
       const staticPath = safeStaticPath(contentRoot, url.pathname, ignoredDirectories)
       if (staticPath && STATIC_TYPES[extname(staticPath).toLowerCase()]) {
         try {
@@ -136,7 +148,7 @@ async function startDoxbrixPreview(
         loadPages(options.root, project),
         loadSiteConfig(options.root, project),
         loadQualityConfig(options.root),
-        readVerificationMetadata(options.root),
+        loadQualityConfig(options.root).then((config) => config.readerVerification?.enabled ? reverifyClaims(options.root, project, false).then((result) => result.metadata) : undefined),
       ])
       const pagesById = new Map(pages.map((path) => [pageId(contentRoot, path), path]))
       if (url.pathname === '/__doxloop/search-index') {
@@ -175,8 +187,12 @@ async function startDoxbrixPreview(
           site,
           title: page.title || labelFromId(requested),
           ...(page.description ? { description: page.description } : {}),
+          ...(page.canonical ? { canonical: page.canonical } : {}),
+          ...(page.socialImage ? { socialImage: page.socialImage } : {}),
           current: requested,
+          ...(localEditorUrl(process.env.DOXLOOP_CONTROL_CENTER_URL, relative(options.root, pagesById.get(requested)!)) ? { editorUrl: localEditorUrl(process.env.DOXLOOP_CONTROL_CENTER_URL, relative(options.root, pagesById.get(requested)!))! } : {}),
           rendered,
+          ...(url.searchParams.get('embed') === 'page' ? { embedded: true } : {}),
           ...(qualityConfig.readerVerification?.enabled && verificationMetadata?.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')]
             ? { verification: verificationMetadata.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')] }
             : {}),
@@ -232,16 +248,25 @@ function requestedPage(
   if (pathname === '/' || pathname === '') {
     return firstSitePage(site) ?? pages.keys().next().value
   }
-  return decodeURIComponent(pathname.replace(/^\/+|\/+$/g, '')).replace(/\.(md|mdx)$/i, '')
+  const id = decodeURIComponent(pathname.replace(/^\/+|\/+$/g, '')).replace(/\.(md|mdx)$/i, '')
+  return pages.has(id) ? id : pages.has(`${id}/index`) ? `${id}/index` : id
 }
 
 export function doxbrixDocument(input: {
   site: DoxbrixSiteConfig
   title: string
   description?: string
+  canonical?: string
+  socialImage?: string
   current: string
   rendered: { html: string; toc: TocEntry[] }
   verification?: { state: string; verifiedOn?: string; revisions: Record<string, string>; locale: string }
+  editorUrl?: string
+  embedded?: boolean
+  /** URL prefix used by static exports hosted below an origin, such as GitHub project pages. */
+  basePath?: string
+  /** Static builds have no preview event stream. */
+  liveReload?: boolean
 }): string {
   const visibleSpaces = input.site.spaces.filter((space) => hasVisibleNavigation(space.nav))
   const showTabs = visibleSpaces.length > 1
@@ -306,6 +331,11 @@ export function doxbrixDocument(input: {
   const faviconLink = favicon
     ? `<link rel="icon" href="${escapeAttr(favicon)}">`
     : ''
+  const metadata = [
+    input.description ? `<meta name="description" content="${escapeAttr(input.description)}">` : '',
+    input.canonical ? `<link rel="canonical" href="${escapeAttr(input.canonical)}">` : '',
+    input.socialImage ? `<meta property="og:image" content="${escapeAttr(input.socialImage)}">` : '',
+  ].filter(Boolean).join('\n  ')
   const logo = logoLight || logoDark
     ? `<span class="dp-topnav-logo-img-wrap">${logoLight ? `<img class="dp-topnav-logo-img dp-topnav-logo-img--light${logoDark ? ' has-dark' : ''}" src="${escapeAttr(logoLight)}" alt="${escapeAttr(siteName)}">` : ''}${logoDark ? `<img class="dp-topnav-logo-img dp-topnav-logo-img--dark${logoLight ? ' has-light' : ''}" src="${escapeAttr(logoDark)}" alt="${escapeAttr(siteName)}">` : ''}</span>`
     : `<span class="dp-topnav-logo-mark" aria-hidden="true">${icon('book', 16)}</span><span class="dp-topnav-logo-text">${escapeHtml(siteName)}</span>`
@@ -317,12 +347,13 @@ export function doxbrixDocument(input: {
     : ''
   const verification = input.verification ? verificationBadge(input.verification) : ''
 
-  return `<!doctype html>
+  const document = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(input.title)} · ${escapeHtml(siteName)}</title>
+  ${metadata}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   ${fontStylesheet}
@@ -348,7 +379,7 @@ export function doxbrixDocument(input: {
   </style>
 </head>
 <body>
-<div class="dp-root dp-root--published" data-color-theme="${resolvedMode}" data-project-color-theme="${escapeAttr(mode)}" data-code-theme="${codeTheme}" data-shell-theme="atlas">
+<div class="dp-root dp-root--published${input.embedded ? ' dp-root--embedded' : ''}" data-color-theme="${resolvedMode}" data-project-color-theme="${escapeAttr(mode)}" data-code-theme="${codeTheme}" data-shell-theme="atlas">
   <header class="dxb-atlas-header">
     <div class="dxb-atlas-header-main"><div class="dxb-atlas-header-inner">
       <a class="dp-topnav-logo" href="${escapeAttr(logoHref)}">${logo}</a>
@@ -371,7 +402,7 @@ export function doxbrixDocument(input: {
   </header>
   <div class="dp-body">
     ${leftnav}
-    <main class="dp-main"><div class="dp-content-wrap">
+    <main class="dp-main"><div class="dp-content-wrap">${input.editorUrl ? `<a class="dp-edit-page" href="${escapeHtml(input.editorUrl)}" target="_blank" rel="noopener">Edit this page in Doxloop</a>` : ''}
       <div class="dxb-atlas-title-row">
         <div class="dxb-atlas-title-copy">${eyebrow}<h1 class="dp-page-title">${escapeHtml(input.title)}</h1>${description}${verification}</div>
         <button class="dxb-atlas-copy-page" type="button" data-copy-page>${icon('copy', 16)}<span>Copy page</span>${icon('chevron-down', 14)}</button>
@@ -451,10 +482,10 @@ export function doxbrixDocument(input: {
   updateActiveToc();
   addEventListener('scroll', scheduleTocUpdate, { passive: true });
   addEventListener('resize', scheduleTocUpdate);
-  const events = new EventSource('/__doxloop/events');
-  events.addEventListener('reload', () => location.reload());
+  ${input.liveReload === false ? 'const events = null;' : "const events = new EventSource('/__doxloop/events');"}
+  events?.addEventListener('reload', () => location.reload());
   function closePreviewEvents() {
-    events.close();
+    events?.close();
   }
   addEventListener('pagehide', closePreviewEvents, { once: true });
   addEventListener('beforeunload', closePreviewEvents, { once: true });
@@ -860,6 +891,32 @@ export function doxbrixDocument(input: {
 ${MERMAID_PREVIEW_SCRIPT}
 </body>
 </html>`
+  return prefixStaticReferences(document, input.basePath)
+}
+
+/** Prefix root-relative reader URLs without touching external or fragment links. */
+function prefixStaticReferences(document: string, rawBasePath?: string): string {
+  if (rawBasePath === undefined) return document
+  const basePath = normalizeBasePath(rawBasePath)
+  if (!basePath) return document
+  return document
+    .replaceAll('href="/', `href="${basePath}/`)
+    .replaceAll('src="/', `src="${basePath}/`)
+    .replaceAll("fetch('/", `fetch('${basePath}/`)
+    .replaceAll("new EventSource('/", `new EventSource('${basePath}/`)
+}
+
+function normalizeBasePath(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === '/') return ''
+  if (/^[a-z][a-z\d+.-]*:/i.test(trimmed) || trimmed.startsWith('//')) {
+    throw new DoxloopError('Static build base path must be an origin-relative URL path.')
+  }
+  const normalized = `/${trimmed.replace(/^\/+|\/+$/g, '')}`
+  if (normalized.split('/').some((part) => part === '..')) {
+    throw new DoxloopError('Static build base path cannot leave its URL root.')
+  }
+  return normalized
 }
 
 /**
@@ -1376,4 +1433,9 @@ function openBrowser(url: string): void {
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
   const child = spawn(command, args, { detached: true, stdio: 'ignore' })
   child.unref()
+}
+
+function localEditorUrl(origin: string | undefined, path: string): string | undefined {
+  if (!origin) return undefined
+  try { const url = new URL(origin); if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname) || url.username || url.password) return undefined; url.pathname = '/pages'; url.search = new URLSearchParams({ path: path.replace(/\\/g, '/'), edit: '1' }).toString(); return url.toString() } catch { return undefined }
 }

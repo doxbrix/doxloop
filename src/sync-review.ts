@@ -17,6 +17,7 @@ import {
   rejectSyncRun,
   runBeforeRoot,
   runWorkspace,
+  type AcceptOptions,
   type AcceptSelection,
 } from './sync-runs.js'
 import type { SyncFileChange, SyncRun } from './types.js'
@@ -127,7 +128,7 @@ async function handle(
       const body = await readBody(request)
       const run = await readSyncRun(options.root, action[1]!)
       const selections = syncReviewSelectionsFromBody(run, body)
-      sendJson(response, 200, await acceptSyncChanges(options.root, run.id, selections))
+      sendJson(response, 200, await acceptSyncChanges(options.root, run.id, selections, syncReviewAcceptOptions(body)))
       return
     }
     sendJson(response, 404, { error: 'Not found' })
@@ -144,9 +145,22 @@ export function requireSyncReviewChange(run: SyncRun, id: string): SyncFileChang
   return change
 }
 
+/** Whether the reviewer confirmed replacing files that changed in the project while the agent ran. */
+export function syncReviewAcceptOptions(body: unknown): AcceptOptions {
+  const value = body && typeof body === 'object' ? (body as { confirmChangedDuringRun?: unknown }) : {}
+  return value.confirmChangedDuringRun === true ? { confirmChangedDuringRun: true } : {}
+}
+
 export function syncReviewSelectionsFromBody(run: SyncRun, body: unknown): AcceptSelection[] {
   if (!body || typeof body !== 'object') throw new DoxloopError('Invalid review action.')
-  const value = body as { scope?: unknown; changeId?: unknown; hunkId?: unknown }
+  const value = body as { scope?: unknown; changeId?: unknown; hunkId?: unknown; folder?: unknown }
+  if (value.scope === 'folder' && typeof value.folder === 'string') {
+    const folder = value.folder.replace(/\\/g, '/').replace(/\/$/, '')
+    if (!folder || folder.startsWith('/') || folder.split('/').some((part) => part === '..' || part === '.')) throw new DoxloopError('Select a valid proposal folder.')
+    const selections = run.changes.filter((change) => change.path.startsWith(`${folder}/`) && change.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)).map((change) => ({ changeId: change.id, hunkIds: change.hunks.filter((hunk) => !hunk.acceptedAt && !hunk.rejectedAt).map((hunk) => hunk.id) }))
+    if (!selections.length) throw new DoxloopError('No pending changes in this folder.')
+    return selections
+  }
   if (value.scope === 'all') {
     return run.changes.map((change) => ({ changeId: change.id }))
   }

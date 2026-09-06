@@ -38,7 +38,7 @@
       "required": ["id", "surface", "label", "state"],
       "properties": {
         "id": { "type": "string" }, "surface": { "type": "string" }, "label": { "type": "string" },
-        "state": { "enum": ["documented", "uncovered", "excluded", "needs-human"] },
+        "state": { "enum": ["documented", "uncovered", "excluded", "needs-human", "planned", "stale"] },
         "source": { "type": "string" }, "path": { "type": "string" }, "kind": { "type": "string" },
         "page": { "type": "string" }, "suggestedPage": { "type": "string" }, "reason": { "type": "string" }
       },

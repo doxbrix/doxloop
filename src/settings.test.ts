@@ -43,6 +43,7 @@ describe('project settings presentation', () => {
       },
     })
     expect(effectiveDeployment(configured)).toEqual({
+      target: 'doxbrix',
       name: 'Acme Docs',
       slug: 'payments',
       visibility: 'public',

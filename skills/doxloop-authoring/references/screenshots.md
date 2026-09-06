@@ -48,32 +48,37 @@ operate outside the workflow being documented.
 
 ## Handle browser authentication
 
-Keep authentication in the browser controlled by Codex, Claude, or the
-selected agent. Do not add authentication settings to `.doxloop/project.json`
-and do not create login scripts, storage-state files, credential files, or
-environment-variable requirements.
+Doxloop owns sign-in material. The prompt tells you which kind is available;
+never add authentication settings to `.doxloop/project.json`, and never create
+login scripts, storage-state files, credential files, or environment-variable
+requirements yourself.
 
-1. Open the application with `doxloop_capture` (or the approved in-app browser
-   when one is explicitly available) and inspect the visible
-   state.
-2. If an authenticated application page is already visible, reuse that session
-   and continue without mentioning login.
-3. If the application redirects to login, first allow the browser's existing
-   session or password-manager autofill to work. The agent may select a sign-in
-   control after autofill, but must never inspect, copy, reveal, or log an
-   autofilled value.
-4. If user interaction is required, keep the login page open and ask the user
-   once to complete login, MFA, SSO, passkey, or browser confirmation directly
-   in that browser. Never ask for a password, token, OTP, cookie, recovery code,
-   or secret in chat.
-5. After login, verify a stable authenticated state such as the expected page,
-   account menu, workspace name, or application heading before capture.
-6. Keep the same browser session and context for the entire capture manifest.
-   Do not clear cookies, local storage, cache, or site data and do not open the
-   workflow in an isolated browser context.
-7. If the session expires, preserve the current manifest row, return to the
-   login checkpoint once, verify authentication again, and resume that row
-   rather than restarting or taking screenshots of the login page.
+- **Recorded browser session.** The user signed in by hand in a Chrome window
+  Doxloop opened and saved the session. `doxloop_capture` starts with that
+  session loaded, so the application should already be signed in. If a login
+  page appears anyway, the session has expired: record the affected steps as
+  text-only with the reason "saved browser session expired" and tell the user
+  to sign in again under **Settings → Visual evidence**. Do not try to sign in.
+- **Saved credentials.** The capture server holds the values as secrets. On the
+  sign-in form, type the literal names `DOXLOOP_APP_USERNAME` and
+  `DOXLOOP_APP_PASSWORD` into the username and password fields with the browser
+  type or fill-form tools; the server substitutes the real values and redacts
+  them from every tool result. Never guess, print, or reconstruct the values,
+  never type them anywhere except the sign-in form, and never capture the
+  filled form.
+- **Neither.** Open the application and inspect the visible state. If it
+  redirects to login, record the steps that need a signed-in screen as
+  text-only and tell the user once that they can sign in with the browser or
+  save credentials under **Settings → Visual evidence**. Never ask for a
+  password, token, OTP, cookie, recovery code, or secret in chat.
+
+After sign-in, verify a stable authenticated state such as the expected page,
+account menu, workspace name, or application heading before capture. Keep the
+same browser session and context for the entire capture manifest; do not clear
+cookies, local storage, cache, or site data. If the session expires mid-run
+with credentials available, preserve the current manifest row, sign in once
+more, verify authentication, and resume that row rather than restarting or
+capturing the login page.
 
 Use a demo, test, or other non-production account with synthetic data. Treat
 login and account-selection screens as private operational states: exclude

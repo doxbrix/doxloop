@@ -7,7 +7,7 @@ export const REVIEW_PREFERENCES_FILE = join('.doxloop', 'review-preferences.json
 export interface ReviewPreference {
   id: string
   at: string
-  kind: 'revision' | 'rejection' | 'inline-edit'
+  kind: 'revision' | 'rejection' | 'inline-edit' | 'edit'
   paths: string[]
   instruction: string
 }
@@ -53,7 +53,7 @@ async function readPreferences(root: string): Promise<ReviewPreference[]> {
 }
 
 function validPreference(value: ReviewPreference): boolean {
-  return !!value && ['revision', 'rejection', 'inline-edit'].includes(value.kind) && Array.isArray(value.paths) && value.paths.every((item) => typeof item === 'string') && typeof value.instruction === 'string' && value.instruction.trim() !== ''
+  return !!value && ['revision', 'rejection', 'inline-edit', 'edit'].includes(value.kind) && Array.isArray(value.paths) && value.paths.every((item) => typeof item === 'string') && typeof value.instruction === 'string' && value.instruction.trim() !== ''
 }
 
 function redactPreference(value: string): string {

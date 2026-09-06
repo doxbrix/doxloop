@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
+  editPrompt,
   agentArguments,
+  agentExitMessage,
   authorPrompt,
   ClaudeStreamLogFormatter,
+  GEMINI_ALLOWED_TOOLS,
   authoringTurnBudget,
   parseClaudeEffort,
   parseReasoning,
@@ -407,6 +410,7 @@ describe('agent invocation', () => {
   test('uses enforced read-only or plan invocations for review', () => {
     expect(agentArguments('codex', 'p', { mode: 'review' })).toEqual([
       'exec',
+      '--json',
       '--sandbox',
       'read-only',
       '--skip-git-repo-check',
@@ -428,6 +432,8 @@ describe('agent invocation', () => {
     expect(agentArguments('gemini', 'p', { mode: 'review' })).toEqual([
       '--approval-mode',
       'plan',
+      '--output-format',
+      'stream-json',
       '--prompt',
       'p',
     ])
@@ -438,6 +444,7 @@ describe('unattended authoring', () => {
   test('runs each agent without a terminal while allowing documentation writes', () => {
     expect(agentArguments('codex', 'P', { mode: 'update', nonInteractive: true })).toEqual([
       'exec',
+      '--json',
       '--sandbox',
       'workspace-write',
       '--skip-git-repo-check',
@@ -458,9 +465,35 @@ describe('unattended authoring', () => {
     expect(agentArguments('gemini', 'P', { mode: 'update', nonInteractive: true })).toEqual([
       '--approval-mode',
       'auto_edit',
+      ...GEMINI_ALLOWED_TOOLS.flatMap((tool) => ['--allowed-tools', tool]),
+      '--output-format',
+      'stream-json',
       '--prompt',
       'P',
     ])
+  })
+
+  test('widens Gemini reads to configured source directories', () => {
+    const unattended = agentArguments('gemini', 'P', {
+      mode: 'update',
+      nonInteractive: true,
+      sourceDirectories: ['/snapshots/product', '/snapshots/specs'],
+    })
+    expect(unattended.slice(0, 2)).toEqual(['--include-directories', '/snapshots/product,/snapshots/specs'])
+    expect(agentArguments('gemini', 'P', { sourceDirectories: ['/workspace/product'] })).toEqual(['--include-directories', '/workspace/product', '-i', 'P'])
+    // Only the doxloop CLI is pre-approved; nothing else runs unasked.
+    expect(GEMINI_ALLOWED_TOOLS.every((tool) => /^run_shell_command\((?:npx |pnpm exec |npm exec )?doxloop\)$/.test(tool))).toBe(true)
+  })
+
+  test('caps Claude spending only where Claude exposes a cap', () => {
+    const unattended = agentArguments('claude', 'Write docs', { nonInteractive: true, maxBudgetUsd: 10 })
+    expect(unattended.slice(unattended.indexOf('--max-budget-usd'), unattended.indexOf('--max-budget-usd') + 2)).toEqual(['--max-budget-usd', '10'])
+    expect(agentArguments('claude', 'Plan docs', { mode: 'review', maxBudgetUsd: 2.5 })).toContain('--max-budget-usd')
+    // An interactive session is the user's own; the cap belongs to unattended runs.
+    expect(agentArguments('claude', 'Write docs', { maxBudgetUsd: 10 })).not.toContain('--max-budget-usd')
+    expect(agentArguments('codex', 'Write docs', { nonInteractive: true, maxBudgetUsd: 10 })).not.toContain('--max-budget-usd')
+    expect(agentArguments('gemini', 'Write docs', { nonInteractive: true, maxBudgetUsd: 10 })).not.toContain('--max-budget-usd')
+    expect(agentArguments('claude', 'Write docs', { nonInteractive: true, maxBudgetUsd: 0 })).not.toContain('--max-budget-usd')
   })
 
   test('keeps review read-only even when a scheduler asks for it', () => {
@@ -535,6 +568,7 @@ describe('unattended authoring', () => {
       }),
     ).toEqual([
       'exec',
+      '--json',
       '-m',
       'gpt-5',
       '-c',
@@ -615,6 +649,29 @@ describe('Claude activity streaming', () => {
     ])
   })
 
+  test('reports every tool call so progress can follow the files Claude writes', () => {
+    const formatter = new ClaudeStreamLogFormatter()
+    const calls: Array<[string, Record<string, unknown>]> = []
+    formatter.onToolCall = (tool, input) => calls.push([tool, input])
+    formatter.push(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'Write', input: {} } } })}\n`)
+    formatter.push(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"guides/setup.mdx"}' } } })}\n`)
+    formatter.push(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } })}\n`)
+    const plain = new ClaudeStreamLogFormatter()
+    plain.onToolCall = (tool, input) => calls.push([tool, input])
+    plain.push(`${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'doxloop test' } }] } })}\n`)
+    expect(calls).toEqual([
+      ['Write', { file_path: 'guides/setup.mdx' }],
+      ['Bash', { command: 'doxloop test' }],
+    ])
+  })
+
+  test('names the spending cap when Claude stops on budget', () => {
+    const formatter = new ClaudeStreamLogFormatter()
+    const lines = formatter.push(`${JSON.stringify({ type: 'result', subtype: 'error_max_budget_usd', is_error: true, num_turns: 4 })}\n`)
+    expect(lines.at(-1)).toContain('reached the configured spending cap')
+    expect(formatter.stopReason).toContain('Maximum Claude spend')
+  })
+
   test('names the turn limit when Claude stops before finishing', () => {
     const formatter = new ClaudeStreamLogFormatter()
     const lines = [
@@ -625,8 +682,33 @@ describe('Claude activity streaming', () => {
     expect(formatter.stopReason).toContain('reached its 61-turn limit')
 
     const errored = new ClaudeStreamLogFormatter()
-    errored.push(`${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 3, errors: ['Rate limit exceeded'] })}\n`)
-    expect(errored.stopReason).toBe('stopped with an error: Rate limit exceeded')
+    errored.push(`${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 3, errors: ['Permission denied for Write'] })}\n`)
+    expect(errored.stopReason).toBe('stopped with an error: Permission denied for Write')
+    expect(errored.transientFailure).toBe(false)
+  })
+
+  test('flags an API failure mid-response as transient and keeps the session id', () => {
+    // Claude reports a mid-response server error as an "error" result whose
+    // subtype is still "success" and whose text carries the failure.
+    const formatter = new ClaudeStreamLogFormatter()
+    formatter.push(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-123', model: 'claude-sonnet-5' })}\n`)
+    formatter.push(`${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'API Error: Server error mid-response. The response above may be incomplete.' }] } })}\n`)
+    const lines = formatter.push(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: true, num_turns: 57, duration_ms: 470_000 })}\n`)
+    expect(formatter.sessionId).toBe('sess-123')
+    expect(formatter.transientFailure).toBe(true)
+    expect(formatter.stopReason).toBe('stopped because its API request failed: API Error: Server error mid-response. The response above may be incomplete.')
+    expect(lines.at(-1)).toContain('stopped because its API request failed')
+    expect(lines.at(-1)).not.toContain('stopped with result "success"')
+
+    const reported = new ClaudeStreamLogFormatter()
+    reported.push(`${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Rate limit exceeded'] })}\n`)
+    expect(reported.transientFailure).toBe(true)
+    expect(reported.stopReason).toBe('stopped because its API request failed: Rate limit exceeded')
+
+    // A budget stop is never transient: resuming would hit the same limit.
+    const capped = new ClaudeStreamLogFormatter()
+    capped.push(`${JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 400 })}\n`)
+    expect(capped.transientFailure).toBe(false)
   })
 
   test('scales the unattended turn budget with the approved plan', () => {
@@ -682,6 +764,29 @@ describe('author lifecycle', () => {
     )
   })
 
+  test('keeps scoped proposal output reviewable when validation fails', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-proposal-validation-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'codex')
+    await writeFile(executable, '#!/bin/sh\nexit 0\n')
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    await expect(runAuthor({
+      root,
+      mode: 'update',
+      agent: 'codex',
+      tolerateValidationErrors: true,
+      recordOperationalState: false,
+    })).resolves.toBe(0)
+    await expect(pathExists(join(root, '.doxloop', 'sync-state.json'))).resolves.toBe(false)
+    await expect(pathExists(join(root, '.doxloop', 'last-run.json'))).resolves.toBe(false)
+  })
+
   test('records the pages the agent wrote against the request', async () => {
     if (process.platform === 'win32') return
     if (!(await historyAvailable())) return
@@ -721,6 +826,123 @@ describe('author lifecycle', () => {
       closeHistory()
     }
   })
+
+  test('builds a scoped edit prompt with every page and related-change policy', () => {
+    const strict = editPrompt({
+      pages: [{ path: 'index.mdx', title: 'Overview' }, { path: 'guides/install.mdx', title: 'Install' }],
+      instruction: 'Add a curl example verbatim.',
+      allowRelated: false,
+    })
+    expect(strict).toContain('- index.mdx (Overview)')
+    expect(strict).toContain('- guides/install.mdx (Install)')
+    expect(strict).toContain('Add a curl example verbatim.')
+    expect(strict).toContain('Do not change navigation or add images.')
+    expect(editPrompt({ pages: [{ path: 'index.mdx', title: 'Overview' }], instruction: 'Refresh it.', allowRelated: true })).toContain('You may also update navigation')
+  })
+
+  test('stops an unattended agent at its time budget and names the budget as the reason', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-budget-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'codex')
+    await writeFile(executable, '#!/bin/sh\n/bin/sleep 30\n')
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    const output: string[] = []
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+
+    let failureDetail: string | undefined
+    const started = Date.now()
+    await expect(runAuthor({ root, mode: 'update', agent: 'codex', nonInteractive: true, timeoutMinutes: 0.01, onFailure: (detail) => { failureDetail = detail } })).resolves.toBe(1)
+    expect(Date.now() - started).toBeLessThan(15_000)
+    expect(agentExitMessage(1, failureDetail)).toContain('stopped after its 0.01-minute time budget')
+    // Unattended runs announce their stages before the agent starts.
+    expect(output.some((line) => line.includes('"id":"authoring-pages"') && line.includes('"status":"pending"'))).toBe(true)
+  }, 30_000)
+
+  test('resumes the Claude session after an API failure mid-response instead of failing the run', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-resume-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'claude')
+    const marker = join(parent, 'attempt')
+    // First run: cut off by a server error. Second run: must be a --resume of
+    // the same session, and finishes.
+    await writeFile(
+      executable,
+      `#!/bin/sh
+printf '%s\\037' "$@" > "${parent}/args-$( [ -f "${marker}" ] && echo 2 || echo 1 )"
+if [ ! -f "${marker}" ]; then
+  : > "${marker}"
+  echo '{"type":"system","subtype":"init","session_id":"sess-resume","model":"claude-sonnet-5"}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"API Error: Server error mid-response. The response above may be incomplete."}]}}'
+  echo '{"type":"result","subtype":"success","is_error":true,"num_turns":57,"duration_ms":470000}'
+  exit 1
+fi
+echo '{"type":"system","subtype":"init","session_id":"sess-resume","model":"claude-sonnet-5"}'
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_ms":1000,"result":"Done."}'
+exit 0
+`,
+    )
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    process.env.DOXLOOP_AGENT_API_RESUME_DELAY_MS = '0'
+    const output: string[] = []
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+    try {
+      await expect(runAuthor({ root, mode: 'update', agent: 'claude', nonInteractive: true, recordHistory: false, tolerateValidationErrors: true, recordOperationalState: false })).resolves.toBe(0)
+    } finally {
+      delete process.env.DOXLOOP_AGENT_API_RESUME_DELAY_MS
+    }
+    // Arguments are recorded separated by the unit separator, since the prompt itself spans lines.
+    const firstArgs = (await readFile(join(parent, 'args-1'), 'utf8')).split('\u001f').filter(Boolean)
+    const secondArgs = (await readFile(join(parent, 'args-2'), 'utf8')).split('\u001f').filter(Boolean)
+    expect(firstArgs).not.toContain('--resume')
+    expect(secondArgs.slice(0, 2)).toEqual(['--resume', 'sess-resume'])
+    expect(secondArgs.at(-1)).toContain('cut off by a Claude API failure')
+    expect(secondArgs.at(-1)).toContain('do not start over')
+    expect(output.some((line) => line.includes('Resuming the same session') && line.includes('attempt 1 of 2'))).toBe(true)
+  }, 30_000)
+
+  test('reports an API failure that outlives every resume with the reason and next step', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-resume-fail-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'claude')
+    await writeFile(
+      executable,
+      `#!/bin/sh
+echo invoked >> "${parent}/invocations"
+echo '{"type":"system","subtype":"init","session_id":"sess-flaky"}'
+echo '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded_error"}'
+exit 1
+`,
+    )
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    process.env.DOXLOOP_AGENT_API_RESUME_DELAY_MS = '0'
+    process.env.DOXLOOP_AGENT_API_RESUMES = '1'
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    let failureDetail: string | undefined
+    try {
+      await expect(runAuthor({ root, mode: 'update', agent: 'claude', nonInteractive: true, recordHistory: false, onFailure: (detail) => { failureDetail = detail } })).resolves.toBe(1)
+    } finally {
+      delete process.env.DOXLOOP_AGENT_API_RESUME_DELAY_MS
+      delete process.env.DOXLOOP_AGENT_API_RESUMES
+    }
+    expect((await readFile(join(parent, 'invocations'), 'utf8')).trim().split('\n')).toHaveLength(2)
+    const message = agentExitMessage(1, failureDetail)
+    expect(message).toContain('exited with status 1')
+    expect(message).toContain('Claude stopped because its API request failed: API Error: 529 overloaded_error')
+    expect(message).toContain('resumed the session 1 time without success')
+    expect(message).toContain('Retry the stage to continue from the preserved workspace')
+  }, 30_000)
 
   test('review does not install missing skills or write a run receipt', async () => {
     if (process.platform === 'win32') return

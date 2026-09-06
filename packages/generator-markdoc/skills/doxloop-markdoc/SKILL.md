@@ -12,10 +12,12 @@ registered by the Markdoc project.
 
 1. Confirm `.doxloop/project.json` selects `markdoc`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect `markdoc.config.mjs`, `navigation.json`, the renderer, and existing
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect `markdoc.config.mjs`, `navigation.json`, the renderer, and existing
    pages.
-4. Keep pages in `docs/` with `title` and outcome-focused `description`.
-5. Maintain navigation and stable routes when pages change.
+5. Keep pages in `docs/` with `title` and outcome-focused `description`.
+6. Maintain navigation and stable routes when pages change.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` in
 `navigation.json` and the renderer's supported header and sidebar structures.

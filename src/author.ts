@@ -1,8 +1,18 @@
+import { loadPages as authoringPages } from './project.js'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import spawn from 'cross-spawn'
+import { createAgentLogFormatter, type AgentLogFormatter } from './agent-log.js'
+export { ClaudeStreamLogFormatter, CodexStreamLogFormatter, GeminiStreamLogFormatter } from './agent-log.js'
+import { forwardTerminationSignals, spawnAgentProcess } from './agent-process.js'
 import { chooseAgent, installSkill } from './agents.js'
+import {
+  AuthoringProgressTracker,
+  classifyAgentToolCall,
+  plannedPageCount,
+  watchWorkspaceActivity,
+  workspaceLayout,
+} from './authoring-progress.js'
 import { DoxloopError, UsageError } from './errors.js'
 import { generatorSkillName } from './generators.js'
 import {
@@ -16,11 +26,21 @@ import {
 import { isSpecUrl, loadProject, sourceKind } from './project.js'
 import { monitorRemoteSources } from './remote-monitor.js'
 import { persistReviewReport } from './review-report.js'
+import { snapshotLocalSources } from './local-source-snapshot.js'
+import {
+  CAPTURE_PASSWORD_SECRET,
+  CAPTURE_USERNAME_SECRET,
+  captureAuthContext,
+  describeCaptureAuth,
+  prepareCaptureAuth,
+  type CaptureAuthMode,
+} from './capture-auth.js'
 import {
   claudeCaptureArguments,
   checkScreenCaptureBrowser,
   codexCaptureArguments,
   screenCaptureProvider,
+  writeGeminiCaptureSettings,
   type ScreenCaptureProvider,
 } from './screen-capture-provider.js'
 import { adoptCapturedImages, checkApplicationReadiness, collapseDuplicateCaptures, embedMissingCaptures, prepareGuideAssetDirectories, validateScreenshotManifest, writeScreenshotManifestSkeleton } from './screenshot-workflow.js'
@@ -86,11 +106,27 @@ export async function runAuthor(options: {
   timeoutMinutes?: number
   /** Claude turn cap for an unattended run; derived from the approved plan when omitted. */
   maxTurns?: number
+  /** Claude spending cap in US dollars for an unattended run. Codex and Gemini have no equivalent. */
+  maxBudgetUsd?: number
+  /** Pages the run is expected to write, for the "N of M" stage counter. Read from the plan when omitted. */
+  plannedPages?: number
+  /** Stage copy for the page-writing stage, such as "Editing selected pages". */
+  progressLabel?: string
   /**
    * Proposal workspaces are throwaway copies of the project. They must not open
    * a history database of their own; the real project records the run instead.
    */
   recordHistory?: boolean
+  /**
+   * Scoped page-edit workspaces must not rewrite source-sync metadata. That
+   * metadata is neither part of the requested page change nor an indication
+   * that product-source drift has been reconciled.
+   */
+  recordOperationalState?: boolean
+  /** Keep a proposal workspace reviewable so validation errors can be fixed
+   * with a follow-up instruction instead of discarding the agent's work. */
+  onFailure?: (detail: string) => void
+  tolerateValidationErrors?: boolean
 }): Promise<number> {
   let project = await loadProject(options.root)
   let remoteChanges: Awaited<ReturnType<typeof monitorRemoteSources>>['changes'] | undefined
@@ -104,9 +140,12 @@ export async function runAuthor(options: {
       ? (options.changeSummary ??
         formatSourceChanges(remoteChanges ?? await collectSourceChanges(options.root, project.sources)))
       : undefined
-  const prompt = authorPrompt(
+  // Sign-in material never enters the prompt; the agent only learns which
+  // kind is available so it knows what to expect on the login page.
+  const captureAuth = project.application ? await captureAuthContext(options.root) : undefined
+  const buildPrompt = (sources: SourceBinding[]): string => authorPrompt(
     options.mode,
-    project.sources,
+    sources,
     options.request,
     project.generator,
     project.documentation,
@@ -115,14 +154,15 @@ export async function runAuthor(options: {
     options.screenshots ?? 'auto',
     project.application,
     currentCliCommand(),
+    describeCaptureAuth(captureAuth),
   )
   if (options.print) {
-    process.stdout.write(`${prompt}\n`)
+    process.stdout.write(`${buildPrompt(project.sources)}\n`)
     return 0
   }
   const screenshotIntent = options.screenshots ?? 'auto'
   if (options.mode !== 'review' && screenshotIntent === 'enabled') {
-    const readiness = await checkApplicationReadiness(project.application)
+    const readiness = await checkApplicationReadiness(project.application, captureAuth)
     if (!readiness.reachable) {
       throw new DoxloopError(`Cannot start required screenshot capture. ${readiness.message}`)
     }
@@ -148,6 +188,28 @@ export async function runAuthor(options: {
   if (options.mode !== 'review') {
     await installSkill({ root: options.root, agent: selected.name })
   }
+  // Claude and Codex are told, through their own sandboxes, that source
+  // checkouts are read-only. Gemini has no such switch, so an unattended
+  // Gemini run reads a throwaway copy of each local source instead and can
+  // never write into the real checkout.
+  let promptSources = project.sources
+  if (selected.name === 'gemini' && options.nonInteractive === true && options.mode !== 'review') {
+    const snapshot = await snapshotLocalSources(options.root, project.sources)
+    if (snapshot.copied.length > 0) {
+      process.stdout.write(
+        `Copied ${snapshot.copied.length} local source${snapshot.copied.length === 1 ? '' : 's'} into a read-only snapshot for Gemini: ${snapshot.copied.map((entry) => entry.name).join(', ')}.\n`,
+      )
+    }
+    promptSources = snapshot.sources
+  }
+  let prompt = buildPrompt(promptSources)
+  if (options.mode !== 'review') {
+    const approved = await workspacePlan(options.root)
+    if (approved) {
+      const existing = (await authoringPages(options.root, project)).map((path) => path.slice(options.root.length + 1).replace(/\\/g, '/'))
+      prompt += `\n\nAPPROVED FILE CONTRACT (enforced before any acceptance):\n${JSON.stringify(approved.pages.map((page) => ({ path: page.path, action: page.action, priority: page.priority })), null, 2)}\nExisting documentation files: ${JSON.stringify(existing)}\nUpdate existing pages in place, retaining their filenames and extensions. Do not replace an existing .md file with .mdx or move an index page to a new path. Only delete pages explicitly approved for removal. Preserve and Later pages must remain untouched. New pages must use an approved path under ${project.contentDir || 'the project root'}. If the plan cannot be followed, report the conflict instead of silently changing its scope.\n`
+    }
+  }
   const requestId =
     options.recordHistory === false
       ? undefined
@@ -168,11 +230,17 @@ export async function runAuthor(options: {
       : undefined
   process.stdout.write(`Starting ${selected.name} with $doxloop-authoring...\n`)
   const preparedPrompt = await prepareAgentPrompt(options.root, prompt)
-  const sourceDirectories = sourceAccessDirectories(options.root, project.sources)
+  const sourceDirectories = sourceAccessDirectories(options.root, promptSources)
+  const captureMaterial =
+    options.mode !== 'review' && screenshotIntent !== 'disabled' && project.application
+      ? await prepareCaptureAuth(options.root)
+      : undefined
   const captureProvider =
     options.mode !== 'review' && screenshotIntent !== 'disabled' && project.application
-      ? screenCaptureProvider(options.root, project.application)
+      ? screenCaptureProvider(options.root, project.application, captureMaterial)
       : undefined
+  // Gemini reads MCP servers from the project's settings file rather than a flag.
+  if (captureProvider && selected.name === 'gemini') await writeGeminiCaptureSettings(options.root, captureProvider)
   if (captureProvider) {
     const plannedCaptures = await workspacePlan(options.root)
     // The capture tool cannot create the folder it writes into, so make the
@@ -195,92 +263,195 @@ export async function runAuthor(options: {
       if (guides > 0) process.stdout.write(`Staged ${guides} approved screenshot guide${guides === 1 ? '' : 's'} in the capture manifest.\n`)
     }
   }
-  const streamClaudeOutput =
-    selected.name === 'claude' &&
-    (options.mode === 'review' || options.nonInteractive === true)
+  // Every unattended agent streams machine-readable events, which Doxloop
+  // turns into the same one-line activity summaries whichever agent runs.
+  const streamAgentOutput = options.mode === 'review' || options.nonInteractive === true
   const maxTurns = options.mode === 'review'
     ? undefined
     : options.maxTurns ?? authoringTurnBudget(await workspacePlan(options.root))
   const reviewOutput: string[] = []
-  const claudeLog = streamClaudeOutput ? new ClaudeStreamLogFormatter() : undefined
-  lastAgentFailureDetail = undefined
+  let agentLog: AgentLogFormatter | undefined = streamAgentOutput ? createAgentLogFormatter(selected.name) : undefined
+  let failureDetail: string | undefined
+  const captureReview = options.mode === 'review'
+  const unattended = options.nonInteractive === true && !captureReview
+  // Progress is derived from what the agent writes, so the stage list moves
+  // when pages land rather than when the whole run ends.
+  const progress = unattended
+    ? new AuthoringProgressTracker({
+        plannedPages: options.plannedPages ?? plannedPageCount(await workspacePlan(options.root)),
+        screenshots: Boolean(captureProvider),
+        ...(options.progressLabel ? { pageLabel: options.progressLabel } : {}),
+      })
+    : undefined
+  progress?.begin()
+  const stopWatching = progress
+    ? await watchWorkspaceActivity(options.root, await workspaceLayout(options.root, project), (activity) => progress.record(activity))
+    : undefined
+  if (agentLog && progress) {
+    agentLog.onToolCall = (tool, input) => {
+      const activity = classifyAgentToolCall(tool, input, captureProvider ? { captureServer: captureProvider.name } : {})
+      if (activity) progress.record(activity)
+    }
+  }
   let exitCode: number
+  let stoppedByBudget = false
+  let stoppedBySignal = false
+  // A run's time budget covers every attempt, so a resumed session gets only
+  // what is left of it.
+  const deadline =
+    options.timeoutMinutes !== undefined && options.timeoutMinutes > 0
+      ? Date.now() + options.timeoutMinutes * 60_000
+      : undefined
+  const resumeLimit = agentApiResumeLimit()
+  let resumes = 0
   try {
-    exitCode = await new Promise<number>((resolveExit, reject) => {
-      const captureReview = options.mode === 'review'
-      const child = spawn(
+    // Unattended agents print rather than interact, so their output is piped
+    // through Doxloop; an interactive agent keeps the terminal to itself.
+    const pipeOutput = Boolean(agentLog) || captureReview || unattended
+    for (;;) {
+      const resumeSession = resumes > 0 ? agentLog?.sessionId : undefined
+      const failureDetail = agentLog?.stopReason
+      // Each attempt gets a fresh formatter: the old one's stream ended with
+      // the failed result, and progress is still routed through onToolCall.
+      if (resumeSession && agentLog) {
+        agentLog = createAgentLogFormatter(selected.name)
+        if (progress) {
+          agentLog.onToolCall = (tool, input) => {
+            const activity = classifyAgentToolCall(tool, input, captureProvider ? { captureServer: captureProvider.name } : {})
+            if (activity) progress.record(activity)
+          }
+        }
+      }
+      const attemptLog = agentLog
+      const agent = spawnAgentProcess(
         selected.executable,
-        agentArguments(selected.name, preparedPrompt.argument, {
-          ...options,
-          sourceDirectories,
-          ...(captureProvider ? { captureProvider } : {}),
-          captureRequired: screenshotIntent === 'enabled',
-          ...(maxTurns !== undefined ? { maxTurns } : {}),
-        }),
+        agentArguments(
+          selected.name,
+          resumeSession ? resumedSessionPrompt(failureDetail) : preparedPrompt.argument,
+          {
+            ...options,
+            sourceDirectories,
+            ...(captureProvider ? { captureProvider } : {}),
+            captureRequired: screenshotIntent === 'enabled',
+            ...(maxTurns !== undefined ? { maxTurns } : {}),
+            ...(resumeSession ? { resumeSession } : {}),
+          },
+        ),
         {
           cwd: options.root,
-          stdio: claudeLog || captureReview ? ['inherit', 'pipe', captureReview ? 'pipe' : 'inherit'] : 'inherit',
+          stdio: pipeOutput ? ['inherit', 'pipe', 'pipe'] : 'inherit',
           env: process.env,
+          isolate: unattended || captureReview,
         },
       )
-      if (claudeLog) {
+      const { child } = agent
+      if (attemptLog) {
         child.stdout?.on('data', (chunk: Buffer | string) => {
-          const lines = claudeLog.push(chunk)
-          writeClaudeLogLines(lines)
+          const lines = attemptLog.push(chunk)
+          writeAgentLogLines(lines)
           if (captureReview) reviewOutput.push(...lines)
         })
         child.stdout?.once('end', () => {
-          const lines = claudeLog.finish()
-          writeClaudeLogLines(lines)
+          const lines = attemptLog.finish()
+          writeAgentLogLines(lines)
           if (captureReview) reviewOutput.push(...lines)
         })
-      } else if (captureReview) {
+      } else if (pipeOutput) {
         child.stdout?.on('data', (chunk: Buffer | string) => {
           const value = chunk.toString()
-          reviewOutput.push(value)
+          if (captureReview) reviewOutput.push(value)
           process.stdout.write(value)
         })
       }
-      if (captureReview) child.stderr?.on('data', (chunk: Buffer | string) => process.stderr.write(chunk.toString()))
+      if (pipeOutput) child.stderr?.on('data', (chunk: Buffer | string) => process.stderr.write(chunk.toString()))
       // An unattended run has nobody to interrupt it, so the budget is the
       // only thing that stops a confused agent from running indefinitely.
       const budget =
-        options.timeoutMinutes !== undefined && options.timeoutMinutes > 0
+        deadline !== undefined
           ? setTimeout(
               () => {
+                stoppedByBudget = true
                 process.stderr.write(
                   `Stopping ${selected.name} after the configured ${options.timeoutMinutes}-minute budget.\n`,
                 )
-                child.kill('SIGTERM')
+                void agent.stop()
               },
-              options.timeoutMinutes * 60_000,
+              Math.max(0, deadline - Date.now()),
             )
           : undefined
       budget?.unref?.()
-      child.once('error', (error) => {
-        clearTimeout(budget)
-        reject(error)
+      // The control center stops a run by signalling this process. Forward the
+      // signal so the agent and its capture browser stop with it. An interactive
+      // agent already receives Ctrl+C from the terminal, so only SIGTERM is
+      // forwarded to it.
+      const stopForwarding = forwardTerminationSignals(agent, {
+        label: selected.name,
+        signals: agent.isolated ? ['SIGTERM', 'SIGINT'] : ['SIGTERM'],
+        onStopped: async () => {
+          await stopWatching?.()
+          if (preparedPrompt.path) await rm(preparedPrompt.path, { force: true })
+        },
       })
-      child.once('exit', (code, signal) => {
-        clearTimeout(budget)
-        if (signal) {
-          process.stderr.write(`${selected.name} stopped by ${signal}.\n`)
-          resolveExit(1)
+      try {
+        const exit = await agent.exited
+        if (exit.error) throw exit.error
+        if (exit.signal) {
+          process.stderr.write(`${selected.name} stopped by ${exit.signal}.\n`)
+          stoppedBySignal = true
+          exitCode = 1
         } else {
-          resolveExit(code ?? 1)
+          exitCode = exit.code ?? 1
         }
-      })
-    })
+      } finally {
+        clearTimeout(budget)
+        stopForwarding()
+      }
+      // A Claude API failure mid-response ends the process but leaves the
+      // session intact. Resuming that session continues the task with its
+      // context, which is far cheaper than failing the run and starting the
+      // agent again from a continuation brief.
+      const resumable =
+        exitCode !== 0 &&
+        !stoppedByBudget &&
+        !stoppedBySignal &&
+        selected.name === 'claude' &&
+        attemptLog?.transientFailure === true &&
+        Boolean(attemptLog.sessionId) &&
+        resumes < resumeLimit
+      if (!resumable) break
+      resumes += 1
+      const delay = agentApiResumeDelayMs(resumes)
+      process.stdout.write(
+        `Claude's API request failed mid-run. Resuming the same session${delay > 0 ? ` in ${Math.ceil(delay / 1000)}s` : ''} (attempt ${resumes} of ${resumeLimit}); pages and screenshots already produced are kept.\n`,
+      )
+      if (delay > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delay))
+    }
   } finally {
+    await stopWatching?.()
     if (preparedPrompt.path) await rm(preparedPrompt.path, { force: true })
+    await captureMaterial?.cleanup()
+  }
+  if (exitCode === 0) {
+    progress?.finish()
+    progress?.validating()
   }
   if (exitCode !== 0) {
-    lastAgentFailureDetail = claudeLog?.stopReason ? `Claude ${claudeLog.stopReason}.` : undefined
+    const resumeNote = agentLog?.transientFailure
+      ? resumes > 0
+        ? ` Doxloop resumed the session ${resumes} time${resumes === 1 ? '' : 's'} without success. Retry the stage to continue from the preserved workspace.`
+        : ' Retry the stage to continue from the preserved workspace.'
+      : ''
+    failureDetail = agentLog?.stopReason
+      ? `${agentDisplayName(selected.name)} ${agentLog.stopReason.replace(/\.$/, '')}.${resumeNote}`
+      : stoppedByBudget
+        ? `The run was stopped after its ${options.timeoutMinutes}-minute time budget. Raise "Maximum agent minutes" under Monitoring → Advanced watch scope and budgets, or retry the stage to continue from the preserved workspace.`
+        : undefined
     await finishRequest(options.root, requestId, {
       status: 'failed',
-      error: agentExitMessage(exitCode),
+      error: agentExitMessage(exitCode, failureDetail),
     })
   }
+  if (exitCode !== 0) options.onFailure?.(failureDetail ?? '')
   if (exitCode === 0 && options.mode === 'review') {
     const report = await persistReviewReport(options.root, reviewOutput.join('\n'), {
       agent: selected.name,
@@ -323,24 +494,26 @@ export async function runAuthor(options: {
       await finishRequest(options.root, requestId, { status: 'failed', error: message })
       throw new DoxloopError(`Application screenshot validation failed: ${message}`)
     }
-    if (screenshotResult.summary.message && screenshotResult.summary.captured > 0) {
+    if (screenshotResult.summary.message) {
       process.stderr.write(`Screenshot review note: ${screenshotResult.summary.message}\n`)
     }
     const validation = await validateProject(options.root)
     if (validation.errors > 0) {
       process.stderr.write(
-        `Agent run completed, but documentation validation failed:\n${formatValidation(validation)}\nThe synchronization baseline was not updated.\n`,
+        `Agent run completed, but documentation validation failed:\n${formatValidation(validation)}\n${options.tolerateValidationErrors ? 'The proposal remains available for review and refinement.' : 'The synchronization baseline was not updated.'}\n`,
       )
-      await finishRequest(options.root, requestId, {
-        status: 'failed',
-        validation: {
-          pages: validation.pages.length,
-          errors: validation.errors,
-          warnings: validation.warnings,
-        },
-        error: 'Documentation validation failed.',
-      })
-      return 1
+      if (!options.tolerateValidationErrors) {
+        await finishRequest(options.root, requestId, {
+          status: 'failed',
+          validation: {
+            pages: validation.pages.length,
+            errors: validation.errors,
+            warnings: validation.warnings,
+          },
+          error: 'Documentation validation failed.',
+        })
+        return 1
+      }
     }
     if (
       options.mode === 'create' &&
@@ -356,34 +529,38 @@ export async function runAuthor(options: {
       })
       return 1
     }
-    const state = await recordSyncState(options.root, completedProject.sources)
-    const recorded = Object.keys(state.sources).length
+    const state = options.recordOperationalState === false
+      ? undefined
+      : await recordSyncState(options.root, completedProject.sources)
+    const recorded = state ? Object.keys(state.sources).length : 0
     if (recorded > 0) {
       process.stdout.write(
         `Recorded the documentation sync baseline for ${recorded} source${recorded === 1 ? '' : 's'}.\n`,
       )
     }
-    await writeFile(
-      join(options.root, '.doxloop', 'last-run.json'),
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          mode: options.mode,
-          agent: selected.name,
-          completedAt: new Date().toISOString(),
-          validation: {
-            pages: validation.pages.length,
-            errors: validation.errors,
-            warnings: validation.warnings,
+    if (options.recordOperationalState !== false) {
+      await writeFile(
+        join(options.root, '.doxloop', 'last-run.json'),
+        `${JSON.stringify(
+          {
+            schemaVersion: 1,
+            mode: options.mode,
+            agent: selected.name,
+            completedAt: new Date().toISOString(),
+            validation: {
+              pages: validation.pages.length,
+              errors: validation.errors,
+              warnings: validation.warnings,
+            },
+            screenshots: screenshotResult.summary,
+            synchronizedSources: recorded,
           },
-          screenshots: screenshotResult.summary,
-          synchronizedSources: recorded,
-        },
-        null,
-        2,
-      )}\n`,
-      'utf8',
-    )
+          null,
+          2,
+        )}\n`,
+        'utf8',
+      )
+    }
     const authored = pagesBefore
       ? await recordAuthoredPages(options.root, requestId, pagesBefore, completedProject)
       : undefined
@@ -404,7 +581,7 @@ export async function runAuthor(options: {
     })
     if (requestId) {
       await syncPageRegistry(options.root, completedProject, requestId, authored?.paths)
-      await recordSourceSyncs(options.root, state, requestId)
+      if (state) await recordSourceSyncs(options.root, state, requestId)
     }
   }
   return exitCode
@@ -446,6 +623,8 @@ export async function prepareAgentPrompt(
  */
 export const PLANNING_MAX_TURNS = 100
 export const MIN_AUTHORING_MAX_TURNS = 400
+export const EDIT_MIN_MAX_TURNS = 80
+export const EDIT_TURNS_PER_PAGE = 30
 
 export function authoringTurnBudget(plan: Pick<DocumentationPlan, 'pages'> | undefined): number {
   const override = Number(process.env.DOXLOOP_AGENT_MAX_TURNS)
@@ -459,12 +638,91 @@ export function authoringTurnBudget(plan: Pick<DocumentationPlan, 'pages'> | und
   return Math.max(MIN_AUTHORING_MAX_TURNS, written * 30 + captures * 12)
 }
 
-let lastAgentFailureDetail: string | undefined
+export interface EditPromptInput {
+  pages: Array<{ path: string; title: string }>
+  instruction: string
+  allowRelated: boolean
+  followUps?: Array<{ instruction: string }>
+}
+
+/** Focus the general update prompt on a reviewer-selected set of existing pages. */
+export function editPrompt(input: EditPromptInput): string {
+  const pages = input.pages.map((page) => `- ${page.path} (${page.title})`).join('\n')
+  const related = input.allowRelated
+    ? 'You may also update navigation and add or replace images under the assets folder when the instruction requires it.'
+    : 'Do not change navigation or add images. If the instruction cannot be satisfied without them, make the text change that is possible and say what was left out.'
+  const followUps = input.followUps?.length
+    ? `\nEarlier instructions for this same edit, oldest first, are already reflected in the page. The latest instruction refines them:\n${input.followUps.map((followUp) => `- ${followUp.instruction}`).join('\n')}\n`
+    : ''
+  return `This is a scoped edit of existing documentation, requested by a reviewer.
+Change only the pages listed under "Pages to edit". Do not create, rename, or
+delete pages. Do not touch any other page, even to fix something you notice;
+mention it in your final summary instead.
+
+Pages to edit:
+${pages}
+
+Reviewer instruction:
+${input.instruction}
+
+${related}
+${followUps}
+Read the page and the sources it cites in .doxloop/evidence-map.json before
+changing anything. Keep the page's existing structure, tone, frontmatter, and
+component usage unless the instruction says otherwise. Ground every new claim
+in a configured source and record the source in the evidence map entry for the
+page. When the instruction asks for something the sources do not support, do
+not invent it: make the closest supported change and say what is unsupported
+in your summary.
+
+End with a two-sentence summary of what changed and why, followed by any
+notes for the reviewer.`
+}
+
+
+function writeAgentLogLines(lines: string[]): void {
+  for (const line of lines) process.stdout.write(`${line}\n`)
+}
+
+function agentDisplayName(name: AgentName): string {
+  return name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : 'Gemini'
+}
+
+/**
+ * How many times an unattended Claude run resumes its session after a
+ * transient API failure before the run is reported as failed.
+ */
+export const DEFAULT_AGENT_API_RESUMES = 2
+
+export function agentApiResumeLimit(): number {
+  const override = Number(process.env.DOXLOOP_AGENT_API_RESUMES)
+  return Number.isInteger(override) && override >= 0 ? override : DEFAULT_AGENT_API_RESUMES
+}
+
+/** A short, growing pause before resuming, so a struggling API gets a moment to recover. */
+export function agentApiResumeDelayMs(attempt: number): number {
+  const override = Number(process.env.DOXLOOP_AGENT_API_RESUME_DELAY_MS)
+  if (Number.isFinite(override) && override >= 0) return override
+  return Math.min(60_000, 10_000 * attempt)
+}
+
+/** The prompt that continues a Claude session cut off by an API failure. */
+export function resumedSessionPrompt(failureDetail: string | undefined): string {
+  return `Your previous response was cut off by a Claude API failure${failureDetail ? ` (${failureDetail})` : ''}, not by anything in the task. Continue the same Doxloop task from exactly where you stopped. Before redoing anything, check the workspace: pages already written, screenshots already captured, and manifest entries already recorded are finished, so do not repeat them and do not start over. Then complete every remaining page, screenshot, and validation step the task requires.`
+}
 
 /** The failure message for a non-zero agent exit, with the reason when Claude reported one. */
-export function agentExitMessage(exitCode: number): string {
-  return `The documentation agent exited with status ${exitCode}.${lastAgentFailureDetail ? ` ${lastAgentFailureDetail}` : ''}`
+export function agentExitMessage(exitCode: number, detail?: string): string {
+  return `The documentation agent exited with status ${exitCode}.${detail ? ` ${detail}` : ''}`
 }
+
+/** Shell invocations an unattended Gemini run may make without confirmation. */
+export const GEMINI_ALLOWED_TOOLS = [
+  'run_shell_command(doxloop)',
+  'run_shell_command(npx doxloop)',
+  'run_shell_command(pnpm exec doxloop)',
+  'run_shell_command(npm exec doxloop)',
+] as const
 
 export function agentArguments(
   name: AgentName,
@@ -479,10 +737,14 @@ export function agentArguments(
     captureProvider?: ScreenCaptureProvider
     captureRequired?: boolean
     maxTurns?: number
+    maxBudgetUsd?: number
+    /** Claude session to continue instead of starting a new one. */
+    resumeSession?: string
   } = {},
 ): string[] {
   const args: string[] = []
   const unattended = options.nonInteractive === true && options.mode !== 'review'
+  if (name === 'claude' && options.resumeSession) args.push('--resume', options.resumeSession)
   const sourceDirectories = [...new Set(options.sourceDirectories ?? [])]
   if (name === 'claude' && sourceDirectories.length > 0) {
     args.push(
@@ -492,7 +754,12 @@ export function agentArguments(
       claudeSourceAccessSettings(sourceDirectories),
     )
   }
-  if ((options.mode === 'review' || unattended) && name === 'codex') args.push('exec')
+  // Gemini has no write sandbox for extra directories; unattended runs point it
+  // at a read-only snapshot instead (see runAuthor), so the flag only widens reads.
+  if (name === 'gemini' && sourceDirectories.length > 0) {
+    args.push('--include-directories', sourceDirectories.join(','))
+  }
+  if ((options.mode === 'review' || unattended) && name === 'codex') args.push('exec', '--json')
   if (options.captureProvider && name === 'codex') {
     args.push(...codexCaptureArguments(options.captureProvider, options.captureRequired === true))
   }
@@ -510,6 +777,10 @@ export function agentArguments(
     args.push('-c', `model_reasoning_effort=${reasoning}`)
   }
   if (options.effort && name === 'claude') args.push('--effort', options.effort)
+  // Only Claude Code exposes a spending cap; Codex and Gemini have no such flag.
+  if (options.maxBudgetUsd !== undefined && options.maxBudgetUsd > 0 && name === 'claude' && (options.mode === 'review' || unattended)) {
+    args.push('--max-budget-usd', String(options.maxBudgetUsd))
+  }
   if (options.mode === 'review') {
     if (name === 'codex') {
       args.push(
@@ -533,7 +804,7 @@ export function agentArguments(
         prompt,
       )
     } else {
-      args.push('--approval-mode', 'plan', '--prompt', prompt)
+      args.push('--approval-mode', 'plan', '--output-format', 'stream-json', '--prompt', prompt)
     }
   } else if (unattended) {
     // Unattended authoring still uses the agent's own sign-in. Writes are
@@ -555,7 +826,12 @@ export function agentArguments(
         prompt,
       )
     } else {
-      args.push('--approval-mode', 'auto_edit', '--prompt', prompt)
+      // auto_edit approves file edits only. Validation runs through the
+      // Doxloop CLI, so that command is pre-approved; anything else still
+      // needs a confirmation Gemini cannot get without a terminal.
+      args.push('--approval-mode', 'auto_edit')
+      for (const tool of GEMINI_ALLOWED_TOOLS) args.push('--allowed-tools', tool)
+      args.push('--output-format', 'stream-json', '--prompt', prompt)
     }
   } else {
     // The Gemini CLI treats a positional prompt as a non-interactive one-shot;
@@ -623,282 +899,6 @@ function claudeAbsolutePermissionPattern(path: string): string {
   return `/${normalized}`
 }
 
-type JsonRecord = Record<string, unknown>
-type ClaudeStreamBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool'; id?: string; name: string; json: string; input?: JsonRecord }
-
-/** Convert Claude Code's JSONL stream into concise, durable UI log lines. */
-export class ClaudeStreamLogFormatter {
-  private buffer = ''
-  private readonly blocks = new Map<number, ClaudeStreamBlock>()
-  private readonly tools = new Map<string, string>()
-  private streamedContent = false
-  private lastText = ''
-  /** Why Claude stopped without a successful result, once its result event arrives. */
-  stopReason: string | undefined
-
-  push(chunk: Buffer | string): string[] {
-    this.buffer += chunk.toString()
-    const lines = this.buffer.split(/\r?\n/)
-    this.buffer = lines.pop() ?? ''
-    return lines.flatMap((line) => this.formatLine(line))
-  }
-
-  finish(): string[] {
-    const remaining = this.buffer
-    this.buffer = ''
-    return remaining ? this.formatLine(remaining) : []
-  }
-
-  private formatLine(line: string): string[] {
-    if (!line.trim()) return []
-    let message: JsonRecord
-    try {
-      const parsed = JSON.parse(line) as unknown
-      const record = jsonRecord(parsed)
-      if (!record) return [line]
-      message = record
-    } catch {
-      return [line]
-    }
-
-    const type = stringField(message, 'type')
-    if (type === 'stream_event') return this.formatStreamEvent(jsonRecord(message.event))
-    if (type === 'assistant' && !this.streamedContent) {
-      return this.formatAssistantMessage(jsonRecord(message.message))
-    }
-    if (type === 'user') return this.formatToolResults(jsonRecord(message.message))
-    if (type === 'result') return this.formatResult(message)
-    if (type === 'system') return this.formatSystem(message)
-    return []
-  }
-
-  private formatStreamEvent(event: JsonRecord | undefined): string[] {
-    if (!event) return []
-    const eventType = stringField(event, 'type')
-    if (eventType === 'message_start') {
-      this.blocks.clear()
-      return []
-    }
-    const index = numberField(event, 'index')
-    if (index === undefined) return []
-
-    if (eventType === 'content_block_start') {
-      const content = jsonRecord(event.content_block)
-      if (!content) return []
-      const contentType = stringField(content, 'type')
-      if (contentType === 'text') {
-        this.blocks.set(index, { type: 'text', text: stringField(content, 'text') ?? '' })
-        this.streamedContent = true
-      } else if (contentType === 'tool_use') {
-        const name = stringField(content, 'name') ?? 'tool'
-        this.blocks.set(index, {
-          type: 'tool',
-          ...(stringField(content, 'id') ? { id: stringField(content, 'id')! } : {}),
-          name,
-          json: '',
-          ...(jsonRecord(content.input) ? { input: jsonRecord(content.input)! } : {}),
-        })
-        this.streamedContent = true
-      }
-      return []
-    }
-
-    if (eventType === 'content_block_delta') {
-      const block = this.blocks.get(index)
-      const delta = jsonRecord(event.delta)
-      if (!block || !delta) return []
-      if (block.type === 'text' && stringField(delta, 'type') === 'text_delta') {
-        block.text += stringField(delta, 'text') ?? ''
-      } else if (block.type === 'tool' && stringField(delta, 'type') === 'input_json_delta') {
-        block.json += stringField(delta, 'partial_json') ?? ''
-      }
-      return []
-    }
-
-    if (eventType !== 'content_block_stop') return []
-    const block = this.blocks.get(index)
-    this.blocks.delete(index)
-    if (!block) return []
-    if (block.type === 'text') return this.textLines(block.text)
-
-    let input = block.input ?? {}
-    if (block.json) {
-      try {
-        input = jsonRecord(JSON.parse(block.json) as unknown) ?? input
-      } catch {
-        // A malformed partial tool input still has a useful tool name.
-      }
-    }
-    const activity = formatClaudeToolActivity(block.name, input)
-    if (block.id) this.tools.set(block.id, activity)
-    return [`→ ${activity}`]
-  }
-
-  private formatAssistantMessage(message: JsonRecord | undefined): string[] {
-    const content = message?.content
-    if (!Array.isArray(content)) return []
-    const lines: string[] = []
-    for (const rawBlock of content) {
-      const block = jsonRecord(rawBlock)
-      if (!block) continue
-      const type = stringField(block, 'type')
-      if (type === 'text') {
-        lines.push(...this.textLines(stringField(block, 'text') ?? ''))
-      } else if (type === 'tool_use') {
-        const activity = formatClaudeToolActivity(
-          stringField(block, 'name') ?? 'tool',
-          jsonRecord(block.input) ?? {},
-        )
-        const id = stringField(block, 'id')
-        if (id) this.tools.set(id, activity)
-        lines.push(`→ ${activity}`)
-      }
-    }
-    return lines
-  }
-
-  private formatToolResults(message: JsonRecord | undefined): string[] {
-    const content = message?.content
-    if (!Array.isArray(content)) return []
-    const lines: string[] = []
-    for (const rawBlock of content) {
-      const block = jsonRecord(rawBlock)
-      if (!block || stringField(block, 'type') !== 'tool_result') continue
-      const id = stringField(block, 'tool_use_id')
-      const activity = (id && this.tools.get(id)) || 'Tool action'
-      if (block.is_error === true) {
-        const detail = compactClaudeValue(block.content)
-        lines.push(`✗ ${activity} failed${detail ? `: ${detail}` : ''}`)
-      } else {
-        lines.push(`✓ ${activity}`)
-      }
-    }
-    return lines
-  }
-
-  private formatSystem(message: JsonRecord): string[] {
-    const subtype = stringField(message, 'subtype')
-    if (subtype === 'init') {
-      const model = stringField(message, 'model')
-      return [`Claude session started${model ? ` · ${model}` : ''}`]
-    }
-    if (subtype === 'api_retry') {
-      const attempt = numberField(message, 'attempt')
-      const maximum = numberField(message, 'max_retries')
-      const delay = numberField(message, 'retry_delay_ms')
-      return [
-        `Claude API retry${attempt ? ` ${attempt}${maximum ? `/${maximum}` : ''}` : ''}${delay ? ` in ${Math.ceil(delay / 1000)}s` : ''}`,
-      ]
-    }
-    if (subtype === 'compact_boundary') return ['Claude compacted its working context.']
-    return []
-  }
-
-  private formatResult(message: JsonRecord): string[] {
-    const subtype = stringField(message, 'subtype')
-    const success = subtype === 'success' && message.is_error !== true
-    const turns = numberField(message, 'num_turns')
-    const duration = numberField(message, 'duration_ms')
-    const reason = success ? undefined : claudeStopReason(subtype, turns, message)
-    if (reason) this.stopReason = reason
-    const summary = `Claude ${success ? 'finished' : 'stopped'}${turns !== undefined ? ` · ${turns} turns` : ''}${duration !== undefined ? ` · ${formatLogDuration(duration)}` : ''}${reason ? ` · ${reason}` : ''}`
-    const result = stringField(message, 'result')
-    return [...(result ? this.textLines(result) : []), summary]
-  }
-
-  private textLines(text: string): string[] {
-    const normalized = text.trim()
-    if (!normalized || normalized === this.lastText) return []
-    this.lastText = normalized
-    return normalized.split(/\r?\n/).filter(Boolean)
-  }
-}
-
-/**
- * A bare "exited with status 1" hides why a run ended. Claude's result event
- * names the cause, and the turn limit in particular needs to be visible: it
- * looks like an agent failure but is a Doxloop budget.
- */
-function claudeStopReason(subtype: string | undefined, turns: number | undefined, message: JsonRecord): string {
-  const reported = Array.isArray(message.errors)
-    ? message.errors
-      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      .map((item) => compactLogText(item))
-    : []
-  if (subtype === 'error_max_turns') {
-    return `reached its ${turns !== undefined ? `${turns}-turn` : 'turn'} limit before finishing; retry the stage to continue from the preserved workspace`
-  }
-  if (subtype === 'error_max_budget_usd') return 'reached its spending limit before finishing'
-  if (reported.length > 0) return `stopped with an error: ${reported.join('; ')}`
-  if (subtype === 'error_during_execution') return 'stopped with an error during execution'
-  return subtype ? `stopped with result "${subtype}"` : 'stopped without a result'
-}
-
-function writeClaudeLogLines(lines: string[]): void {
-  for (const line of lines) process.stdout.write(`${line}\n`)
-}
-
-function formatClaudeToolActivity(name: string, input: JsonRecord): string {
-  const path = stringField(input, 'file_path') ?? stringField(input, 'path')
-  const pattern = stringField(input, 'pattern')
-  const description = stringField(input, 'description')
-  const command = stringField(input, 'command')
-  const query = stringField(input, 'query')
-  const url = stringField(input, 'url')
-  const prompt = stringField(input, 'prompt')
-
-  if (name === 'Read') return `Reading ${compactLogText(path ?? 'a file')}`
-  if (name === 'Write') return `Writing ${compactLogText(path ?? 'a file')}`
-  if (name === 'Edit' || name === 'MultiEdit') return `Editing ${compactLogText(path ?? 'a file')}`
-  if (name === 'Glob') return `Finding files matching ${compactLogText(pattern ?? '*')}`
-  if (name === 'Grep') return `Searching${pattern ? ` for ${compactLogText(pattern)}` : ''}${path ? ` in ${compactLogText(path)}` : ''}`
-  if (name === 'Bash') return `Running ${compactLogText(description ?? command ?? 'a command')}`
-  if (name === 'WebFetch') return `Fetching ${compactLogText(url ?? 'a web page')}`
-  if (name === 'WebSearch') return `Searching the web${query ? ` for ${compactLogText(query)}` : ''}`
-  if (name === 'Skill') return `Loading skill ${compactLogText(stringField(input, 'skill') ?? 'instructions')}`
-  if (name === 'Agent' || name === 'Task') return `Starting subtask${description || prompt ? `: ${compactLogText(description ?? prompt ?? '')}` : ''}`
-  return `Using ${compactLogText(name)}`
-}
-
-function compactClaudeValue(value: unknown): string {
-  if (typeof value === 'string') return compactLogText(value)
-  if (!Array.isArray(value)) return ''
-  return compactLogText(
-    value
-      .map((item) => stringField(jsonRecord(item) ?? {}, 'text') ?? '')
-      .filter(Boolean)
-      .join(' '),
-  )
-}
-
-function compactLogText(value: string, maximum = 240): string {
-  const compact = value.replace(/\s+/g, ' ').trim()
-  return compact.length > maximum ? `${compact.slice(0, maximum - 1)}…` : compact
-}
-
-function formatLogDuration(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1000))
-  const minutes = Math.floor(seconds / 60)
-  const remaining = seconds % 60
-  return minutes > 0 ? `${minutes}m ${remaining}s` : `${remaining}s`
-}
-
-function jsonRecord(value: unknown): JsonRecord | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as JsonRecord)
-    : undefined
-}
-
-function stringField(record: JsonRecord, key: string): string | undefined {
-  return typeof record[key] === 'string' ? record[key] : undefined
-}
-
-function numberField(record: JsonRecord, key: string): number | undefined {
-  return typeof record[key] === 'number' ? record[key] : undefined
-}
-
 export function authorPrompt(
   mode: AuthorMode,
   sources: SourceBinding[],
@@ -910,6 +910,7 @@ export function authorPrompt(
   screenshots: ScreenshotIntent = 'auto',
   application?: ApplicationConfig,
   cliCommand = 'doxloop',
+  captureAuth: CaptureAuthMode = 'none',
 ): string {
   const sourceText =
     sources.length === 0
@@ -941,7 +942,7 @@ export function authorPrompt(
               ? 'The supplied URLs authorize a bounded inspection of public documentation on the same origin: use one browser session, inspect no more than three representative pages per reference, batch navigation and extraction, and do not ask permission for each page. Inspect them according to the authoring skill\'s reference-site workflow.'
               : 'Do not browse or recapture these sites unless the current request explicitly changes the theme, layout, or information architecture. Reuse the existing project theme and captured design profile for content-only work.'
           } Do not treat their product claims, examples, names, logos, or navigation labels as evidence about the product being documented.`
-  const screenshotText = screenshotPrompt(mode, screenshots, application)
+  const screenshotText = screenshotPrompt(mode, screenshots, application, captureAuth)
   const tasks: Record<AuthorMode, string> = {
     create:
       'Begin with read-only product discovery. Classify the product, identify its public capabilities and likely readers, map the documentation types supported by source evidence, infer the most relevant expert domain template and documentation-type playbooks, and apply audience as flavor within that combination. Compose a professional semantic navigation plan from the common site frame, selected type blocks, domain overlays, and audience ordering; include both top-navigation and left-navigation outlines, remove unsupported or duplicate destinations, and implement the result through the generator-native navigation system. Capture evidence-backed theme tokens, fonts, and public brand assets. Do not force the user to choose or know a template. When the expertise profile is clear, state it and continue; ask only when competing profiles would materially change the reader, scope, or outcomes. Before editing, present your findings, captured brand identity, prioritized documentation plan, and navigation outline as a concise progress update. That update is not a stopping point: unless an essential material choice genuinely requires a user response, continue immediately in this same run from discovery through file edits and validation. A discovery summary, coverage plan, or navigation outline by itself is an incomplete create run and must never be the final response. If material choices remain unresolved, ask for them once in one consolidated message and wait for one response; otherwise state reasonable assumptions and continue without asking. Do not ask follow-up questions unless a contradiction blocks accurate work. Save the confirmed or inferred reader and editorial decisions under `documentation` in `.doxloop/project.json`, preserving all other settings; do not persist template identifiers as requirements. Then create or improve a comprehensive documentation set for the agreed scope, apply the confirmed identity through the generator-native theme, complete factual, task, editorial, and accessibility passes, and clear every professional quality gate. Write every page to the depth in the authoring skill\'s page-depth reference: an outcome-led opening, prerequisites, complete ordered steps with exact labels and observable results, verification, evidence-backed troubleshooting, and a next step for guides; complete tables for reference; a model and its consequences for concepts; and an audience-oriented landing page with cards. Resolve every `thin-page` and `thin-procedure` validation warning before finishing. Replace every generated starter page and remove every `doxloop:starter-page` marker before finishing. Do not optimize for the minimum number of pages.',
@@ -1013,6 +1014,7 @@ function screenshotPrompt(
   mode: AuthorMode,
   intent: ScreenshotIntent,
   application?: ApplicationConfig,
+  captureAuth: CaptureAuthMode = 'none',
 ): string {
   if (mode === 'review' || intent === 'disabled') {
     return 'Do not operate the product application or create, refresh, or remove guide screenshots during this run.'
@@ -1028,13 +1030,36 @@ function screenshotPrompt(
     application?.screenshots?.highlight === false
       ? 'Do not add capture-time focus rings or numbered markers because application screenshot highlighting is disabled.'
       : 'When a specific control needs attention, add a non-destructive high-contrast focus ring and numbered marker before capture so the highlight is baked into the portable image; do not obscure labels or essential state.'
+  const authText = application ? captureAuthPrompt(captureAuth) : ''
   return `${triggerText}
 
 ${applicationText}
+
+${authText}
 
 ${application ? 'Doxloop supplies a Playwright browser as the `doxloop_capture` MCP server for this authoring run. Use its browser navigation, snapshot, interaction, evaluation, and screenshot tools; do not conclude that browser automation is unavailable without first attempting those tools. The screenshot tool resolves its filename against this project root, and it does not create folders: if the parent directory is missing the call fails with ENOENT and no image is written. Doxloop pre-creates the planned guide directories, but create any other parent directory yourself before calling the tool, then pass the project-relative manifest filename. Read the tool result every time — an ENOENT or any other error means the capture did not happen, so fix the path and call it again rather than continuing. The application is a client-rendered page: after navigating or interacting, take a snapshot and confirm the expected content is actually present before capturing. Never screenshot immediately after navigation, and never capture a splash, spinner, skeleton, or "loading" state — Doxloop rejects a capture that is overwhelmingly one background color.' : ''}
 
 When screenshots are enabled, read and follow the authoring skill's application-screenshot workflow. Capture only the configured application or a verified local application from the configured sources. Save guide screenshots as committed generator-native documentation assets, not under the design-reference cache. Give every step of a UI guide that changes what is on screen its own captured image — the entry screen, each opened dialog, drawer, tab, or expanded section, the filled form, and the visible result — so a reader can follow the guide screen by screen. Place each image immediately after the instruction that produces the shown state, use concise alternative text and an optional caption, and keep equivalent textual instructions. When the procedure uses a step component such as \`<Steps>\`/\`<Step>\`, put each image inside that step's own body — those components render block content — instead of collecting images after the block. Every verified capture must appear in its guide: if a captured state has no place in the finished procedure, delete the image and record that step as text-only rather than leaving it unused. ${highlightText} Never capture credentials, personal data, real customer data, access tokens, or unrelated browser content.
 
 When an approved documentation plan exists, use each screenshot-enabled page's startPath and workflow as a strict capture scope; begin at new URL(startPath, application.baseUrl), follow the approved safe-state assumptions and ordered actions, and verify the named visible outcomes. In direct authoring without a plan, derive the same details from the user's request and configured source evidence before opening the application; never invent a route or test state. When a plan is approved, Doxloop has already written .doxloop/screenshot-manifest.json containing every approved guide with its steps staged as status planned. Fill that file in; never delete a guide, drop a step, or rebuild the file from the captures you happened to take. Every staged guide must end as verified captures or as text-only steps with specific reasons, and Doxloop fails the run for any guide left planned. Open each guide's startPath in the capture browser before you judge it: you may not decide that a screen is not worth capturing, or is not distinct, without having navigated to it. Without an approved plan, create the file yourself with schemaVersion 1 and one guide per agreed direct-authoring guide. Each guide has a page field and ordered steps. Every step records id, a specific action, expectedState, purpose, capture as the JSON boolean true or false, status, and—when a plan exists—the one-based sequenceItem it represents. Write action, expectedState, and purpose as full descriptive clauses of at least 8 characters each (for example "Open the application at /" rather than "Open /"); Doxloop rejects terser values. Never write "required" or "recommended" in capture. A verified capture also records target, a project-relative PNG file, useful alt text, and checks with expectedStateConfirmed, privacyReviewed, legibilityReviewed, and meaningful all true. Write status verified once that PNG exists on disk and you have embedded it in its guide; a planned or intended capture is never verified. If you did not capture an image for a step, set capture false, status text-only, and a specific textOnlyReason — Doxloop checks every declared file and reports all of them at once. A step without an image uses status text-only and a specific textOnlyReason. You verify a state before capturing it, not after: take a page snapshot, confirm the named content is present, then capture. You are not expected to open or view the saved PNG — Doxloop checks every saved image itself for readability, size, blank or still-loading screens, duplicates, and embedding, and fails the run when one is wrong. Never record a captured step as text-only because you could not view its image file; text-only means you could not reach that state in the application. Capture at least one meaningful image per required guide; consolidate planned items that resolve to the same unchanged screen rather than creating duplicate files. Never save the screen you are currently on under the name of a state you could not reach: if signing in, loading data, or advancing the workflow is not possible, record that step as text-only with a specific reason. Two captured steps in the same guide must never produce the same image: when an approved capture item turns out not to be a distinct state — scrolling, focusing a field, or inspecting part of a screen that is already fully visible — keep the first image and record the rest as text-only rather than saving the same screen again under another name. Different guides may show the same screen when both genuinely document it. Doxloop rejects missing-guide, tiny, repeated-within-a-guide, unembedded, unreviewed, or out-of-plan captures. If capture fails, keep complete text instructions, remove broken image references, record the limitation, and do not claim a failed image is verified.`
+}
+
+/**
+ * The agent is told how sign-in is handled, never the values. A recorded
+ * session is preloaded into the capture browser; saved credentials are typed
+ * by secret name, which the capture server substitutes and redacts.
+ */
+export function captureAuthPrompt(mode: CaptureAuthMode): string {
+  const sessionText = 'Doxloop preloaded the capture browser with a browser session the user recorded by signing in, so the application should already be signed in when you open it. If you still land on a sign-in page, the session has expired'
+  const credentialsText = `Doxloop saved sign-in credentials in the capture server. When the application shows its sign-in form, fill the username or email field with the literal text ${CAPTURE_USERNAME_SECRET} and the password field with the literal text ${CAPTURE_PASSWORD_SECRET} using the browser type or fill-form tools; the capture server replaces those names with the real values and redacts them from every tool result. Never guess, print, or otherwise reconstruct the values, never paste them anywhere except the sign-in form, and never capture the sign-in form after it is filled.`
+  switch (mode) {
+    case 'session':
+      return `${sessionText}: record every step that needed a signed-in screen as text-only with the reason "saved browser session expired" and tell the user to sign in again under Settings → Visual evidence. Do not attempt to sign in yourself.`
+    case 'credentials':
+      return credentialsText
+    case 'both':
+      return `${sessionText}; in that case sign in yourself as follows. ${credentialsText}`
+    default:
+      return 'No sign-in material is configured for the capture browser. Follow the authoring skill\'s authentication checkpoint: if the application requires sign-in, record the affected steps as text-only and tell the user they can sign in with the browser or save credentials under Settings → Visual evidence.'
+  }
 }

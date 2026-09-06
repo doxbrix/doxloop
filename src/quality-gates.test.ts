@@ -42,16 +42,6 @@ describe('release quality contract', () => {
     expect(await verifyExamples(workspace.root, true)).toEqual([expect.objectContaining({ code: 'quality.example.passed', status: 'pass' })])
   })
 
-  test('runs isolated Python examples and blocks process escapes', async () => {
-    const workspace = await demo()
-    await mkdir(join(workspace.root, 'examples'))
-    await writeFile(join(workspace.root, 'examples', 'hello.py'), `print('verified python')\n`)
-    await writeFile(join(workspace.root, '.doxloop', 'examples.json'), JSON.stringify({ schemaVersion: 1, examples: [{ id: 'python', runtime: 'python', file: 'examples/hello.py', workingDirectory: '.', fixtures: [], network: 'denied', expected: { exitCode: 0, stdoutIncludes: 'verified python' } }] }))
-    expect(await verifyExamples(workspace.root, true)).toEqual([expect.objectContaining({ code: 'quality.example.passed', status: 'pass' })])
-    await writeFile(join(workspace.root, 'examples', 'hello.py'), `import subprocess\nsubprocess.run(['echo','unsafe'])\n`)
-    expect(await verifyExamples(workspace.root, true)).toEqual([expect.objectContaining({ code: 'quality.example.failed', status: 'fail' })])
-  })
-
   test('verifies HTTP examples against the configured OpenAPI operation and response', async () => {
     const workspace = await demo()
     await mkdir(join(workspace.root, 'examples'))

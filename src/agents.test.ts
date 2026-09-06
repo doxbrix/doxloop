@@ -1,5 +1,6 @@
 import {
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -24,6 +25,7 @@ import type { PromptIo } from './prompts.js'
 
 const roots: string[] = []
 const originalPath = process.env.PATH
+const originalCodexOverride = process.env.DOXLOOP_AGENT_EXECUTABLE_CODEX
 
 function fakeIo(lines: string[]): PromptIo & { rendered: () => string } {
   const input = new PassThrough()
@@ -41,6 +43,8 @@ function fakeIo(lines: string[]): PromptIo & { rendered: () => string } {
 afterEach(async () => {
   if (originalPath === undefined) delete process.env.PATH
   else process.env.PATH = originalPath
+  if (originalCodexOverride === undefined) delete process.env.DOXLOOP_AGENT_EXECUTABLE_CODEX
+  else process.env.DOXLOOP_AGENT_EXECUTABLE_CODEX = originalCodexOverride
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -71,6 +75,20 @@ describe('agent discovery', () => {
       name: 'codex',
       executable,
     })
+  })
+
+  test('uses the test-only executable override before PATH', async () => {
+    if (process.platform === 'win32') return
+
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-agent-'))
+    roots.push(root)
+    const executable = join(root, 'fake-codex')
+    await writeFile(executable, '#!/bin/sh\nexit 0\n')
+    await chmod(executable, 0o755)
+    process.env.DOXLOOP_AGENT_EXECUTABLE_CODEX = executable
+    process.env.PATH = ''
+
+    await expect(chooseAgent('codex')).resolves.toEqual({ name: 'codex', executable })
   })
 
   test('installs an agent through its official npm package', async () => {
@@ -156,9 +174,29 @@ describe('agent discovery', () => {
     })
   })
 
-  test('reports Gemini authentication as unknown without reading credentials', async () => {
-    await expect(
-      agentAuthenticationStatus({ name: 'gemini', executable: 'gemini' }),
-    ).resolves.toMatchObject({ status: 'unknown' })
+  test('reads Gemini sign-in from the environment or the token file without exposing either', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doxloop-gemini-home-'))
+    roots.push(home)
+    const gemini = { name: 'gemini' as const, executable: 'gemini' }
+
+    await expect(agentAuthenticationStatus(gemini, { env: {}, home })).resolves.toEqual({
+      status: 'unauthenticated',
+      detail: 'Gemini is not signed in. Run `gemini` once in a terminal and complete the sign-in, or set GEMINI_API_KEY.',
+    })
+    await expect(agentAuthenticationStatus(gemini, { env: { GEMINI_API_KEY: 'secret-key' }, home })).resolves.toEqual({
+      status: 'authenticated',
+      detail: 'Gemini uses the API key from the environment.',
+    })
+    await expect(agentAuthenticationStatus(gemini, { env: { GOOGLE_GENAI_USE_VERTEXAI: 'true', GOOGLE_CLOUD_PROJECT: 'acme' }, home })).resolves.toMatchObject({ status: 'authenticated' })
+    await expect(agentAuthenticationStatus(gemini, { env: { GOOGLE_GENAI_USE_VERTEXAI: 'true' }, home })).resolves.toMatchObject({ status: 'unauthenticated' })
+
+    await mkdir(join(home, '.gemini'), { recursive: true })
+    await writeFile(join(home, '.gemini', 'oauth_creds.json'), JSON.stringify({ access_token: 'ya29.secret', refresh_token: '1//secret' }), 'utf8')
+    const signedIn = await agentAuthenticationStatus(gemini, { env: {}, home })
+    expect(signedIn).toEqual({ status: 'authenticated', detail: 'Gemini is signed in with a Google account.' })
+    expect(JSON.stringify(signedIn)).not.toContain('secret')
+
+    await writeFile(join(home, '.gemini', 'oauth_creds.json'), 'not json', 'utf8')
+    await expect(agentAuthenticationStatus(gemini, { env: {}, home })).resolves.toMatchObject({ status: 'unauthenticated' })
   })
 })

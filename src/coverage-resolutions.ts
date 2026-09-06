@@ -1,5 +1,6 @@
+import { withProjectLock } from './project-lock.js'
 import { createHash } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DoxloopError } from './errors.js'
 import { pathExists, readJson } from './fs.js'
@@ -22,6 +23,8 @@ export function coverageSignalId(source: string, kind: string, path: string, lab
   return `signal-${createHash('sha256').update(`${source}\0${kind}\0${path}\0${label}`).digest('hex').slice(0, 16)}`
 }
 
+export function coveragePageId(page: string): string { return `page-${createHash('sha256').update(page).digest('hex').slice(0, 16)}` }
+
 export function coverageJourneyId(outcome: string): string {
   return `journey-${createHash('sha256').update(normalize(outcome)).digest('hex').slice(0, 16)}`
 }
@@ -35,14 +38,18 @@ export async function readCoverageResolutions(root: string): Promise<CoverageRes
 }
 
 export async function writeCoverageResolution(root: string, id: string, resolution?: Omit<CoverageResolution, 'updatedAt'>): Promise<void> {
-  if (!/^(signal|journey)-[a-f0-9]{16}$/.test(id)) throw new DoxloopError('The requested coverage item is invalid.')
+  return withProjectLock(root, 'write', () => writeCoverageResolutionLocked(root, id, resolution))
+}
+async function writeCoverageResolutionLocked(root: string, id: string, resolution?: Omit<CoverageResolution, 'updatedAt'>): Promise<void> {
+  if (!/^(signal|journey|page)-[a-f0-9]{16}$/.test(id)) throw new DoxloopError('The requested coverage item is invalid.')
   const current = await readCoverageResolutions(root)
   const items = { ...current.items }
   if (resolution) items[id] = { ...resolution, updatedAt: new Date().toISOString() }
   else delete items[id]
   const path = join(root, COVERAGE_RESOLUTIONS_FILE)
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify({ schemaVersion: 1, items }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await writeFile(`${path}.tmp`, `${JSON.stringify({ schemaVersion: 1, items }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(`${path}.tmp`, path)
 }
 
 function isCoverageResolutions(value: unknown): value is CoverageResolutions {
@@ -50,7 +57,7 @@ function isCoverageResolutions(value: unknown): value is CoverageResolutions {
   const candidate = value as Partial<CoverageResolutions>
   if (candidate.schemaVersion !== 1 || !candidate.items || typeof candidate.items !== 'object' || Array.isArray(candidate.items)) return false
   return Object.entries(candidate.items).every(([id, item]) => {
-    if (!/^(signal|journey)-[a-f0-9]{16}$/.test(id) || !item || typeof item !== 'object' || Array.isArray(item)) return false
+    if (!/^(signal|journey|page)-[a-f0-9]{16}$/.test(id) || !item || typeof item !== 'object' || Array.isArray(item)) return false
     const resolution = item as Partial<CoverageResolution>
     return ['documented', 'excluded', 'needs-human'].includes(String(resolution.disposition)) &&
       (resolution.page === undefined || typeof resolution.page === 'string') &&

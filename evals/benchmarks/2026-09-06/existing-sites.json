@@ -1,0 +1,23 @@
+{
+  "at": "2026-09-06T11:00:36.624Z",
+  "results": [
+    {
+      "generator": "docusaurus",
+      "route": "/manual/help/start-here",
+      "importedUnchanged": true,
+      "nativeBuilds": 6,
+      "versionsAndLocales": true,
+      "assetPreserved": true,
+      "updateAcceptedAndUndone": true
+    },
+    {
+      "generator": "mkdocs",
+      "route": "/operations/guides/custom-export.html",
+      "importedUnchanged": true,
+      "nativeBuilds": 6,
+      "versionsAndLocales": true,
+      "assetPreserved": true,
+      "updateAcceptedAndUndone": true
+    }
+  ]
+}

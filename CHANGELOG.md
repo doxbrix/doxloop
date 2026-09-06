@@ -5,7 +5,268 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+### Added
+
+- **Screenshots behind a login.** **Settings → Visual evidence → Application
+  sign-in** (and the **Does this page require sign-in?** step of the setup
+  wizard) gets the capture browser past a login page two ways. **Sign in with
+  browser** opens a Chrome window where you sign in by hand, including MFA,
+  SSO, or passkeys; **Save session** records the cookies and local storage,
+  and every planning and capture run starts with that session loaded. For a
+  plain form you can save a test account's credentials instead: the agent
+  types the secret names `DOXLOOP_APP_USERNAME` and `DOXLOOP_APP_PASSWORD`,
+  the capture server substitutes the values and redacts them from every tool
+  result. **Test application** now reports whether the saved session still
+  signs in and which sign-in method a run will use. Sessions and credentials
+  live under the user's Doxloop config home, keyed by project root, never in
+  the repository; `application.authentication.loginPath` records only the
+  sign-in route. The CLI settings menu offers the same under **Application
+  sign-in**.
+- **Navigation editor.** **Pages → Navigation** shows the sidebar as a tree
+  you can drag to reorder, group into sections, rename, give icons, or hide
+  (Doxbrix), with keyboard equivalents on every row and a live preview
+  beside it. Doxbrix writes `docs.json`; MkDocs writes the `nav` list in
+  `mkdocs.yml` through new `readNavigationTree` and `writeNavigationTree`
+  adapter hooks. Generators whose navigation is code are named instead of
+  edited. Every write is validated and rolled back if it would break the site,
+  and the plan review gets the same editor for a plan's sections.
+- **Branding panel.** **Settings → Branding** edits the Doxbrix logo,
+  favicon, primary and light/dark accent colours, page backgrounds, colour
+  mode, code theme, and body, heading, and code fonts, with an image picker
+  and a live preview that reloads on save. Other generators are pointed at
+  their theme configuration file.
+- **Images and files.** **Pages → Images & files** uploads PNG, JPEG, GIF,
+  WebP, SVG, AVIF, ICO, PDF, video, and zip files (10 MB each, content
+  checked against the extension, SVG refused when it scripts) into the
+  generator's asset directory, lists where each one is used, edits alt text
+  across every embedding page, replaces or deletes files, and offers
+  **Insert an image…** in the page composer. Screenshot gallery rows gain
+  **Replace screenshot** for a run that is still under review.
+- **Page metadata.** Each page on **Pages** has a metadata form for the
+  title, description, sidebar icon, canonical URL, and social image, written
+  straight to frontmatter with validation, rollback, and history. The local
+  preview now emits the canonical and social tags the static build already
+  produced.
+- **Release notes template.** When a directory source is a Git checkout,
+  **Update** offers **Release notes**: pick the repository, version, and two
+  refs, and Doxloop collects the commits, changed files, and the matching
+  changelog section deterministically, then hands that inventory to the
+  planner and writer as the only evidence for a `release` page at
+  `release-notes/<version>`.
+- **Glossary page.** **Settings → Audience and voice** edits terminology as
+  term and definition rows and can generate a glossary page (Markdown, MDX,
+  reStructuredText, or HTML) from them, add it to the navigation, and record
+  it in the evidence map; hand-written glossaries are never overwritten
+  without asking.
+- **Planned diagrams.** Plan pages carry a `diagram` decision, defaulting
+  to required for concept pages and editable in plan review. The writer is
+  told which pages need a Mermaid block, validation reports a
+  `missing-diagram` warning for planned pages without one, and the preview
+  renders the diagram.
+- Update history records navigation, branding, asset, metadata, and glossary
+  writes alongside agent runs.
+
+- **Generator tiers and a toolchain check in the wizard.** Every generator now
+  carries a support tier (**Full**: Doxbrix, Docusaurus, MkDocs Material;
+  **Supported**: Sphinx, Hugo, VitePress, Starlight; **Basic**: Nextra,
+  Markdoc, Jekyll, Static HTML) and the runtime it needs. The **Tools** step
+  shows the tier beside the selected generator, checks that Node.js with a
+  package manager, Python with `venv`, Hugo, or Ruby with Bundler is installed,
+  and lists every generator's tier and requirements under **What each
+  generator supports**. **Settings → Generator** shows the same label.
+- **Navigation validation that understands real sites.** Sphinx follows
+  nested and glob toctrees from the root document; Hugo accepts section
+  pages, front-matter menus, and menu `pageRef`s from any TOML configuration
+  file; Starlight reads `autogenerate` groups, `slug` and `link` entries, and
+  lists every page when no sidebar is configured; VitePress reads
+  multi-sidebar objects and `base` prefixes; Docusaurus checks explicit doc ids
+  and trusts autogenerated sidebars; Jekyll reads nested `_data/navigation.yml`;
+  Nextra checks every `_meta` file against its own directory and no longer
+  demands that every page be listed; Static HTML follows links through
+  section pages. When a theme, plugin, function, or import builds the
+  navigation, validation reports one `navigation-unverified` warning instead of
+  false `unnavigated-page` errors.
+- **Authoring references for every generator.** Hugo, Jekyll, Markdoc,
+  Nextra, Starlight, and Static HTML skills gained `references/authoring.md`
+  covering callouts, tabs, code blocks, images, and Mermaid diagrams in the
+  generator's own syntax; the Docusaurus and MkDocs references gained image
+  and diagram sections. The Docusaurus scaffold enables
+  `@docusaurus/theme-mermaid`, the MkDocs scaffold registers the `mermaid`
+  fence, the Sphinx scaffold adds `sphinxcontrib-mermaid`, and the Hugo,
+  Jekyll, Markdoc, and Static scaffolds ship callout and tab markup plus a
+  Mermaid render path.
+- **Generator API hooks.** Adapters may implement `writeNavigation` (MkDocs
+  edits `nav` in place, keeping comments and Python tags; Markdoc rewrites
+  `navigation.json`) and `renderPage` (Static HTML returns the page's `<main>`
+  landmark), so later work can create pages and preview external generators
+  without a native build.
+- **Continuous integration.** `.github/workflows/ci.yml` runs typecheck, unit
+  tests, skill validation, and the boundary check on every pull request, then
+  scaffolds, previews, and builds every official generator through
+  `scripts/ci-generator-smoke.mjs`. `pnpm test` now compiles only the core and
+  generator packages instead of running the full build.
+
+### Fixed
+
+- **A Claude API failure mid-run no longer fails the run.** When Claude's API
+  request breaks off mid-response (a server error, an overload, a rate limit,
+  or a dropped connection), Claude exits and the run used to fail with the
+  unhelpful message `Claude stopped with result "success"`, discarding a
+  session that might already have written pages and captured dozens of
+  screenshots. Doxloop now recognizes the failure as transient, waits a
+  moment, and resumes the same Claude session in the same workspace, up to
+  twice per run, so the agent continues with its context and the pages and
+  screenshots it already produced. Only when every resume fails does the run
+  fail, and the message then names the API error, how many resumes were
+  tried, and that **Resume the run** continues from the preserved workspace.
+  Set `DOXLOOP_AGENT_API_RESUMES` to change the number of automatic resumes
+  (`0` disables them).
+- **Signed-in sessions no longer block plan approval.** The application
+  readiness check follows redirects within the configured application, so a
+  saved browser session that bounces a sign-up or landing route to the app
+  shell (for example `/signup` → `/dashboard`) counts as reachable and the
+  message names where the capture browser will land. Only a redirect to a
+  sign-in route, to another origin, or a redirect loop still blocks approval.
+- Nextra's and Markdoc's planning `navigationFiles` name files the scaffold
+  actually creates (`content/_meta.js` and `app/layout.jsx`; `navigation.json`
+  and `markdoc.config.mjs`). Sphinx starter pages carry the
+  `.. doxloop:starter-page` marker, which validation now recognises. The
+  Docusaurus and MkDocs adapters use the shared generator runtime instead of
+  private copies of its helpers. Hugo, Starlight, VitePress, Nextra, and
+  Jekyll no longer report a missing generator file when an adopted site uses
+  a theme or a differently named configuration file.
+
+- **Monitoring works on local folders.** A schedule no longer requires a Git
+  remote. A local Git checkout is checked in place by its HEAD commit and
+  working tree; a plain folder is compared against the file digests recorded
+  at the last sync, so it can still name the files that changed. Nothing is
+  fetched, pulled, or written in the source. **Check now** starts a visible job
+  and, when it finishes, a notice reports whether anything changed, how many
+  pages are stale, and which proposal was drafted.
+- **Gemini parity.** Unattended Gemini runs receive external sources through
+  `--include-directories`, read the capture browser from the workspace's
+  `.gemini/settings.json`, stream `stream-json` output into the same one-line
+  activity log Claude has, and are checked for sign-in from an API key, a
+  Vertex AI project, or the Google sign-in token file instead of "unknown".
+  Because Gemini cannot be denied writes to an extra directory, an unattended
+  run reads a throwaway copy of each local source. Codex runs stream
+  `exec --json` events into the same log. A capability matrix in the wizard's
+  **Tools** step and under **Settings → General** marks each row where an
+  assistant is **Limited**.
+
 ### Changed
+
+- **Control center redesign.** The workspace gets one design system: Sora for
+  page titles and figures, Instrument Sans for the interface, JetBrains Mono
+  for paths, a single teal accent on a cool grey canvas, and consistent
+  buttons, badges, tables, and cards. The sidebar now draws the documentation
+  loop as a connected rail — Sources, Create/Update, Pages, Review, Deploy —
+  with each stage marked done, next, or waiting and a one-line status under
+  its name. The Overview leads with a status card (what is waiting on you and
+  the action to take), three tiles for coverage, pages, and the published
+  site, a validation-issues list when there are any, and an activity feed
+  whose **Stop** and **Log** controls no longer overlap. Sources shows
+  coverage as a white ring gauge instead of a dark gradient block and
+  freshness as a status row with per-source chips; planned screenshots list
+  their start route as a code chip with a count badge; the top bar shows the
+  project and screen as a breadcrumb plus a live "tasks running" chip.
+
+- **Review compares against what the agent started from.** A proposal now
+  diffs the agent's output against a snapshot of the project taken when the
+  run began, not against the live project at the end. A page you edit by hand
+  while the agent runs is no longer proposed as a revert, and a file that both
+  you and the agent changed is grouped under **Changed while the agent ran**,
+  shows the proposal against your edited version, and asks for confirmation
+  before **Accept all**, **Accept file**, or a hunk accept replaces your edit.
+  Raw browser captures under `.doxloop/capture-output` never appear as changes.
+- **Review opens on the documentation.** The changed-files list starts on the
+  first page instead of the evidence map, lists pages, navigation, and assets
+  first, and folds evidence, configuration, and skill files under **Supporting
+  files** until asked for. Accepting a change refreshes its hunk badges at
+  once, and **Review changes** in the ready dialog opens that proposal.
+- **URLs match the navigation.** The screens are now at `/update`, `/review`,
+  and `/deploy`; the previous addresses redirect. The selected proposal and
+  file, the Pages selection, and the Settings section live in the URL, so a
+  refresh or the back button returns to the same view. `doxloop ui --page`
+  accepts the new names and still understands the old ones.
+- **The workspace never renders blank.** A rendering error in one screen shows
+  what broke and offers a reload instead of a white page. A validation failure
+  is shown as "Validation unavailable" with the reason. Background polling
+  retries quietly three times before raising a banner.
+- **Forms keep up with the project.** Settings and Deploy forms reseed after a
+  save or a reload, keep unsaved edits when the project changed elsewhere and
+  say so, and the plan editor asks before a background refresh replaces edits
+  you have not saved. **Update history** names the pages each request changed.
+- **Hidden state is now shown.** Overview carries a validation summary with the
+  first issues and the sign-in state of the agent updates run with. Sources
+  shows documentation freshness: which pages fell behind which sources, and
+  how many paths changed per source.
+- **Setup wizard.** With screenshots on, step 3 requires a successful **Check
+  page** before Continue. Errors appear on the step they belong to, and the
+  sources table shows what was validated instead of a placeholder sync status.
+
+- **Stop really stops the run.** Stopping a run from the control center now
+  ends the coding agent and the capture browser it started within ten
+  seconds, and nothing writes into the run workspace afterwards. Unattended
+  agents run in their own process group; the CLI forwards a termination signal
+  to that group, escalates to a forced stop after a grace period, and exits
+  with the conventional signal status. Time budgets escalate the same way.
+- **Progress is real.** The stage list for a generation, revision, or page
+  edit now advances from what the agent actually does: a page write starts
+  **Authoring approved pages** and counts towards a "pages written N of M"
+  figure, a navigation write starts **Updating navigation and theme**, an
+  evidence-map write starts **Recording page evidence**, a capture starts
+  **Capturing application screenshots**, and validation starts when the agent
+  runs `doxloop test` or when the run hands over to Doxloop. Stages are
+  announced up front as pending, and a stage that saw no activity finishes as
+  "unchanged" instead of pretending the work happened. Codex and Gemini output
+  is now piped through Doxloop so it appears in the run log, and a workspace
+  watcher tracks their progress the same way.
+- **Planning has a time budget.** A planner that never returns now fails with
+  "Planning stopped after 20 minutes without a plan reply" instead of running
+  forever. The budget follows **Maximum agent minutes** when set, and the
+  `DOXLOOP_PLAN_TIMEOUT_MINUTES` environment variable overrides both.
+- Every job the control center starts has a labelled entry in **Recent
+  activity** with a log link and, while it runs, a **Stop** button: source
+  checks, sign-in, agent installs, screenshot captures, deployments, and
+  proposal revisions. The **Review** page shows a running revision or
+  resumption with its live log and a Stop button, and a failed one raises a
+  banner naming the reason. The deployment progress panel stays on screen
+  after a failure until it is dismissed, and the **Deploy** page explains that
+  sign-in finishes in the browser while the login job runs.
+
+### Added
+
+- **Portable static exports.** Doxbrix now builds page directories, reader CSS,
+  copied assets, client search data, sitemap and robots files, and page metadata
+  into `build/`, including a configurable base path for project sites.
+  `doxloop export --out <directory> [--zip]` provides the same self-hostable
+  output for every generator. Deployment dry runs leave their zip in
+  `.doxloop/exports` instead of discarding it.
+- **More deployment targets.** The Deploy page and `doxloop deploy --target`
+  now support GitHub Pages, Netlify, and Vercel alongside Doxbrix. The page has
+  per-target settings, local folder/zip export, protected provider credentials,
+  and a shared deployment history. GitHub Pages publishes to `gh-pages`;
+  Netlify uploads the static zip; Vercel uploads content-addressed files before
+  creating its production deployment.
+- **Project switcher and import.** The project name in the sidebar opens a
+  switcher that lists recently opened projects, opens any folder, imports an
+  existing documentation site, or starts the setup wizard for a new project,
+  all without restarting `doxloop ui`. Every opened project is remembered in
+  a user-level list. The setup wizard's first step now offers **Use existing
+  documentation folder**, which recognizes Doxbrix, Docusaurus, MkDocs,
+  Sphinx, Hugo, VitePress, Starlight, Nextra, Markdoc, and Jekyll sites from
+  their configuration files, shows the detected generator, content directory,
+  and pages for correction, and adopts the folder without modifying a page.
+  Existing pages start as unverified in the evidence map so the first update
+  attaches evidence. Switching is refused while a run is in progress and stops
+  a local preview. `doxloop init --existing [directory]` and
+  `doxloop ui --project <directory>` cover the same from a terminal.
+- **Maximum Claude spend (USD)** under **Monitoring → Advanced watch scope and
+  budgets** passes a spending cap to Claude Code for unattended runs and
+  planning. A run that ends on the cap says so in the log and the proposal
+  error. Codex and Gemini expose no equivalent flag, so the setting is ignored
+  for them; the field says so.
 
 - **Comprehensive is now the default documentation depth** in the setup wizard
   and on the Create page, and the depth cards no longer show fixed page ranges
@@ -17,6 +278,14 @@ uses semantic versioning after its first stable release.
 
 ### Added
 
+- A new **Pages** view lists documentation by navigation section with search,
+  word counts, evidence state, update dates, current previews, and page
+  history. Select one or several pages, describe an edit in plain language,
+  watch the agent work in an isolated proposal, then compare rendered and
+  source versions before accepting, rejecting, refining, or undoing it.
+  Selected-page scope is enforced after every agent run; related navigation
+  and page-image changes require the explicit **Also allow related changes**
+  toggle.
 - **Failed runs continue where they stopped.** A generation run that fails
   after the agent wrote pages — required screenshots missing for a guide, a
   time budget reached, a validation error — keeps its workspace, and the plan

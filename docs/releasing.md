@@ -96,3 +96,37 @@ fixtures across agents and models, records duration and scores, and compares
 with the reviewed `evals/baseline.json`. Output is written below the
 Git-ignored `evals/results/` directory. Use `--approve-baseline` only after
 reviewing a deliberate improvement or model change.
+
+### Product hardening acceptance checks
+
+Run `DOXLOOP_E2E_REAL=1 pnpm exec playwright test` after building. CI runs this
+suite against the actual local UI server and a deterministic fake agent. The
+Pages test verifies proposed changes stay isolated, accepts an edit, compares
+exact file contents after undo, and exercises direct draft preview/save/undo.
+
+Run `node scripts/ci-existing-sites.mjs` for two existing-site fixtures in
+`evals/native-sites`. The script installs the real Docusaurus and MkDocs
+runtimes, builds before import, imports without changing pages/configuration,
+creates a fake-agent update, accepts it, builds the result, undoes it, and
+builds again. It asserts custom slugs, non-root base paths, file-style URLs,
+asset contents and exact restored prose. CI runs this separately from unit
+tests and uploads `evals/results/existing-sites.json`.
+
+Real-agent evaluation remains opt-in, outside `pnpm test` and ordinary CI:
+
+```sh
+pnpm run build
+node scripts/run-authoring-evals.mjs --agent codex --model codex=gpt-5.5 --case cli --mode review
+node scripts/run-authoring-evals.mjs --agent claude --case cli --mode generation
+node scripts/run-authoring-evals.mjs --agent codex --model codex=gpt-5.5 --case localized-update --mode update
+```
+
+Choose a model supported by the installed agent CLI and your account. Results
+record the CLI version, model selection, fixture digest, elapsed time, exit
+status, matched evidence and quality measurements. Review scoring uses the
+final response rather than the agent's echoed prompt or tool transcript.
+Generation/update runs preserve generated workspaces and raw quality/evaluation
+reports under the ignored results folder. Tooling failures remain failed runs;
+they do not earn content-quality credit. No new baseline is approved unless
+`--approve-baseline` is explicitly supplied. Review scores measure detection of
+known fixture defects; they are not proof of production documentation quality.

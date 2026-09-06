@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -9,15 +10,18 @@ import { writeEvidenceMap } from './evidence.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { loadProject, scaffoldProject } from './project.js'
 import { reviewPreferenceGuidance } from './review-learning.js'
+import { listRequests } from './history.js'
 import { collectSourceChanges, recordSyncState } from './sync.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
+  compareWithBaseline,
   createSyncRun,
   editSyncRunChange,
   listSyncRuns,
   pruneSyncRuns,
   readSyncRun,
+  rejectSyncChanges,
   recoverSyncRun,
   resumeSyncRun,
   reviseSyncRun,
@@ -101,6 +105,101 @@ async function proposal(root: string, content: string, authoringMode?: 'create' 
 }
 
 describe('sync review runs', () => {
+  test('creates, scopes, records, applies, and undoes a page edit', async () => {
+    const { root } = await fixture()
+    const project = await loadProject(root)
+    const before = await readFile(join(root, 'index.mdx'), 'utf8')
+    const created = await createSyncRun({
+      id: 'run-page-edit-test',
+      root,
+      project,
+      drift: await computeDrift(root, project),
+      sourceChanges: await collectSourceChanges(root, project.sources),
+      editRequest: { instruction: 'Explain the new limit clearly.', paths: ['index.mdx'], allowRelated: false, followUps: [] },
+      author: async (options) => {
+        expect(options.mode).toBe('update')
+        expect(options.request).toContain('Explain the new limit clearly.')
+        expect(options.request).toContain('- index.mdx (Limits)')
+        expect(options.maxTurns).toBe(80)
+        expect(options.timeoutMinutes).toBe(15)
+        expect(options.recordOperationalState).toBe(false)
+        expect(options.tolerateValidationErrors).toBe(true)
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe supported limit is now 20.\n')
+        return 0
+      },
+    })
+    expect(created.id).toBe('run-page-edit-test')
+    expect(created.status, created.error).toBe('awaiting-review')
+    expect(created.trigger).toBe('edit')
+    expect(created.changes.filter((change) => change.category === 'page')).toHaveLength(1)
+    expect((await listRequests(root)).find((request) => request.id === created.id)).toMatchObject({ kind: 'edit', requestText: 'Explain the new limit clearly.' })
+
+    const applied = await acceptSyncChanges(root, created.id, created.changes.map((change) => ({ changeId: change.id })))
+    expect(applied.status).toBe('applied')
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toContain('supported limit is now 20')
+    const undone = await undoSyncRun(root, created.id)
+    expect(undone.status).toBe('undone')
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toBe(before)
+    expect((await listRequests(root)).find((request) => request.id === created.id)?.status).toBe('undone')
+  }, 30_000)
+
+  test('rejects an edit that changes another page or changes nothing', async () => {
+    const { root } = await fixture()
+    const project = await loadProject(root)
+    const base = {
+      root,
+      project,
+      drift: await computeDrift(root, project),
+      sourceChanges: await collectSourceChanges(root, project.sources),
+      editRequest: { instruction: 'Make the limit easier to understand.', paths: ['index.mdx'], allowRelated: false, followUps: [] },
+    }
+    const escaped = await createSyncRun({ ...base, author: async (options) => {
+      await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand limits.\n---\n\nLimit 20.\n')
+      await writeFile(join(options.root, 'quickstart.mdx'), '---\ntitle: Changed\ndescription: This should be rejected.\n---\n\nChanged too.\n')
+      return 0
+    } })
+    expect(escaped.status).toBe('failed')
+    expect(escaped.error).toContain('outside this page: quickstart.mdx')
+    const unchanged = await createSyncRun({ ...base, author: async () => 0 })
+    expect(unchanged.status).toBe('failed')
+    expect(unchanged.error).toContain('did not change this page')
+  }, 30_000)
+
+  test('allows related navigation and keeps edit scope through refinement', async () => {
+    const { root } = await fixture()
+    const project = await loadProject(root)
+    const created = await createSyncRun({
+      root,
+      project,
+      drift: await computeDrift(root, project),
+      sourceChanges: await collectSourceChanges(root, project.sources),
+      editRequest: { instruction: 'Clarify the limit and navigation label.', paths: ['index.mdx'], allowRelated: true, followUps: [] },
+      author: async (options) => {
+        const navigation = JSON.parse(await readFile(join(options.root, 'docs.json'), 'utf8'))
+        navigation.name = 'Related edit'
+        await writeFile(join(options.root, 'docs.json'), `${JSON.stringify(navigation, null, 2)}\n`)
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand limits.\n---\n\nThe limit is 20.\n')
+        return 0
+      },
+    })
+    expect(created.status, created.error).toBe('awaiting-review')
+    expect(created.changes.some((change) => change.path === 'docs.json')).toBe(true)
+    const page = created.changes.find((change) => change.path === 'index.mdx')!
+    const refined = await reviseSyncRun(root, created.id, {
+      instruction: 'Use a more direct sentence.',
+      changeIds: [page.id],
+      author: async (options) => {
+        expect(options.request).toContain('Use a more direct sentence.')
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand limits.\n---\n\nLimit: 20.\n')
+        return 0
+      },
+    })
+    expect(refined.status, refined.error).toBe('awaiting-review')
+    expect(refined.trigger).toBe('edit')
+    expect(refined.editRequest?.followUps).toEqual([expect.objectContaining({ instruction: 'Use a more direct sentence.' })])
+    expect((await readSyncRun(root, created.id)).status).toBe('superseded')
+  }, 35_000)
+
   test('classifies site data inside the content directory as navigation, not a page', async () => {
     const { root } = await fixture()
     const created = await createSyncRun({
@@ -299,6 +398,15 @@ describe('sync review runs', () => {
     expect(await readFile(path, 'utf8')).toContain('Alpha is 20.')
     expect(await readFile(path, 'utf8')).toContain('Omega is 10.')
     expect((await readSyncRun(root, created.id)).changes[0]?.hunks[0]?.acceptedAt).toBeDefined()
+    await expect(rejectSyncChanges(root, created.id, [{ changeId: page.id, hunkIds: [page.hunks[0]!.id] }])).rejects.toThrow('accepted')
+    const decided = await rejectSyncChanges(root, created.id, [{ changeId: page.id, hunkIds: [page.hunks[1]!.id] }], 'Keep the existing second limit.')
+    expect(decided.status).toBe('applied')
+    expect(decided.changes.find((change) => change.id === page.id)?.hunks[1]?.rejectionReason).toBe('Keep the existing second limit.')
+    expect(decided.undo?.status).toBe('available')
+    await undoSyncRun(root, created.id)
+    expect(await readFile(path, 'utf8')).toContain('Alpha is 10.')
+    expect(await readFile(path, 'utf8')).toContain('Omega is 10.')
+
   }, 15_000)
 
   test('enforces hunk-level revision scope instead of trusting the agent prompt', async () => {
@@ -337,6 +445,66 @@ describe('sync review runs', () => {
     })
     expect(scoped.status, scoped.error).toBe('awaiting-review')
   }, 25_000)
+
+  test('never proposes a revert of a page the person changed while the agent ran', async () => {
+    const { root } = await fixture()
+    const created = await createSyncRun({
+      root,
+      project: await loadProject(root),
+      drift: await computeDrift(root, await loadProject(root)),
+      sourceChanges: await collectSourceChanges(root, (await loadProject(root)).sources),
+      author: async (options) => {
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is 20.\n')
+        // A person edits another page in the real project during the run.
+        await writeFile(join(root, 'quickstart.mdx'), '---\ntitle: Quickstart\ndescription: Start using the product safely.\n---\n\nEdited during the run.\n')
+        // Browser captures are run scratch space, never a documentation change.
+        await mkdir(join(options.root, '.doxloop', 'capture-output'), { recursive: true })
+        await writeFile(join(options.root, '.doxloop', 'capture-output', 'login.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+        return 0
+      },
+    })
+    expect(created.status, created.error).toBe('awaiting-review')
+    expect(created.changes.map((change) => change.path)).toEqual(['index.mdx'])
+    expect(created.changes[0]?.changedDuringRun).toBeUndefined()
+    const applied = await acceptSyncChanges(root, created.id, created.changes.map((change) => ({ changeId: change.id })))
+    expect(applied.status).toBe('applied')
+    expect(await readFile(join(root, 'quickstart.mdx'), 'utf8')).toContain('Edited during the run.')
+  }, 20_000)
+
+  test('flags a page changed by both the agent and the person and applies it only with confirmation', async () => {
+    const { root } = await fixture()
+    const created = await createSyncRun({
+      root,
+      project: await loadProject(root),
+      drift: await computeDrift(root, await loadProject(root)),
+      sourceChanges: await collectSourceChanges(root, (await loadProject(root)).sources),
+      author: async (options) => {
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe agent says 20.\n')
+        await writeFile(join(root, 'index.mdx'), '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe person says 15.\n')
+        return 0
+      },
+    })
+    expect(created.status, created.error).toBe('awaiting-review')
+    const page = created.changes.find((change) => change.path === 'index.mdx')!
+    expect(page.changedDuringRun).toBe(true)
+    // The before side is the live file, so the reviewer sees exactly what would be replaced.
+    expect(page.hunks.flatMap((hunk) => hunk.oldLines).join('\n')).toContain('The person says 15.')
+    await expect(acceptSyncChanges(root, created.id, [{ changeId: page.id }])).rejects.toThrow('edited in the project while the agent ran')
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toContain('The person says 15.')
+    expect((await readSyncRun(root, created.id)).status).toBe('awaiting-review')
+    const applied = await acceptSyncChanges(root, created.id, [{ changeId: page.id }], { confirmChangedDuringRun: true })
+    expect(applied.status).toBe('applied')
+    expect(await readFile(join(root, 'index.mdx'), 'utf8')).toContain('The agent says 20.')
+  }, 20_000)
+
+  test('compares a file with the run baseline by content hash', () => {
+    const baseline = createHash('sha256').update('same').digest('hex')
+    expect(compareWithBaseline(baseline, Buffer.from('same'), Buffer.from('agent'))).toBe('agent-only')
+    expect(compareWithBaseline(baseline, Buffer.from('person'), Buffer.from('same'))).toBe('project-only')
+    expect(compareWithBaseline(baseline, Buffer.from('person'), Buffer.from('agent'))).toBe('both')
+    expect(compareWithBaseline(undefined, undefined, Buffer.from('new'))).toBe('agent-only')
+    expect(compareWithBaseline(undefined, Buffer.from('person'), undefined)).toBe('project-only')
+  })
 
   test('detects a local edit made while review is pending and never overwrites it', async () => {
     const { root } = await fixture()
@@ -583,6 +751,77 @@ describe('sync review runs', () => {
     // The refreshed snapshot lets the reviewer accept it without a stale block.
     const acceptedAgain = await acceptSyncChanges(root, recoveredAgain.id, recoveredAgain.changes.map((change) => ({ changeId: change.id })))
     expect(acceptedAgain.status).toBe('applied')
+  }, 30_000)
+
+  test('treats replacing a starter page at its planned path as approved work and names any page outside the plan', async () => {
+    const { root } = await fixture()
+    await writeFile(
+      join(root, 'quickstart.mdx'),
+      '---\ntitle: Quickstart\ndescription: Reach your first successful result.\n---\n\n# Quickstart\n\n<!-- doxloop:starter-page -->\n\nReplace this starter with verified steps.\n',
+    )
+    const loaded = await loadProject(root)
+    const project = { ...loaded, sync: { ...loaded.sync, mode: 'propose' as const } }
+    const plan = {
+      id: 'plan-test',
+      capabilities: [],
+      pages: [{
+        id: 'quickstart',
+        title: 'Quickstart',
+        path: 'getting-started/quickstart',
+        type: 'getting-started',
+        priority: 'must-have',
+        action: 'update',
+        purpose: 'Start.',
+        rationale: 'Replaces the generic starter quickstart.mdx.',
+        evidence: [],
+        evidenceDetails: [],
+        visuals: { mode: 'none', rationale: 'Text first.', estimatedCaptures: 0 },
+      }],
+      target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: [] },
+      execution: { screenshots: 'disabled' },
+    } as never
+    const options = async (extra: (root: string) => Promise<void>) => ({
+      root,
+      project,
+      plan,
+      drift: await computeDrift(root, project),
+      sourceChanges: await collectSourceChanges(root, project.sources),
+      authoring: { mode: 'create' as const, screenshots: 'disabled' as const },
+      author: async (run: { root: string }) => {
+        // The agent removes the starter scaffold and writes its replacement where the plan put it.
+        await rm(join(run.root, 'quickstart.mdx'))
+        await mkdir(join(run.root, 'getting-started'), { recursive: true })
+        await writeFile(
+          join(run.root, 'getting-started', 'quickstart.mdx'),
+          '---\ntitle: Quickstart\ndescription: Start using the product safely.\n---\n\nFollow the documented setup with limit 10.\n',
+        )
+        const navigationPath = join(run.root, 'docs.json')
+        await writeFile(navigationPath, (await readFile(navigationPath, 'utf8')).replace('"file": "quickstart"', '"file": "getting-started/quickstart"'))
+        await extra(run.root)
+        await mkdir(join(run.root, '.doxloop'), { recursive: true })
+        await writeFile(join(run.root, '.doxloop', 'documentation-plan.json'), JSON.stringify(plan))
+        await recordSyncState(run.root, (await loadProject(run.root)).sources)
+        return 0
+      },
+    })
+
+    const created = await createSyncRun(await options(async () => {}))
+    expect(created.error).toBeUndefined()
+    expect(created.status).toBe('awaiting-review')
+    expect(created.changes.filter((change) => change.category === 'page').map((change) => `${change.kind}:${change.path}`).sort()).toEqual([
+      'added:getting-started/quickstart.mdx',
+      'deleted:quickstart.mdx',
+    ])
+
+    // Touching a real page the plan never mentioned is still outside the batch, and the failure says which page.
+    const failed = await createSyncRun(await options(async (workspace) => writeFile(
+      join(workspace, 'index.mdx'),
+      '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is now 20.\n',
+    )))
+    expect(failed.status).toBe('failed')
+    expect(failed.error).toContain('exceeded the approved page batch')
+    expect(failed.error).toContain('index.mdx (modified, not in the plan)')
+    expect(failed.error).not.toContain('quickstart.mdx')
   }, 30_000)
 
   test('resumes a failed run in its preserved workspace with a brief of what already exists', async () => {

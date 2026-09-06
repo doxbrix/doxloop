@@ -1,17 +1,22 @@
+import { assertBatchFits, batchLimits } from './batch-limits.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import spawn from 'cross-spawn'
-import { agentArguments, prepareAgentPrompt, sourceAccessDirectories } from './author.js'
+import { createAgentLogFormatter } from './agent-log.js'
+import { forwardTerminationSignals, spawnAgentProcess } from './agent-process.js'
+import { agentArguments, captureAuthPrompt, prepareAgentPrompt, sourceAccessDirectories } from './author.js'
+import { captureAuthContext, describeCaptureAuth, prepareCaptureAuth, type CaptureAuthMode } from './capture-auth.js'
 import { chooseAgent } from './agents.js'
+import { emitWorkflowStage } from './job-events.js'
 import { computeDrift } from './drift.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
 import { documentationPlanTarget } from './plan-generator.js'
 import { loadProject } from './project.js'
 import { reviewPreferenceGuidance } from './review-learning.js'
+import { collectReleaseInventory, formatReleaseInventory, releaseNotesPagePath, type ReleaseTemplateInput } from './release-notes.js'
 import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent, screenshotPlanSummary } from './screenshot-workflow.js'
-import { checkScreenCaptureBrowser, screenCaptureProvider } from './screen-capture-provider.js'
+import { checkScreenCaptureBrowser, screenCaptureProvider, writeGeminiCaptureSettings } from './screen-capture-provider.js'
 import { discoverDocumentationSources, formatDiscoveryInventory, type DocumentationDiscoveryInventory } from './source-discovery.js'
 import { collectSourceChanges, formatSourceChanges, sourceSnapshotFingerprints } from './sync.js'
 import { createSyncRun, listSyncRuns, readSyncRun, recoverSyncRun, resumeSyncRun, runWorkspace, type RunAuthoringRecord } from './sync-runs.js'
@@ -19,6 +24,9 @@ import type {
   AgentName,
   DocumentationPlan,
   DocumentationPlanCapability,
+  DocumentationPlanDiagram,
+  DocumentationPlanTemplate,
+  DoxloopProject,
   DocumentationPlanEvidence,
   DocumentationPlanExecution,
   DocumentationPlanFailure,
@@ -45,6 +53,8 @@ export interface CreateDocumentationPlanInput {
   request?: string
   clarificationMode?: 'review' | 'defaults' | 'stop'
   execution: DocumentationPlanExecution
+  /** Start from a content-type template whose inputs Doxloop collects deterministically. */
+  template?: ReleaseTemplateInput
 }
 
 export async function createDocumentationPlan(
@@ -55,6 +65,7 @@ export async function createDocumentationPlan(
   const discovery = await discoverDocumentationSources(root)
   const target = await documentationPlanTarget(root, project)
   const now = new Date().toISOString()
+  const template = input.template ? await releaseNotesTemplate(root, project, input.template) : undefined
   const plan: DocumentationPlan = {
     schemaVersion: 2,
     id: planId(),
@@ -64,7 +75,7 @@ export async function createDocumentationPlan(
     scope: input.scope,
     createdAt: now,
     updatedAt: now,
-    request: input.request?.trim() ?? '',
+    request: input.request?.trim() || (template ? `Release notes for ${template.version}` : ''),
     sourceSnapshot: await documentationSourceSnapshot(root),
     productProfile: '',
     summary: '',
@@ -98,10 +109,58 @@ export async function createDocumentationPlan(
     },
     target,
     clarification: { mode: input.clarificationMode ?? 'review', answers: {} },
-    execution: input.execution,
+    execution: { ...input.execution, limits: batchLimits(input.execution.limits, { maxPages: Math.max(input.targetPages ?? 0, input.scope === 'starter' ? 5 : input.scope === 'standard' ? 12 : 40), maxScreenshots: input.execution.screenshots === 'disabled' || input.execution.screenshots === false ? 0 : 12, maxMinutes: 15 }) },
+    ...(template ? { template } : {}),
   }
+  if (input.execution.limits && input.targetPages && input.targetPages > plan.execution.limits!.maxPages) throw new DoxloopError('The minimum page count exceeds the batch maximum. Raise maxPages or lower targetPages.')
   await persistPlan(root, plan, false)
   return plan
+}
+
+async function releaseNotesTemplate(root: string, project: DoxloopProject, input: ReleaseTemplateInput): Promise<DocumentationPlanTemplate> {
+  const inventory = await collectReleaseInventory(root, project, input)
+  return {
+    kind: 'release-notes',
+    version: inventory.version,
+    from: inventory.from,
+    to: inventory.to,
+    sources: input.sources ?? [],
+    inventory,
+  }
+}
+
+/** Planner instructions for a content-type template, or nothing for a plain request. */
+export function templateInstructions(plan: Pick<DocumentationPlan, 'template'>): string {
+  const template = plan.template
+  if (!template) return ''
+  return `
+Content-type template: release notes for ${template.version}.
+- Plan exactly one page of type "release" at path "${releaseNotesPagePath(template.version)}" titled "Release notes: ${template.version}" (follow the product's existing naming when the documentation already has a release-notes convention), with action "create", or "update" when that path already exists.
+- Ground every entry in the release inventory below. Classify reader-visible changes as added, changed, fixed, deprecated, removed, or security; lead with reader impact and the action a reader must take; and never turn a commit message into a product claim the diff does not evidence. Mark anything the inventory cannot support as needing verification instead of asserting it.
+- When the documentation has a release index or "What's new" page, plan an "update" for it that links the new page. Do not add unrelated pages.
+- Keep the plan to the release page plus the pages this release genuinely changes.
+
+Release inventory (deterministic, collected by Doxloop from Git):
+${formatReleaseInventory(template.inventory)}
+`
+}
+
+/** Writer instructions derived from the plan: required diagrams and the release inventory. */
+export function planWritingRequirements(plan: Pick<DocumentationPlan, 'pages' | 'template' | 'target'>): string {
+  const parts: string[] = []
+  const diagrams = plan.pages.filter((page) => page.diagram === 'required' && (page.action === 'create' || page.action === 'update'))
+  if (diagrams.length > 0) {
+    const syntax = plan.target.generator === 'doxbrix'
+      ? 'a <Mermaid> component block'
+      : plan.target.contentFormat === 'rst'
+        ? 'a `.. mermaid::` directive'
+        : 'a fenced ```mermaid block or the generator\'s documented Mermaid syntax'
+    parts.push(`Pages that must contain a Mermaid diagram of the model or lifecycle they explain, using ${syntax}:\n${diagrams.map((page) => `- ${page.title} (${page.path})`).join('\n')}\nDoxloop reports a \`missing-diagram\` warning for any of these pages written without one; resolve it before finishing.`)
+  }
+  if (plan.template) {
+    parts.push(`Release inventory the release-notes page must be grounded in. Do not restate commit messages; describe reader-visible behaviour, group changes consistently, and separate breaking changes from optional capability:\n${formatReleaseInventory(plan.template.inventory)}`)
+  }
+  return parts.length > 0 ? `${parts.join('\n\n')}\n\n` : ''
 }
 
 export async function listDocumentationPlans(root: string): Promise<DocumentationPlan[]> {
@@ -212,7 +271,7 @@ export async function planAuthoringRecord(root: string, plan: DocumentationPlan)
     ...(plan.execution.model ? { model: plan.execution.model } : {}),
     ...(plan.execution.reasoning ? { reasoning: plan.execution.reasoning } : {}),
     ...(plan.execution.effort ? { effort: plan.execution.effort } : {}),
-    ...(project.sync.budget?.maxMinutes ? { timeoutMinutes: project.sync.budget.maxMinutes } : {}),
+    timeoutMinutes: Math.min(batchLimits(plan.execution.limits).maxMinutes, project.sync.budget?.maxMinutes ?? 120),
     ...(changeSummary ? { changeSummary } : {}),
   }
 }
@@ -345,6 +404,7 @@ export async function editDocumentationPlan(
     ...(targetPages ? { targetPages } : {}),
     execution: {
       ...current.execution,
+      limits: batchLimits(executionInput.limits ?? current.execution.limits),
       screenshots: normalizeScreenshotIntent(executionInput.screenshots ?? current.execution.screenshots),
     },
     version: current.version + 1,
@@ -363,6 +423,7 @@ export async function approveDocumentationPlan(root: string, id: string): Promis
   if (!['ready-for-review', 'needs-input', 'stale', 'failed'].includes(current.status)) {
     throw new DoxloopError(`Plan ${id} cannot be approved from status ${current.status}.`)
   }
+  assertBatchFits(current)
   const executablePages = current.pages.filter((page) => page.priority !== 'later')
   if (executablePages.length === 0) throw new DoxloopError('Add at least one page for this documentation run before approving the plan.')
   if (current.questions.length > 0) {
@@ -386,7 +447,7 @@ export async function approveDocumentationPlan(root: string, id: string): Promis
   }
   if (screenshotIntent === 'enabled' && visualPages.length > 0) {
     const project = await loadProject(root)
-    await assertCapturePlanReady(project.application, visualPages)
+    await assertCapturePlanReady(root, project.application, visualPages)
   }
   // Sources that changed since the proposal do not block approval. The reviewer
   // approved the structure, and generation inspects the current sources when
@@ -402,6 +463,8 @@ export async function approveDocumentationPlan(root: string, id: string): Promis
   const approvalContent: DocumentationPlan = {
     ...valid,
     pages: executablePages,
+    navigation: { ...valid.navigation, sections: valid.navigation.sections.map((section) => ({ ...section, pageIds: section.pageIds.filter((id) => executablePages.some((page) => page.id === id && page.action !== 'remove')) })).filter((section) => section.pageIds.length > 0) },
+    estimatedPages: executablePages.filter((page) => page.action !== 'preserve').length,
     sourceSnapshot: snapshot,
     ...(advisories && advisories.length > 0 ? { advisories } : {}),
   }
@@ -487,7 +550,7 @@ export async function generateApprovedDocumentationPlan(root: string, id: string
   }
   if (screenshotIntent === 'enabled' && screenshotPlan.guides > 0) {
     const project = await loadProject(root)
-    await assertCapturePlanReady(project.application, plan.pages.filter((page) => page.visuals && page.visuals.mode !== 'none'))
+    await assertCapturePlanReady(root, project.application, plan.pages.filter((page) => page.visuals && page.visuals.mode !== 'none'))
   }
   const { error: _error, failure: _failure, ...generatingPlan } = plan
   plan = { ...generatingPlan, status: 'generating', updatedAt: new Date().toISOString() }
@@ -524,13 +587,8 @@ export async function generateApprovedDocumentationPlan(root: string, id: string
       reviewPreferenceGuidance(root),
     ])
     emitWorkflowStage('inspecting-sources', 'Confirming approved evidence', 'completed')
-    emitWorkflowStage('authoring-pages', 'Authoring approved pages', 'running')
-    emitWorkflowStage('updating-navigation', 'Updating navigation and theme', 'running')
-    emitWorkflowStage('recording-evidence', 'Recording page evidence', 'running')
-    if (screenshotPlan.guides > 0 && screenshotIntent !== 'disabled') {
-      emitWorkflowStage('capturing-screenshots', `Capturing ${screenshotPlan.captures} planned application screenshot${screenshotPlan.captures === 1 ? '' : 's'}`, 'running')
-    }
-    emitWorkflowStage('validating', 'Validating generated documentation', 'running')
+    // The authoring run announces and advances the writing, navigation,
+    // evidence, screenshot, and validation stages from what the agent does.
     const proposal = await createSyncRun({
       root,
       project,
@@ -555,9 +613,6 @@ export async function generateApprovedDocumentationPlan(root: string, id: string
     if (proposal.status === 'failed') {
       throw new DoxloopError(proposal.error ?? 'Documentation generation failed.')
     }
-    emitWorkflowStage('authoring-pages', 'Authoring approved pages', 'completed')
-    emitWorkflowStage('updating-navigation', 'Updating navigation and theme', 'completed')
-    emitWorkflowStage('recording-evidence', 'Recording page evidence', 'completed')
     if (screenshotPlan.guides > 0 && screenshotIntent !== 'disabled') {
       emitWorkflowStage('capturing-screenshots', proposal.screenshots?.status === 'verified' ? `Verified ${proposal.screenshots.captured} application screenshot${proposal.screenshots.captured === 1 ? '' : 's'}` : 'Application screenshots were not captured', proposal.screenshots?.status === 'failed' ? 'failed' : 'completed')
     }
@@ -622,10 +677,6 @@ async function recoverLatestFailedProposal(root: string, plan: DocumentationPlan
   return undefined
 }
 
-function emitWorkflowStage(id: string, label: string, status: 'running' | 'completed' | 'failed'): void {
-  process.stdout.write(`DOXLOOP_EVENT ${JSON.stringify({ schemaVersion: 1, type: 'stage', id, label, status, at: new Date().toISOString() })}\n`)
-}
-
 export async function documentationSourceSnapshot(root: string): Promise<string> {
   const project = await loadProject(root)
   let changes: unknown
@@ -654,7 +705,7 @@ async function runPlanner(
     emitWorkflowStage('inspecting-sources', 'Inspecting sources', 'running')
     const project = await loadProject(root)
     if (normalizeScreenshotIntent(current.execution.screenshots) === 'enabled') {
-      await assertScreenshotPlanningReadiness(project.application, current.execution.screenshots)
+      await assertScreenshotPlanningReadiness(project.application, current.execution.screenshots, await captureAuthContext(root))
       const browserReadiness = await checkScreenCaptureBrowser()
       if (!browserReadiness.available) throw new DoxloopError(`Required screenshot planning cannot start. ${browserReadiness.message}`)
     }
@@ -663,7 +714,7 @@ async function runPlanner(
     emitWorkflowStage('inspecting-sources', 'Inspecting sources', 'completed')
     emitWorkflowStage('building-coverage', 'Building coverage plan', 'running')
     const selected = await chooseAgent(current.execution.agent)
-    const prompt = planningPrompt(project, current, discovery.inventory, formatSourceChanges(changes), feedback, await reviewPreferenceGuidance(root))
+    const prompt = planningPrompt(project, current, discovery.inventory, formatSourceChanges(changes), feedback, await reviewPreferenceGuidance(root), describeCaptureAuth(project.application ? await captureAuthContext(root) : undefined))
     let raw = await planFromAgent(root, selected, prompt, current.execution, project)
     let recommendedAnswers: Record<string, string> | undefined
     const proposed = normalizePlanShape(raw, current)
@@ -843,9 +894,11 @@ export async function continueDocumentationPlanGeneration(
   const label = strategy === 'resume' ? 'Continuing the interrupted authoring run' : 'Accepting the generated files with reported problems ignored'
   try {
     emitWorkflowStage('inspecting-sources', 'Confirming approved evidence', 'completed')
-    emitWorkflowStage('authoring-pages', label, 'running')
-    if (strategy === 'resume') emitWorkflowStage('capturing-screenshots', 'Finishing unfinished application screenshots', 'running')
-    emitWorkflowStage('validating', 'Validating generated documentation', 'running')
+    // A resumed agent run announces and advances its own stages.
+    if (strategy !== 'resume') {
+      emitWorkflowStage('authoring-pages', label, 'running')
+      emitWorkflowStage('validating', 'Validating generated documentation', 'running')
+    }
     const proposal = strategy === 'resume'
       ? await resumeSyncRun(root, proposalId, { fallbackAuthoring: await planAuthoringRecord(root, plan) })
       : await recoverSyncRun(root, proposalId, { ignoreScreenshotProblems: true })
@@ -936,6 +989,32 @@ Send the plan again as one complete, strictly valid JSON object inside the <doxl
   throw lastError
 }
 
+export const DEFAULT_PLANNING_TIMEOUT_MINUTES = 20
+
+/**
+ * How long a planning agent may run before Doxloop stops it. The environment
+ * variable wins over the project budget so a CI job can tighten or relax it
+ * without editing the project.
+ */
+export function planningTimeoutMinutes(project: Pick<DoxloopProject, 'sync'>, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DOXLOOP_PLAN_TIMEOUT_MINUTES
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return project.sync.budget?.maxMinutes ?? DEFAULT_PLANNING_TIMEOUT_MINUTES
+}
+
+export function planningTimeoutMessage(minutes: number, agent: string): string {
+  return `Planning stopped after ${formatMinutes(minutes)} without a plan reply from ${agent}. Increase the plan time limit and, if configured, the monitoring time budget, then retry planning. DOXLOOP_PLAN_TIMEOUT_MINUTES can impose an additional planning limit.`
+}
+
+function formatMinutes(minutes: number): string {
+  if (Number.isInteger(minutes)) return `${minutes} minute${minutes === 1 ? '' : 's'}`
+  const seconds = Math.round(minutes * 60)
+  return seconds < 60 ? `${seconds} second${seconds === 1 ? '' : 's'}` : `${Math.round(minutes * 10) / 10} minutes`
+}
+
 async function runAgentForPlan(
   root: string,
   selected: { name: AgentName; executable: string },
@@ -944,31 +1023,64 @@ async function runAgentForPlan(
   project: Awaited<ReturnType<typeof loadProject>>,
 ): Promise<string> {
   const screenshotIntent = normalizeScreenshotIntent(execution.screenshots)
-  const captureProvider = screenshotIntent !== 'disabled' && project.application
-    ? screenCaptureProvider(root, project.application)
+  // Planning explores the signed-in application read-only, so it gets the
+  // same session and credentials the authoring run will use.
+  const captureMaterial = screenshotIntent !== 'disabled' && project.application
+    ? await prepareCaptureAuth(root)
     : undefined
+  const captureProvider = screenshotIntent !== 'disabled' && project.application
+    ? screenCaptureProvider(root, project.application, captureMaterial)
+    : undefined
+  if (captureProvider && selected.name === 'gemini') await writeGeminiCaptureSettings(root, captureProvider)
   const args = agentArguments(selected.name, prompt, {
     mode: 'review',
     ...(execution.model ? { model: execution.model } : {}),
     ...(execution.reasoning ? { reasoning: execution.reasoning } : {}),
     ...(execution.effort ? { effort: execution.effort } : {}),
+    ...(project.sync.budget?.maxUsd ? { maxBudgetUsd: project.sync.budget.maxUsd } : {}),
     sourceDirectories: sourceAccessDirectories(root, project.sources),
     ...(captureProvider ? { captureProvider } : {}),
     captureRequired: screenshotIntent === 'enabled',
   })
+  const timeoutMinutes = Math.min(planningTimeoutMinutes(project), batchLimits(execution.limits).maxMinutes)
   return new Promise<string>((resolveOutput, reject) => {
-    const child = spawn(selected.executable, args, { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const agent = spawnAgentProcess(selected.executable, args, {
+      cwd: root,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      isolate: true,
+    })
+    const { child } = agent
+    // The raw stream is kept for plan extraction; the reader sees the same
+    // one-line activity summaries the authoring run shows.
+    const formatter = createAgentLogFormatter(selected.name)
     let stdout = ''
     child.stdout?.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString()
-      stdout += text
-      process.stdout.write(text)
+      stdout += chunk.toString()
+      for (const line of formatter.push(chunk)) process.stdout.write(`${line}\n`)
+    })
+    child.stdout?.once('end', () => {
+      for (const line of formatter.finish()) process.stdout.write(`${line}\n`)
     })
     child.stderr?.on('data', (chunk: Buffer | string) => process.stderr.write(chunk.toString()))
-    child.once('error', reject)
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new DoxloopError(`${selected.name} planning was stopped by ${signal}.`))
-      else if (code !== 0) reject(new DoxloopError(`${selected.name} planning exited with status ${code ?? 1}.`))
+    // A planner that never answers used to run until someone noticed; the
+    // budget turns that into a named failure the reviewer can act on.
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      process.stderr.write(`Stopping ${selected.name} planning after ${formatMinutes(timeoutMinutes)}.\n`)
+      void agent.stop()
+    }, timeoutMinutes * 60_000)
+    timer.unref?.()
+    const stopForwarding = forwardTerminationSignals(agent, { label: `${selected.name} planning` })
+    void agent.exited.then(async (exit) => {
+      clearTimeout(timer)
+      stopForwarding()
+      await captureMaterial?.cleanup()
+      if (exit.error) reject(exit.error)
+      else if (timedOut) reject(new DoxloopError(planningTimeoutMessage(timeoutMinutes, selected.name)))
+      else if (exit.signal) reject(new DoxloopError(`${selected.name} planning was stopped by ${exit.signal}.`))
+      else if (exit.code !== 0) reject(new DoxloopError(`${selected.name} planning exited with status ${exit.code ?? 1}.`))
       else resolveOutput(stdout)
     })
   })
@@ -988,13 +1100,14 @@ function planningPrompt(
   changes: string,
   feedback?: string,
   reviewerGuidance = 'No prior reviewer preferences have been recorded.',
+  captureAuth: CaptureAuthMode = 'none',
 ): string {
   const targetPagesText = current.targetPages
-    ? ` The reviewer requires at least ${current.targetPages} pages to write (create or update). Reach that count with distinct, evidence-backed reader jobs — split large workflows, reference surfaces, and concept areas into focused pages rather than padding — and record a "Scope exception:" exclusion only if the configured evidence genuinely cannot support that many distinct pages.`
+    ? ` The reviewer requires at least ${Math.min(current.targetPages, batchLimits(current.execution.limits).maxPages)} pages to write (create or update). Reach that count with distinct, evidence-backed reader jobs — split large workflows, reference surfaces, and concept areas into focused pages rather than padding — and record a "Scope exception:" exclusion only if the configured evidence genuinely cannot support that many distinct pages.`
     : ''
   const initialRequest = current.mode === 'create'
-    ? `Propose a ${current.scope} documentation plan for this create request.${targetPagesText}`
-    : `Propose a focused documentation plan for this update request. Let the requested change and existing documentation determine its size.${targetPagesText}`
+    ? `Propose a ${current.scope} documentation plan for this create request.${targetPagesText} HARD BATCH LIMITS: ${JSON.stringify(batchLimits(current.execution.limits))}. Defer other work with priority later. These maxima override scope size recommendations.`
+    : `Propose a focused documentation plan for this update request. Let the requested change and existing documentation determine its size.${targetPagesText} HARD BATCH LIMITS: ${JSON.stringify(batchLimits(current.execution.limits))}. Defer other work with priority later.`
   const revision = feedback
     ? `Revise the existing plan below according to the user's feedback. Preserve good decisions that the feedback does not affect.\n\nUser feedback:\n${feedback}\n\nExisting plan:\n${JSON.stringify(current, null, 2)}`
     : `${initialRequest}\n\nUser request:\n${current.request || 'Use the configured evidence and documentation brief to recommend the right documentation.'}`
@@ -1013,6 +1126,7 @@ Application screenshot decision:
 - Application capture surface: ${project.application ? project.application.baseUrl : 'not configured'}
 - User-provided default starting route: ${project.application?.screenshots?.startPath ?? 'not provided'}
 - User-provided capture workflow: ${project.application?.screenshots?.workflow ?? 'not provided'}
+- Sign-in handling: ${project.application ? captureAuthPrompt(captureAuth) : 'not applicable'}
 ${screenshotPlanningInstructions()}
 
 Generator-neutral planning target (the adapter owns these navigation boundaries):
@@ -1023,7 +1137,7 @@ ${formatDiscoveryInventory(discovery)}
 
 Deterministic source-change summary:
 ${changes}
-
+${templateInstructions(current)}
 Durable reviewer preferences from prior revisions, rejections, and inline edits. Apply them only when they remain compatible with current evidence and this request:
 ${reviewerGuidance}
 
@@ -1071,7 +1185,8 @@ The JSON object must use this exact shape:
     "rationale": "why evidence and reader needs justify it",
     "evidence": ["configured source name plus relevant file, symbol, route, or spec operation"],
     "evidenceDetails": [{ "source": "configured source", "path": "source-relative path", "kind": "discovery kind", "label": "symbol, route, operation, or file", "line": 1 }],
-    "visuals": { "mode": "none | recommended | required", "rationale": "what reader ambiguity or visible outcome the captures resolve", "estimatedCaptures": 0, "startPath": "/application-relative/start", "workflow": "ordered actions and safe fixture assumptions", "captureSequence": ["Reader action — expected stable visible state — why this image helps"] }
+    "visuals": { "mode": "none | recommended | required", "rationale": "what reader ambiguity or visible outcome the captures resolve", "estimatedCaptures": 0, "startPath": "/application-relative/start", "workflow": "ordered actions and safe fixture assumptions", "captureSequence": ["Reader action — expected stable visible state — why this image helps"] },
+    "diagram": "required | none"
   }],
   "questions": [{
     "id": "stable-kebab-id",
@@ -1105,7 +1220,8 @@ ${current.mode === 'create'
 - Every must-have page explains its rationale and expected evidence.
 - Every page declares a visuals decision. Use zero for non-UI pages. For each screenshot-enabled page, plan a coherent visual story rather than a token image: orientation or entry state, important input or choice states, intermediate configuration or validation when useful, successful result, and verification or next action. A tutorial normally needs 5–8 captures, getting-started and primary how-to guides 4–7, and focused troubleshooting or secondary UI guides 3–5. Automatic/recommended capture may omit states that text makes unambiguous, but it should still normally plan 2–4 images. Never inflate the count with unchanged screens, decorative images, or every mouse click.
 - Every screenshot-enabled page requires a startPath beginning with one slash, a specific workflow, and a captureSequence with exactly one concrete item per estimated capture in capture order. Each item must name the reader action, expected stable visible state, and why that image helps. Set estimatedCaptures to captureSequence.length. Pages with visuals.mode "none" use zero and empty capture details.
-- The pages array must not be empty.`
+- The pages array must not be empty.
+- Every page declares "diagram". Concept and architecture pages set "required" so the writer includes a Mermaid diagram of the model or lifecycle; task, reference, and release pages set "none" unless a diagram resolves real reader ambiguity.`
 }
 
 function generationRequest(plan: DocumentationPlan, reviewerGuidance: string): string {
@@ -1127,7 +1243,7 @@ For every screenshot-enabled page, follow the approved visuals.startPath, visual
 
 Write every planned page to professional depth. Read the authoring skill's page-depth reference and apply its contract for the page type: an outcome-led introduction; prerequisites; complete ordered steps with the exact labels, values, and observable result of each step; verification; evidence-backed troubleshooting; and a next step. Reference pages cover their whole public surface with complete tables. Concept pages carry a diagram or model and link to the tasks they inform. The landing page orients each audience with cards to a first task. Use the generator's native components — steps, tabs, callouts, cards, accordions, code groups, frames — where they make the page clearer. For every screenshot-enabled guide, put one captured image inside every step that changes the screen. Doxloop reports \`thin-page\` and \`thin-procedure\` warnings from its validation command; resolve every one on a planned page before finishing.
 
-The finished workspace must contain no generated starter content. Replace every planned starter page completely and remove every \`doxloop:starter-page\` marker before validation. Do not report completion while the \`starter-content\` validation code remains.
+${planWritingRequirements(plan)}The finished workspace must contain no generated starter content. Replace every planned starter page completely and remove every \`doxloop:starter-page\` marker before validation. Do not report completion while the \`starter-content\` validation code remains.
 
 Preserve applicable reviewer preferences below unless they conflict with the approved plan or current evidence:
 ${reviewerGuidance}`
@@ -1233,20 +1349,41 @@ function lastPlanIn(text: string, sent?: string): { plan?: unknown; defect?: str
   return defect ? { defect } : {}
 }
 
+/**
+ * The agent's own final reply, read out of its machine-readable stream:
+ * Claude's `result` event, Codex's completed `agent_message` items, and
+ * Gemini's assistant `message` events. Undefined when the output is not a
+ * stream, in which case the whole transcript is searched instead.
+ */
+export function agentReplyFromStream(raw: string, agent: AgentName): string | undefined {
+  const events = raw.split(/\r?\n/).flatMap((line): Record<string, unknown>[] => {
+    try {
+      const value = JSON.parse(line) as unknown
+      return value && typeof value === 'object' && !Array.isArray(value) ? [value as Record<string, unknown>] : []
+    } catch {
+      return []
+    }
+  })
+  if (agent === 'claude') {
+    const results = events.flatMap((event) => event.type === 'result' && typeof event.result === 'string' ? [event.result] : [])
+    return results.at(-1)
+  }
+  if (agent === 'codex') {
+    const messages = events.flatMap((event) => {
+      const item = event.type === 'item.completed' && event.item && typeof event.item === 'object' ? event.item as Record<string, unknown> : undefined
+      return item?.type === 'agent_message' && typeof item.text === 'string' ? [item.text] : []
+    })
+    return messages.length > 0 ? messages.join('\n') : undefined
+  }
+  const parts = events.flatMap((event) => event.type === 'message' && event.role === 'assistant' && typeof event.content === 'string' ? [event.content] : [])
+  return parts.length > 0 ? parts.join('') : undefined
+}
+
 export function extractPlanOutput(raw: string, agent: AgentName, prompt?: string): unknown {
   const sent = prompt ? collapse(prompt) : undefined
   let candidate = raw.trim()
-  if (agent === 'claude') {
-    const results = candidate.split(/\r?\n/).flatMap((line): string[] => {
-      try {
-        const value = JSON.parse(line) as { type?: unknown; result?: unknown }
-        return value.type === 'result' && typeof value.result === 'string' ? [value.result] : []
-      } catch {
-        return []
-      }
-    })
-    if (results.length > 0) candidate = results.at(-1)!
-  }
+  const reply = agentReplyFromStream(candidate, agent)
+  if (reply) candidate = reply
   // The agreed contract wins outright when the agent honors it. Otherwise fall
   // back to the whole transcript, which also contains the skill references the
   // agent read and the shape template it was given.
@@ -1356,7 +1493,7 @@ function initialCreatePlanCoverageIssue(
     return `The create plan has ${pagesWithoutEvidence.length} ${pagesWithoutEvidence.length === 1 ? 'page' : 'pages'} without source evidence. Map every page to write to at least one configured source.`
   }
   const scopeMinimum = base.scope === 'starter' ? 3 : base.scope === 'standard' ? 7 : base.scope === 'comprehensive' ? 12 : 1
-  const minimum = Math.max(scopeMinimum, base.targetPages ?? 0)
+  const minimum = Math.min(batchLimits(base.execution.limits).maxPages, Math.max(scopeMinimum, base.targetPages ?? 0))
   const pagesToWrite = plan.pages.filter((page) => page.action === 'create' || page.action === 'update').length
   if (pagesToWrite >= minimum) return undefined
   if (plan.exclusions.some((exclusion) => /^scope exception:\s+\S/i.test(exclusion))) return undefined
@@ -1475,6 +1612,9 @@ function normalizePage(raw: unknown, index: number): DocumentationPlanPage {
   const estimatedCaptures = visualMode === 'none'
     ? 0
     : Math.min(20, captureSequence.length > 0 ? captureSequence.length : Math.max(minimumCaptures, requestedCaptures))
+  const diagram: DocumentationPlanDiagram = page.diagram === 'required' || page.diagram === 'none'
+    ? page.diagram
+    : pageType.trim().toLowerCase() === 'concept' ? 'required' : 'none'
   return {
     id: safeId(textValue(page.id) ?? title, `page-${index + 1}`),
     title,
@@ -1486,6 +1626,7 @@ function normalizePage(raw: unknown, index: number): DocumentationPlanPage {
     rationale: textValue(page.rationale) ?? '',
     evidence,
     evidenceDetails,
+    diagram,
     visuals: {
       mode: visualMode,
       rationale: textValue(visualsRaw.rationale) ?? (visualMode === 'none' ? 'No meaningful visible application state is needed for this page.' : ''),
@@ -1526,10 +1667,12 @@ function validCaptureStartPath(value: string | undefined): boolean {
 }
 
 async function assertCapturePlanReady(
+  root: string,
   application: Awaited<ReturnType<typeof loadProject>>['application'],
   pages: DocumentationPlanPage[],
 ): Promise<void> {
-  const readiness = await checkApplicationReadiness(application)
+  const auth = await captureAuthContext(root)
+  const readiness = await checkApplicationReadiness(application, auth)
   if (!readiness.reachable) throw new DoxloopError(readiness.message)
   const routes = await Promise.all(pages.map(async (page) => {
     const startPath = page.visuals?.startPath
@@ -1538,7 +1681,7 @@ async function assertCapturePlanReady(
     }
     return {
       page,
-      readiness: await checkApplicationReadiness(application ? { ...application, readyPath: startPath } : undefined),
+      readiness: await checkApplicationReadiness(application ? { ...application, readyPath: startPath } : undefined, auth),
     }
   }))
   const unavailable = routes.find((route) => !route.readiness.reachable)

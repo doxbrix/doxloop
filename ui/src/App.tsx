@@ -1,13 +1,17 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from './api'
+import { ErrorBoundary } from './error-boundary'
 import { SetupApplication } from './SetupApplication'
 import { WorkspaceApplication } from './WorkspaceApplication'
+import { workspacePath } from './routes'
 import type { UiState } from './types'
 
 export function App() {
   const [state, setState] = useState<UiState | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  // The wizard can be opened from an existing workspace to start or import another project.
+  const [setupOpen, setSetupOpen] = useState(false)
 
   const reload = async () => {
     setLoading(true)
@@ -38,20 +42,24 @@ export function App() {
   if (!state && loading) return <Splash />
   if (!state) return <Splash error={error} />
 
-  if (!state.projectFound) {
-    return <SetupApplication
+  if (!state.projectFound || setupOpen) {
+    return <ErrorBoundary onReset={() => void reload()}><SetupApplication
       state={state}
       act={act}
       error={error}
       onContinue={async (page) => {
-        history.pushState({}, '', `/${page}`)
+        setSetupOpen(false)
+        history.pushState({}, '', workspacePath(page))
         await reload()
       }}
-    />
+      {...(state.projectFound ? { onCancel: () => { setSetupOpen(false); setError('') } } : {})}
+    /></ErrorBoundary>
   }
 
-  return <WorkspaceApplication
+  return <ErrorBoundary onReset={() => void reload()}><WorkspaceApplication
+    key={state.root}
     state={state}
+    onNewProject={() => setSetupOpen(true)}
     loading={loading}
     error={error}
     reload={reload}
@@ -59,7 +67,7 @@ export function App() {
     onJobsUpdate={(jobs) => setState((current) => current ? { ...current, jobs } : current)}
     onError={setError}
     onErrorDismiss={() => setError('')}
-  />
+  /></ErrorBoundary>
 }
 
 function Splash({ error }: { error?: string }) {

@@ -137,6 +137,44 @@ withSqlite('history storage', () => {
     expect(request?.requestText).toBe('Create the initial documentation')
   })
 
+  test('round-trips edit requests and their selected pages', async () => {
+    const { root } = await fixture()
+    const createdAt = new Date().toISOString()
+    await recordSyncRun(root, {
+      schemaVersion: 2,
+      id: 'run-history-edit',
+      status: 'failed',
+      mode: 'propose',
+      trigger: 'edit',
+      createdAt,
+      completedAt: createdAt,
+      summary: 'Editing Limits',
+      sourceSummary: 'No source changes',
+      stalePages: [],
+      changes: [],
+      editRequest: {
+        instruction: 'Clarify the supported limit.',
+        paths: ['index.mdx'],
+        allowRelated: false,
+        followUps: [],
+      },
+      retentionUntil: createdAt,
+      revisionRequests: [],
+      humanEdits: [],
+      error: 'The agent did not change this page. Nothing was applied.',
+    }, { runDir: '.doxloop/runs/run-history-edit' })
+
+    expect((await listRequests(root))[0]).toMatchObject({
+      id: 'run-history-edit',
+      kind: 'edit',
+      trigger: 'edit',
+      requestText: 'Clarify the supported limit.',
+    })
+    expect((await requestPages(root, ['run-history-edit']))['run-history-edit']).toEqual([
+      expect.objectContaining({ path: 'index.mdx' }),
+    ])
+  })
+
   test('follows a proposal through to applied and records the page decision', async () => {
     const { root } = await fixture()
     const created = await proposal(root)

@@ -1,3 +1,5 @@
+import { documentationCollections, collectionForPath } from './documentation-collections.js'
+import { contentLinks } from './content-links.js'
 import { access, readFile } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { EVIDENCE_MAP_FILE, readEvidenceMap } from './evidence.js'
@@ -31,6 +33,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     'Validation content directory',
     { allowRoot: project.generator === 'doxbrix' },
   )
+  const collections = await documentationCollections(root, project)
   const files = await loadPages(root, project)
   const pages = files.map((path) => pageId(contentRoot, path))
   const pageSet = new Set(pages)
@@ -50,8 +53,8 @@ export async function validateProject(root: string): Promise<ValidationResult> {
         root,
         contentRoot,
         project,
-        pages: files,
-        pageIds: pages,
+        pages: files.filter((file) => file.startsWith(`${contentRoot}/`)),
+        pageIds: files.filter((file) => file.startsWith(`${contentRoot}/`)).map((file) => pageId(contentRoot, file)),
       })),
     )
   }
@@ -85,10 +88,18 @@ export async function validateProject(root: string): Promise<ValidationResult> {
       issues.push(...validateDoxbrixComponents(raw, file))
     }
     issues.push(...validateProfessionalContent(page.body, raw, file))
-    issues.push(...validatePageDepth(page.body, file, planTypes.get(file.replace(/\.[^./]+$/, ''))))
-    if ((adapter?.project.contentFormat ?? 'markdown') === 'markdown') {
-      issues.push(...(await validateLinks(path, contentRoot, raw, root, adapter)))
+    const planned = planTypes.get(file.replace(/\.[^./]+$/, ''))
+    issues.push(...validatePageDepth(page.body, file, planned?.type))
+    if (planned?.diagram === 'required' && !hasDiagram(raw)) {
+      issues.push(
+        warning(
+          'missing-diagram',
+          'The approved plan requires a diagram on this page. Add a Mermaid block that shows the model or lifecycle it explains.',
+          file,
+        ),
+      )
     }
+    issues.push(...(await validateLinks(path, resolve(root, collectionForPath(collections, file)?.directory ?? project.contentDir), raw, root, adapter)))
   }
 
   issues.push(
@@ -206,6 +217,29 @@ async function validateEvidenceMap(
   return issues
 }
 
+export interface DoxbrixNavigationEntry {
+  path: string
+  section?: string
+}
+
+/** Flatten Doxbrix navigation in reader order for validation and page discovery. */
+export function readDoxbrixNavigation(
+  spaces: Array<{ name: string; nav: DoxbrixNavNode[] }>,
+): DoxbrixNavigationEntry[] {
+  const entries: DoxbrixNavigationEntry[] = []
+  const visit = (nodes: DoxbrixNavNode[], section?: string): void => {
+    for (const node of nodes) {
+      if (node.type === 'page' && typeof node.file === 'string' && node.file.trim()) {
+        entries.push({ path: node.file, ...(section ? { section } : {}) })
+      } else if (node.type === 'group' && Array.isArray(node.items)) {
+        visit(node.items, node.label || section)
+      }
+    }
+  }
+  for (const space of spaces) visit(space.nav, space.name)
+  return entries
+}
+
 function validateDoxbrixNavigation(
   spaces: Array<{ name: string; nav: DoxbrixNavNode[] }>,
   pageSet: Set<string>,
@@ -284,7 +318,8 @@ function validateDoxbrixNavigation(
   }
 }
 
-async function validateDoxbrixTheme(
+/** Theme checks shared by validation and the branding panel's pre-write check. */
+export async function validateDoxbrixTheme(
   value: unknown,
   contentRoot: string,
   configFile: string,
@@ -849,21 +884,29 @@ function trueAttribute(value: string | true | undefined): boolean {
  * Page types from the plan staged in the workspace, keyed by extension-less
  * page path. Direct authoring without a plan infers the type from the page.
  */
-async function plannedPageTypes(root: string, project: DoxloopProject): Promise<Map<string, string>> {
-  const types = new Map<string, string>()
+async function plannedPageTypes(
+  root: string,
+  project: DoxloopProject,
+): Promise<Map<string, { type: string; diagram?: string }>> {
+  const types = new Map<string, { type: string; diagram?: string }>()
   try {
     const plan = JSON.parse(await readFile(join(root, '.doxloop', 'documentation-plan.json'), 'utf8')) as {
-      pages?: Array<{ path?: unknown; type?: unknown }>
+      pages?: Array<{ path?: unknown; type?: unknown; diagram?: unknown }>
     }
     for (const page of plan.pages ?? []) {
       if (typeof page.path !== 'string' || typeof page.type !== 'string') continue
       const key = join(project.contentDir, page.path).replaceAll('\\', '/').replace(/^\.\//, '')
-      types.set(key, page.type)
+      types.set(key, { type: page.type, ...(typeof page.diagram === 'string' ? { diagram: page.diagram } : {}) })
     }
   } catch {
     // No staged plan: infer page types from content instead.
   }
   return types
+}
+
+/** A Mermaid diagram in any of the syntaxes the supported generators render. */
+export function hasDiagram(raw: string): boolean {
+  return /<Mermaid[\s>]|```mermaid\b|\.\. mermaid::|\{%\s*mermaid|<pre class="mermaid"|\{\{<\s*mermaid/i.test(raw)
 }
 
 const PROCEDURAL_TYPES = new Set(['how-to', 'tutorial', 'getting-started'])
@@ -922,6 +965,16 @@ function inferPageType(file: string, body: string, stepCount: number, orderedIte
   return body.includes('<Steps') ? 'how-to' : 'other'
 }
 
+/** Generated scaffolding the authoring agent is told to replace: a starter marker or its placeholder language. */
+export function isStarterContent(content: string): boolean {
+  const prose = stripCodeFences(content)
+  return (
+    /(?:<!--|\{\/\*)\s*doxloop:starter-page\s*(?:-->|\*\/\})/i.test(prose) ||
+    /^\.\.\s+doxloop:starter-page\s*$/im.test(prose) ||
+    /\b(?:replace this starter|the authoring agent will replace this starter)\b/i.test(prose)
+  )
+}
+
 function validateProfessionalContent(
   body: string,
   raw: string,
@@ -930,12 +983,7 @@ function validateProfessionalContent(
   const issues: ValidationIssue[] = []
   const prose = stripCodeFences(body)
 
-  if (
-    /(?:<!--|\{\/\*)\s*doxloop:starter-page\s*(?:-->|\*\/\})/i.test(prose) ||
-    /\b(?:replace this starter|the authoring agent will replace this starter)\b/i.test(
-      prose,
-    )
-  ) {
+  if (isStarterContent(prose)) {
     issues.push(
       error(
         'starter-content',
@@ -1072,19 +1120,17 @@ async function validateLinks(
   adapter?: GeneratorAdapter,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  const pattern = /!?\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g
-  for (const match of content.matchAll(pattern)) {
-    const href = match[1]
+  for (const href of contentLinks(content)) {
     if (
       href === undefined ||
-      href.startsWith('#') ||
+      href.startsWith('#') || href.startsWith('//') ||
       /^[a-z][a-z0-9+.-]*:/i.test(href)
     ) {
       continue
     }
     let decoded: string
     try {
-      decoded = decodeURIComponent(href.split('#')[0] ?? '')
+      decoded = decodeURIComponent(href.split(/[?#]/)[0] ?? '')
     } catch {
       issues.push(
         error(
@@ -1101,8 +1147,8 @@ async function validateLinks(
       : resolve(dirname(pagePath), decoded)
     const candidates =
       extname(base) === ''
-        ? [base, `${base}.md`, `${base}.mdx`, join(base, 'index.md'), join(base, 'index.mdx')]
-        : [base]
+        ? [base, ...['md', 'mdx', 'rst', 'html', 'htm'].flatMap((extension) => [`${base}.${extension}`, join(base, `index.${extension}`)])]
+        : /\.html?$/.test(base) ? [base, base.replace(/\.html?$/, '.rst'), base.replace(/\.html?$/, '.md'), base.replace(/\.html?$/, '.mdx')] : [base]
     const generatorAsset = adapter?.resolveLocalAsset?.({
       root: projectRoot,
       contentRoot,

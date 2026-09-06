@@ -1,16 +1,29 @@
-import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  DoxloopError,
   defineGenerator,
   type GeneratorPreviewOptions,
   type GeneratorScaffoldContext,
+  type GeneratorValidationContext,
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
-import { resolvePublicAsset } from '@doxbrix/doxloop/generator-runtime'
+import {
+  contentRelativePages,
+  ensureNodeDependencies,
+  isRecord,
+  navigationUnverifiedIssue,
+  nodeBinary,
+  nodeInstallInvocation,
+  pathExists,
+  readPackageJson,
+  resolvePublicAsset,
+  runPreviewProcess,
+  shownHost,
+  slugFromTitle,
+  writeJsonFile,
+} from '@doxbrix/doxloop/generator-runtime'
 
 const PACKAGE_NAME = '@doxbrix/doxloop-generator-docusaurus'
 const PACKAGE_VERSION = (
@@ -18,6 +31,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
   ) as { version: string }
 ).version
+const DOCUSAURUS_VERSION = '3.10.2'
 
 const adapter = defineGenerator({
   apiVersion: 1,
@@ -36,6 +50,7 @@ const adapter = defineGenerator({
     defaultContentDir: 'docs',
     pageExtensions: ['.md', '.mdx'],
     gitignore: ['node_modules/', 'build/', '.docusaurus/'],
+    contentFormat: 'markdown' as const,
   },
   build: {
     command: 'npm run build',
@@ -46,21 +61,7 @@ const adapter = defineGenerator({
   resolveLocalAsset({ root, reference }) {
     return resolvePublicAsset(root, 'static', reference)
   },
-  async validate({ root }) {
-    const issues: ValidationIssue[] = []
-    const required = ['package.json', 'docusaurus.config.js', 'sidebars.js']
-    for (const file of required) {
-      if (!(await exists(join(root, file)))) {
-        issues.push({
-          severity: 'error',
-          code: 'missing-generator-file',
-          message: `Docusaurus project is missing ${file}.`,
-          file,
-        })
-      }
-    }
-    return issues
-  },
+  validate: validateDocusaurus,
 })
 
 export default adapter
@@ -69,9 +70,8 @@ export function docusaurusPreviewInvocation(options: GeneratorPreviewOptions): {
   command: string
   args: string[]
 } {
-  const executable = process.platform === 'win32' ? 'docusaurus.cmd' : 'docusaurus'
   return {
-    command: resolve(options.root, 'node_modules', '.bin', executable),
+    command: nodeBinary(options.root, 'docusaurus'),
     args: [
       'start',
       '--host',
@@ -87,14 +87,7 @@ export async function docusaurusInstallInvocation(root: string): Promise<{
   command: string
   args: string[]
 }> {
-  const suffix = process.platform === 'win32' ? '.cmd' : ''
-  if (await exists(join(root, 'pnpm-lock.yaml'))) {
-    return { command: `pnpm${suffix}`, args: ['install'] }
-  }
-  if (await exists(join(root, 'yarn.lock'))) {
-    return { command: `yarn${suffix}`, args: ['install'] }
-  }
-  return { command: `npm${suffix}`, args: ['install'] }
+  return nodeInstallInvocation(root)
 }
 
 async function scaffoldDocusaurus(context: GeneratorScaffoldContext): Promise<void> {
@@ -102,7 +95,7 @@ async function scaffoldDocusaurus(context: GeneratorScaffoldContext): Promise<vo
   await mkdir(join(root, contentDir), { recursive: true })
   await mkdir(join(root, 'src', 'css'), { recursive: true })
   const existing = await readPackageJson(root)
-  await writeJson(join(root, 'package.json'), {
+  await writeJsonFile(join(root, 'package.json'), {
     ...existing,
     name:
       typeof existing.name === 'string' && existing.name
@@ -119,12 +112,16 @@ async function scaffoldDocusaurus(context: GeneratorScaffoldContext): Promise<vo
       start: 'docusaurus start',
       build: 'docusaurus build',
       serve: 'docusaurus serve',
+      'docs:test': 'doxloop test',
     },
     dependencies: {
       ...(isRecord(existing.dependencies) ? existing.dependencies : {}),
-      '@docusaurus/core': '3.10.2',
-      '@docusaurus/faster': '3.10.2',
-      '@docusaurus/preset-classic': '3.10.2',
+      '@docusaurus/core': DOCUSAURUS_VERSION,
+      '@docusaurus/faster': DOCUSAURUS_VERSION,
+      '@docusaurus/preset-classic': DOCUSAURUS_VERSION,
+      '@docusaurus/theme-mermaid': DOCUSAURUS_VERSION,
+      // theme-mermaid 3.10 imports the ELK layout unconditionally, so the build needs it present.
+      '@mermaid-js/layout-elk': '^0.1.9',
       '@mdx-js/react': '^3.0.0',
       clsx: '^2.1.1',
       'prism-react-renderer': '^2.4.1',
@@ -135,8 +132,8 @@ async function scaffoldDocusaurus(context: GeneratorScaffoldContext): Promise<vo
       ...(isRecord(existing.devDependencies) ? existing.devDependencies : {}),
       [context.corePackage.name]: `^${context.corePackage.version}`,
       [context.generatorPackage.name]: `^${context.generatorPackage.version}`,
-      '@docusaurus/module-type-aliases': '3.10.2',
-      '@docusaurus/types': '3.10.2',
+      '@docusaurus/module-type-aliases': DOCUSAURUS_VERSION,
+      '@docusaurus/types': DOCUSAURUS_VERSION,
     },
     engines: {
       ...(isRecord(existing.engines) ? existing.engines : {}),
@@ -151,6 +148,10 @@ async function scaffoldDocusaurus(context: GeneratorScaffoldContext): Promise<vo
   url: process.env.DOXLOOP_SITE_URL || 'https://example.com',
   baseUrl: '/',
   onBrokenLinks: 'throw',
+  markdown: {
+    mermaid: true,
+  },
+  themes: ['@docusaurus/theme-mermaid'],
   presets: [
     [
       'classic',
@@ -243,116 +244,104 @@ sidebar_position: 2
 }
 
 async function startDocusaurusPreview(options: GeneratorPreviewOptions): Promise<void> {
+  await ensureNodeDependencies(options.root, 'docusaurus', 'Docusaurus')
   const invocation = docusaurusPreviewInvocation(options)
-  await ensureDocusaurusDependencies(options.root)
   process.stdout.write(
     `Starting Docusaurus preview at http://${shownHost(options.host)}:${options.port}\n`,
   )
-  await runPreview(invocation.command, invocation.args, options.root, 'Docusaurus')
-}
-
-async function ensureDocusaurusDependencies(root: string): Promise<void> {
-  const binary = docusaurusPreviewInvocation({
-    root,
-    host: '127.0.0.1',
-    port: 4321,
-    open: false,
-  }).command
-  if (await exists(binary)) return
-  if (!(await exists(join(root, 'package.json')))) {
-    throw new DoxloopError('This Docusaurus project has no package.json.', 2)
-  }
-  const install = await docusaurusInstallInvocation(root)
-  process.stdout.write(
-    `Installing Docusaurus dependencies with \`${install.command} ${install.args.join(' ')}\` (first preview only)...\n`,
+  await runPreviewProcess(
+    invocation.command,
+    invocation.args,
+    options.root,
+    'Docusaurus',
   )
-  const code = await runChild(install.command, install.args, root)
-  if (code !== 0 || !(await exists(binary))) {
-    throw new DoxloopError(
-      `Docusaurus dependency installation did not complete. Run \`${install.command} ${install.args.join(' ')}\` in this documentation project.`,
-      2,
-    )
-  }
 }
 
-async function runPreview(
-  command: string,
-  args: string[],
-  root: string,
-  label: string,
-): Promise<void> {
-  const child = spawn(command, args, { cwd: root, stdio: 'inherit' })
-  const forward = (signal: NodeJS.Signals): void => {
-    if (!child.killed) child.kill(signal)
-  }
-  const onSigint = (): void => forward('SIGINT')
-  const onSigterm = (): void => forward('SIGTERM')
-  process.once('SIGINT', onSigint)
-  process.once('SIGTERM', onSigterm)
-  try {
-    const result = await new Promise<{
-      code: number | null
-      signal: NodeJS.Signals | null
-    }>((resolveExit, reject) => {
-      child.once('error', reject)
-      child.once('exit', (code, signal) => resolveExit({ code, signal }))
-    })
-    if (result.code !== 0 && result.signal === null) {
-      throw new DoxloopError(`${label} preview exited with code ${result.code ?? 1}.`)
+/**
+ * Docusaurus sidebars are JavaScript, so this reads the common literal forms
+ * and reports what it cannot follow instead of guessing. A sidebar that
+ * autogenerates from a directory covers every page under it; any sidebar built
+ * by code or imported from another module is left to the strict build.
+ */
+async function validateDocusaurus(
+  context: GeneratorValidationContext,
+): Promise<ValidationIssue[]> {
+  const issues: ValidationIssue[] = []
+  for (const file of ['package.json', 'docusaurus.config.js', 'sidebars.js']) {
+    if (!(await pathExists(join(context.root, file)))) {
+      issues.push({
+        severity: 'error',
+        code: 'missing-generator-file',
+        message: `Docusaurus project is missing ${file}.`,
+        file,
+      })
     }
-  } finally {
-    process.off('SIGINT', onSigint)
-    process.off('SIGTERM', onSigterm)
   }
-}
-
-async function runChild(command: string, args: string[], root: string): Promise<number> {
-  return new Promise((resolveExit, reject) => {
-    const child = spawn(command, args, { cwd: root, stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code) => resolveExit(code ?? 1))
-  })
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await readFile(path)
-    return true
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    throw error
+  const sidebarPath = join(context.root, 'sidebars.js')
+  if (!(await pathExists(sidebarPath))) return issues
+  const source = await readFile(sidebarPath, 'utf8')
+  const sidebar = readDocusaurusSidebar(source)
+  if (sidebar.unverified) {
+    issues.push(navigationUnverifiedIssue('Docusaurus', 'sidebars.js', sidebar.unverified))
+    return issues
   }
-}
-
-async function readPackageJson(root: string): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<
-      string,
-      unknown
-    >
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
-    throw error
-  }
-}
-
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
-function slugFromTitle(title: string): string {
-  return (
-    title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'documentation'
+  const pagesById = new Map(
+    contentRelativePages(context.contentRoot, context.pages).map((page) => [
+      page.replace(/\.(?:md|mdx)$/i, ''),
+      page,
+    ]),
   )
+  for (const id of sidebar.docIds) {
+    if (!pagesById.has(id)) {
+      issues.push({
+        severity: 'error',
+        code: 'missing-page',
+        message: `Docusaurus sidebar references missing doc "${id}".`,
+        file: 'sidebars.js',
+      })
+    }
+  }
+  if (sidebar.autogenerated.length === 0) {
+    for (const [id, page] of pagesById) {
+      if (!sidebar.docIds.has(id)) {
+        issues.push({
+          severity: 'error',
+          code: 'unnavigated-page',
+          message: `Page "${id}" is not in any Docusaurus sidebar.`,
+          file: `${context.project.contentDir}/${page}`,
+        })
+      }
+    }
+  }
+  return issues
 }
 
-function shownHost(host: string): string {
-  return host === '0.0.0.0' || host === '::' ? 'localhost' : host
+export function readDocusaurusSidebar(source: string): {
+  docIds: Set<string>
+  autogenerated: string[]
+  unverified?: string
+} {
+  const docIds = new Set<string>()
+  const autogenerated: string[] = []
+  const body = source.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm, '$1')
+  if (/^\s*(?:import|const|let|var)\s[\s\S]*?require\(|^\s*import\s/m.test(body)) {
+    return { docIds, autogenerated, unverified: 'sidebars.js imports other modules.' }
+  }
+  if (/\b(?:function|=>|\.map\(|\.filter\(|\.concat\(|\.\.\.)/.test(body)) {
+    return { docIds, autogenerated, unverified: 'sidebars.js builds its entries with code.' }
+  }
+  for (const match of body.matchAll(/\bdirName\s*:\s*['"]([^'"]*)['"]/g)) {
+    autogenerated.push(match[1] ?? '.')
+  }
+  for (const match of body.matchAll(/\btype\s*:\s*['"]doc['"][^}]*?\bid\s*:\s*['"]([^'"]+)['"]/g)) {
+    if (match[1]) docIds.add(match[1])
+  }
+  for (const match of body.matchAll(/\bid\s*:\s*['"]([^'"]+)['"][^}]*?\btype\s*:\s*['"]doc['"]/g)) {
+    if (match[1]) docIds.add(match[1])
+  }
+  // Bare string items inside arrays are doc ids: ['intro', 'guides/install'].
+  for (const match of body.matchAll(/(?:\[|,)\s*['"]([A-Za-z0-9][\w./-]*)['"]\s*(?=,|\])/g)) {
+    if (match[1]) docIds.add(match[1])
+  }
+  return { docIds, autogenerated }
 }

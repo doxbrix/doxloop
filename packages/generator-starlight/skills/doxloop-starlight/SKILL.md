@@ -12,10 +12,12 @@ Astro configuration, content collections, and components.
 
 1. Confirm `.doxloop/project.json` selects `starlight`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect Astro config, the content schema, sidebar, components, and styles.
-4. Keep pages in `src/content/docs/` and preserve the content collection.
-5. Give pages `title` and outcome-focused `description` frontmatter.
-6. Maintain the Starlight sidebar and stable slugs.
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect Astro config, the content schema, sidebar, components, and styles.
+5. Keep pages in `src/content/docs/` and preserve the content collection.
+6. Give pages `title` and outcome-focused `description` frontmatter.
+7. Maintain the Starlight sidebar and stable slugs.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` with
 Starlight header links and sidebar configuration. Preserve planned labels,

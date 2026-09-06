@@ -1,17 +1,32 @@
+import { Comments, BulkMetadata, AuditTools, Estimate, Collections } from './WorkspaceTools'
+import { TextEditor, PageTools } from './TextEditor'
+import { workspaceStatus, coverageRefreshKey } from './workspace-status'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import './WorkspaceApplication.css'
-import { api, patch, post, remove } from './api'
+import './ContentTools.css'
+import { api, patch, post, put, remove } from './api'
 import {
   Badge, Button, Combo, Empty, Field, Input, KeyValues, Lines, Note, PageHeader,
   Panel, Segmented, Select, Stat, Table, Tabs, Textarea, Toggle, parseTerms, splitComma, termText, timeText,
 } from './components'
 import { Icon } from './icons'
-import { settledPlanJobs } from './job-transitions'
+import { settledPageEditJobs, settledPlanJobs } from './job-transitions'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
 import { countPlanPages, groupPlanPages, planActionLabel, planApprovalControls, type PlanPageFilter } from './plan-review'
-import { workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceRoute } from './routes'
+import { canonicalWorkspacePath, workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceParams, type WorkspaceRoute } from './routes'
+import { setLocation, useSearchParams } from './url-state'
+import { PollFailureTracker } from './polling'
+import { useSeededForm } from './form-sync'
 import { screenshotIntentFromChoice } from './setup-plan'
-import type { CoverageItem, DeploymentRecord, DiffRow, DocumentationPlan, DocumentationPlanPage, GeneratorEntry, HistoryChangedPage, HistoryRequest, Proposal, ProposalChange, Source, SourceDiff, SourceIntelligence, SyncConfig, UiJob, UiState } from './types'
+import { ProjectSwitcher } from './ProjectSwitcher'
+import { AgentCapabilityMatrix } from './agent-capabilities'
+import { ProposalRationaleDrawer, ProposalRenderedDiff, ProposalSourceDiff } from './proposal-diff'
+import { AssetLibrary, AssetPicker, readFileAsBase64 } from './AssetLibrary'
+import { BrandingPanel } from './BrandingPanel'
+import { GlossaryPanel, PageMetadataForm, ReleaseTemplateFields, TermsEditor, recordFromTerms, termsFromRecord, type ReleaseTemplateForm } from './content-types'
+import { NavigationView, PlanNavigationEditor } from './NavigationView'
+import { defaultReviewChange, hunkStateKey, reviewFileGroups } from './review-presentation'
+import type { AgentState, CoverageItem, DeploymentRecord, DocumentationPlan, DocumentationPlanPage, DriftSummary, Failed, GeneratorEntry, HistoryChangedPage, HistoryPageEntry, HistoryRequest, PageSummary, Proposal, ProposalChange, Source, SourceIntelligence, SyncConfig, UiJob, UiState, Validation } from './types'
 
 type PlanDiscoverySummary = {
   suggestedPages: { starter: number; standard: number; comprehensive: number }
@@ -32,6 +47,7 @@ const NAV = [
   ['overview', 'Overview', 'overview'],
   ['sources', 'Sources', 'sources'],
   ['authoring', 'Update', 'update'],
+  ['pages', 'Pages', 'file'],
   ['proposals', 'Review', 'review'],
   ['publish', 'Deploy', 'deploy'],
   ['settings', 'Settings', 'settings'],
@@ -40,7 +56,8 @@ const NAV = [
 const PAGE_TITLES: Record<Page, string> = {
   overview: 'Overview',
   sources: 'Sources',
-  authoring: 'Update documentation',
+  authoring: 'Create / Update',
+  pages: 'Pages',
   proposals: 'Review changes',
   publish: 'Deploy',
   settings: 'Settings',
@@ -60,6 +77,8 @@ type WorkspaceApplicationProps = {
   onJobsUpdate: (jobs: UiJob[]) => void
   onError: (error: string) => void
   onErrorDismiss: () => void
+  /** Open the setup wizard for another project while this one stays registered. */
+  onNewProject: () => void
 }
 
 export function WorkspaceApplication({
@@ -71,12 +90,20 @@ export function WorkspaceApplication({
   onJobsUpdate,
   onError,
   onErrorDismiss,
+  onNewProject,
 }: WorkspaceApplicationProps) {
   const project = state.project!
-  const [page, setPage] = useState<Page>(() => workspaceRoute(location.pathname))
+  const [page, setPage] = useState<Page>(() => {
+    // Old page names and the bare root land on their canonical address so a
+    // bookmark or a `doxloop ui --page` link never shows a stale URL.
+    const canonical = canonicalWorkspacePath(location.pathname, location.search)
+    if (canonical) history.replaceState({}, '', canonical)
+    return workspaceRoute(location.pathname)
+  })
   const [navOpen, setNavOpen] = useState(false)
   const [jobStreamConnected, setJobStreamConnected] = useState(false)
   const [readyProposal, setReadyProposal] = useState<Proposal | null>(null)
+  const [syncNotice, setSyncNotice] = useState<SyncNotice | null>(null)
   const runningJobIds = useRef(new Set(state.jobs.filter((job) => job.status === 'running').map((job) => job.id)))
   const announcedJobIds = useRef(new Set<string>())
   const pendingProposalCount = validRuns(state.runs).filter((run) => OPEN_STATUSES.includes(run.status)).length
@@ -91,11 +118,17 @@ export function WorkspaceApplication({
       !announcedJobIds.current.has(job.id),
     )
     const settledPlans = settledPlanJobs(jobs, previouslyRunning, announcedJobIds.current)
+    const settledPageEdits = settledPageEditJobs(jobs, previouslyRunning, announcedJobIds.current)
     const settledRevisions = jobs.filter((job) =>
       (job.type.startsWith('proposal:revise:') || job.type.startsWith('proposal:resume:')) &&
       job.status !== 'running' &&
       previouslyRunning.has(job.id) &&
       !announcedJobIds.current.has(job.id),
+    )
+    // A source check reports its result in a notice rather than only in the
+    // log, so "Check now" answers the question it was asked.
+    const settledSyncs = jobs.filter((job) =>
+      job.type === 'sync' && job.status !== 'running' && previouslyRunning.has(job.id) && !announcedJobIds.current.has(job.id),
     )
     // Any plan job that stopped running must refresh the persisted plan, even
     // if this client already handled it once. The announce guard exists to stop
@@ -107,6 +140,11 @@ export function WorkspaceApplication({
     runningJobIds.current = new Set(jobs.filter((job) => job.status === 'running').map((job) => job.id))
     onJobsUpdate(jobs)
     if (stoppedPlan && settledPlans.length === 0) void reload()
+    for (const job of settledSyncs) {
+      announcedJobIds.current.add(job.id)
+      setSyncNotice(syncOutcomeNotice(job))
+      void reload()
+    }
     for (const job of settledPlans) {
       announcedJobIds.current.add(job.id)
       if ((job.type !== 'plan:generate' && job.type !== 'plan:continue') || job.status !== 'succeeded') {
@@ -120,7 +158,7 @@ export function WorkspaceApplication({
           const proposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
           if (!proposal) return
           setReadyProposal(proposal)
-          history.pushState({}, '', '/proposals')
+          setLocation('proposals', { proposal: proposal.id }, 'push')
           setPage('proposals')
         } catch (cause) {
           onError(message(cause))
@@ -136,8 +174,25 @@ export function WorkspaceApplication({
           const proposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
           if (!proposal) return
           setReadyProposal(proposal)
-          history.pushState({}, '', '/proposals')
+          setLocation('proposals', { proposal: proposal.id }, 'push')
           setPage('proposals')
+        } catch (cause) {
+          onError(message(cause))
+        }
+      })()
+    }
+    for (const job of settledPageEdits) {
+      announcedJobIds.current.add(job.id)
+      void (async () => {
+        await reload()
+        const runId = job.type.slice('page-edit:'.length)
+        try {
+          const proposals = await api<Proposal[]>('/api/proposals')
+          if (!proposals.some((run) => run.id === runId && run.editRequest)) return
+          // The Pages view reads the run id from the URL on popstate, so a
+          // synthetic event lets it pick up the finished edit even when it is
+          // already mounted.
+          setLocation('pages', { run: runId })
         } catch (cause) {
           onError(message(cause))
         }
@@ -155,9 +210,13 @@ export function WorkspaceApplication({
           // A resumed run keeps its id; a revision replaces the run it revises.
           const proposal = proposals.find((run) => (resumed ? run.id === previousId : run.revisionOf === previousId) && run.status === 'awaiting-review')
           if (!proposal) return
-          setReadyProposal(proposal)
-          history.pushState({}, '', '/proposals')
-          setPage('proposals')
+          if (proposal.editRequest) {
+            setLocation('pages', { run: proposal.id })
+          } else {
+            setReadyProposal(proposal)
+            setLocation('proposals', { proposal: proposal.id }, 'push')
+            setPage('proposals')
+          }
         } catch (cause) {
           onError(message(cause))
         }
@@ -190,22 +249,26 @@ export function WorkspaceApplication({
   }, [])
 
   const jobsRunning = state.jobs.some((job) => job.status === 'running')
+  // A poll that fails once is usually the server being busy with the agent.
+  // Only a run of failures is worth interrupting the reader for.
+  const pollFailures = useRef(new PollFailureTracker())
   useEffect(() => {
     if (!jobsRunning) return
     const timer = window.setInterval(async () => {
       try {
         const jobs = await api<UiJob[]>('/api/jobs')
+        pollFailures.current.succeeded()
         receiveJobs(jobs)
         if (!jobs.some((job) => job.status === 'running')) void reload()
       } catch (cause) {
-        onError(message(cause))
+        if (pollFailures.current.failed()) onError(`The control center stopped answering: ${message(cause)}`)
       }
     }, 1800)
     return () => clearInterval(timer)
   }, [jobsRunning])
 
-  const navigate = (next: WorkspaceRoute) => {
-    history.pushState({}, '', workspacePath(next))
+  const navigate = (next: WorkspaceRoute, params: WorkspaceParams = {}) => {
+    history.pushState({}, '', workspacePath(next, params))
     setPage(next)
     setNavOpen(false)
   }
@@ -214,8 +277,8 @@ export function WorkspaceApplication({
     const previewTab = window.open('about:blank', '_blank')
     if (previewTab) previewTab.opener = null
     try {
-      await post('/api/preview/start', { open: !previewTab })
-      previewTab?.location.replace(state.preview?.url ?? 'http://127.0.0.1:4321')
+      const result = await post<{ url: string }>('/api/preview/start', { open: !previewTab })
+      previewTab?.location.replace(result.url)
       void reload()
     } catch (cause) {
       previewTab?.close()
@@ -223,7 +286,9 @@ export function WorkspaceApplication({
     }
   }
 
-  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
+  const runningJobs = state.jobs.filter((job) => job.status === 'running').length
+
+  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'pages' ? 'pages-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
 
     {readyProposal && <div class="proposal-ready-scrim" role="presentation">
@@ -232,30 +297,48 @@ export function WorkspaceApplication({
         <span class="proposal-ready-icon"><Icon name="proposals" size={24} /></span>
         <div><h2 id="proposal-ready-title">Documentation changes are ready</h2><p>Your update finished successfully. Review the proposed changes before they replace the current documentation.</p></div>
         <div class="proposal-ready-summary"><strong>{proposalSummaryText(readyProposal.changes)}</strong><span>The current documentation remains unchanged until you accept the proposal.</span></div>
-        <footer><Button icon="external" onClick={() => void openProposalPreview(readyProposal.id, onError)}>Preview changes</Button><Button tone="primary" icon="proposals" onClick={() => setReadyProposal(null)}>Review changes</Button></footer>
+        <footer><Button icon="external" onClick={() => void openProposalPreview(readyProposal.id, onError)}>Preview changes</Button><Button tone="primary" icon="proposals" onClick={() => { const ready = readyProposal; setReadyProposal(null); navigate('proposals', { proposal: ready.id }) }}>Review changes</Button></footer>
       </section>
     </div>}
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
-      <button class="workspace-brand" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
-      <div class="workspace-identity" aria-label={`Current workspace: ${project.title}`}>
-        <span class="workspace-identity-mark">{project.title.slice(0, 1).toUpperCase()}</span>
-        <span class="workspace-identity-copy"><strong>{project.title}</strong><small>Local workspace</small></span>
+      <div class="sidebar-brand-row">
+        <button class="workspace-brand" type="button" aria-label="Doxloop" onClick={() => navigate('overview')}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
+        <button class="sidebar-close" type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)}><Icon name="close" size={16} /></button>
       </div>
+      <ProjectSwitcher
+        state={state}
+        onNewProject={onNewProject}
+        onError={onError}
+        onSwitched={async () => {
+          // The address and every screen's state belonged to the previous
+          // project, so the new one starts from a clean load of its overview.
+          window.location.replace(workspacePath('overview'))
+        }}
+      />
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {NAV.map(([id, label, icon]) => <button key={id} class={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon name={icon} size={17} /><span>{id === 'authoring' ? authoringNavigationLabel : label}</span>{id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}</button>)}
+        {NAV.map(([id, label, icon]) => <button key={id} class={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}>
+          <span class="nav-glyph"><Icon name={icon} size={17} /></span>
+          <span class="nav-copy"><span>{id === 'authoring' ? authoringNavigationLabel : label}</span></span>
+          {id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}
+        </button>)}
       </nav>
-      <button type="button" class="new-project-button" onClick={() => alert('Open Doxloop from the product folder you want to document to start a new project.')}>
-        <Icon name="plus" size={16} />
-        <span><strong>New documentation project</strong><small>Open the setup wizard</small></span>
+      <button type="button" class="new-project-button" onClick={onNewProject}>
+        <span class="nav-glyph"><Icon name="plus" size={15} /></span>
+        <span><strong>New documentation project</strong><small>Start new or import existing docs</small></span>
       </button>
     </aside>
 
     <main class="workspace-main">
       <header class="workspace-navbar">
         <button class="workspace-mobile-menu" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="menu" size={18} /></button>
-        <strong class="workspace-screen-title">{PAGE_TITLES[page]}</strong>
+        <div class="workspace-crumbs">
+          <button type="button" class="workspace-crumb" onClick={() => navigate('overview')}>{project.title}</button>
+          <Icon name="chevronRight" size={14} />
+          <strong class="workspace-screen-title">{page === 'authoring' ? `${authoringNavigationLabel} documentation` : PAGE_TITLES[page]}</strong>
+        </div>
         <span class="workspace-navbar-spacer" />
+        {runningJobs > 0 && <button type="button" class="workspace-activity-chip" title="Open running task progress" onClick={() => { const job = state.jobs.find((item) => item.status === 'running' && !item.type.includes('preview')); const id = job?.type.match(/^proposal:(?:revise|resume):(.+)$/)?.[1]; if (id) location.assign(`/review?proposal=${encodeURIComponent(id)}`); else { navigate(job?.type.startsWith('page-edit:') ? 'pages' : 'authoring'); } }}><i />{runningJobs === 1 ? '1 task running' : `${runningJobs} tasks running`}</button>}
         <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer"><Icon name="help" size={15} />Support</a>
         <button type="button" class="workspace-preview-primary" onClick={() => void openPreview()}><Icon name="preview" size={15} /><strong>Preview docs</strong><Icon name="external" size={12} /></button>
       </header>
@@ -263,12 +346,19 @@ export function WorkspaceApplication({
         <div class="page">
         {loading && <div class="loading-bar" />}
         {error && <Banner title="Action failed" detail={error} onClose={onErrorDismiss} />}
-        {page === 'overview' && <Overview state={state} navigate={navigate} openPreview={openPreview} />}
+        {syncNotice && <div class={`page-updated-toast sync-outcome-toast ${syncNotice.tone}`} role="status">
+          <span class="toast-icon"><Icon name={syncNotice.tone === 'good' ? 'check' : syncNotice.tone === 'bad' ? 'alert' : 'info'} size={15} /></span>
+          <span class="toast-copy"><strong>{syncNotice.title}</strong><small>{syncNotice.detail}</small></span>
+          {syncNotice.proposalId && <Button size="sm" onClick={() => { setSyncNotice(null); navigate('proposals', { proposal: syncNotice.proposalId! }) }}>Review</Button>}
+          <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setSyncNotice(null)}><Icon name="close" size={14} /></button>
+        </div>}
+        {page === 'overview' && <Overview state={state} act={act} navigate={navigate} openPreview={openPreview} />}
         {page === 'sources' && <SourcesReference state={state} act={act} navigate={navigate} />}
         {page === 'authoring' && <Authoring state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
+        {page === 'pages' && <Pages state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
         {page === 'proposals' && <Proposals state={state} act={act} onError={onError} />}
         {page === 'publish' && <Publish state={state} act={act} streamConnected={jobStreamConnected} onError={onError} />}
-        {page === 'settings' && <Settings state={state} act={act} />}
+        {page === 'settings' && <Settings state={state} act={act} onError={onError} />}
         {page === 'not-found' && <NotFound navigate={navigate} />}
         </div>
       </div>
@@ -276,7 +366,7 @@ export function WorkspaceApplication({
   </div>
 }
 
-function Overview({ state, navigate, openPreview }: { state: UiState; navigate: (page: WorkspaceRoute) => void; openPreview: () => Promise<void> }) {
+function Overview({ state, act, navigate, openPreview }: { state: UiState; act: Action; navigate: (page: WorkspaceRoute, params?: WorkspaceParams) => void; openPreview: () => Promise<void> }) {
   const project = state.project!
   const [intelligence, setIntelligence] = useState<SourceIntelligence>()
   useEffect(() => {
@@ -285,7 +375,7 @@ function Overview({ state, navigate, openPreview }: { state: UiState; navigate: 
       .then((report) => { if (active) setIntelligence(report) })
       .catch(() => undefined)
     return () => { active = false }
-  }, [project.sources.map((source) => `${source.name}:${source.path}`).join('|')])
+  }, [coverageRefreshKey(state)])
 
   const proposals = validRuns(state.runs)
   const openProposal = proposals.find((run) => OPEN_STATUSES.includes(run.status))
@@ -293,69 +383,117 @@ function Overview({ state, navigate, openPreview }: { state: UiState; navigate: 
   const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
   const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
   const coverage = discoveredItems > 0 ? Math.round((documentedItems / discoveredItems) * 100) : 0
+  const coverageLabel = !intelligence ? 'Checking evidence' : coverage >= 90 ? 'Strong coverage' : coverage >= 70 ? 'Good foundation' : coverage >= 40 ? 'Gaps remain' : 'Needs attention'
   const hasDocs = documentationExists(state)
   const plan = state.documentationPlan
   const deployedSlug = state.effectiveDeployment?.slug ?? project.deployment?.slug
-  const deployedAddress = deployedSlug ? (deployedSlug.includes('.') ? deployedSlug : `${deployedSlug}.doxbrix.site`) : 'Not deployed yet'
+  const published = state.latestDeployment
+  const deployedAddress = published?.url ?? (published ? 'Deployment recorded' : 'Nothing published yet')
   const latestTimestamp = state.jobs[0]?.finishedAt ?? state.jobs[0]?.startedAt ?? plan?.updatedAt
   const changed = openProposal?.changes ?? []
   const added = changed.filter((change) => change.kind === 'added').length
   const modified = changed.filter((change) => change.kind !== 'added' && change.kind !== 'deleted').length
-  const recentJobs = state.jobs.slice(0, 3)
+  const recentJobs = state.jobs.slice(0, 5)
+  const running = state.jobs.filter((job) => job.status === 'running').length
+  const validation = validationState(state.validation)
+  const issues = validation.ok ? validation.result.issues : []
+  const errors = validation.ok ? validation.result.errors : 0
+  const warnings = validation.ok ? validation.result.warnings : 0
+  const pageCount = validation.ok ? validation.result.pages.length : plan?.pages.filter((page) => page.priority !== 'later').length ?? 0
+  const agent = preferredAgent(state.agents, project.defaultAgent)
+  const agentTone = agent ? (agent.authentication.status === 'authenticated' ? 'good' : agent.authentication.status === 'unknown' ? 'neutral' : 'warn') : 'warn'
+
+  const { mood, eyebrow, headline, detail, label: primaryLabel } = workspaceStatus(state, hasDocs, Boolean(openProposal))
+  const primaryRoute: WorkspaceRoute = running ? 'authoring' : openProposal ? 'proposals' : primaryLabel === 'Check sources' || !project.sources.length ? 'sources' : 'authoring'
+
   const planPages = plan?.pages.filter((page) => page.priority !== 'later').length ?? 0
   const pipeline = [
     { label: 'Sources', sub: `${project.sources.length} connected`, icon: 'sources', route: 'sources' as const, state: project.sources.length ? 'done' : 'idle' },
-    { label: 'Plan', sub: plan ? `Version ${plan.version}` : 'Not started', icon: 'list', route: 'authoring' as const, state: plan ? 'done' : 'idle' },
-    { label: 'Write', sub: hasDocs ? `${state.validation?.pages.length ?? planPages} pages ready` : plan?.status === 'generating' ? 'In progress' : 'Waiting', icon: 'update', route: 'authoring' as const, state: hasDocs ? 'done' : plan?.status === 'generating' ? 'active' : 'idle' },
+    { label: 'Plan', sub: plan ? `Version ${plan.version}` : 'Not started', icon: 'list', route: 'authoring' as const, state: plan?.status === 'planning' || plan?.status === 'revising' ? 'active' : plan ? 'done' : 'idle' },
+    { label: 'Write', sub: plan?.status === 'generating' ? 'In progress' : hasDocs ? `${validation.ok ? validation.result.pages.length : planPages} pages ready` : 'Waiting', icon: 'update', route: 'authoring' as const, state: plan?.status === 'generating' ? 'active' : hasDocs ? 'done' : 'idle' },
     { label: 'Review', sub: openProposal ? 'Awaiting you' : 'No pending changes', icon: 'review', route: 'proposals' as const, state: openProposal ? 'active' : hasDocs ? 'done' : 'idle' },
-    { label: 'Deploy', sub: deployedSlug ? 'Destination ready' : 'Not configured', icon: 'deploy', route: 'publish' as const, state: deployedSlug ? 'done' : 'idle' },
+    { label: 'Deploy', sub: published ? 'Published' : deployedSlug ? 'Not published yet' : 'Not configured', icon: 'deploy', route: 'publish' as const, state: published ? 'done' : 'idle' },
   ]
+  const doneSteps = pipeline.filter((step) => step.state === 'done').length
 
   return <section class="overview-page">
-    <div class="overview-heading">
-      <div><h2>Your documentation loop</h2><p>Everything between your source code and the published docs, in one pass.</p></div>
-      <span>{latestTimestamp ? `Last checked ${timeText(latestTimestamp)}` : 'Ready to begin'}</span>
-    </div>
+    <PageHeader title="Your documentation loop" description="Everything between your source code and the published docs, in one pass." />
 
     <section class="pipeline-card" aria-label="Documentation workflow">
-      <div class="pipeline-track"><i /></div>
+      <div class="pipeline-track"><i style={{ width: `${Math.max(0, (doneSteps - 1) / (pipeline.length - 1)) * 100}%` }} /></div>
       {pipeline.map((step) => <button type="button" key={step.label} class={step.state} onClick={() => navigate(step.route)}>
-        <span><Icon name={step.icon} size={17} /></span>
+        <span><Icon name={step.state === 'done' ? 'check' : step.icon} size={step.state === 'done' ? 15 : 17} /></span>
         <strong>{step.label}</strong>
         <small>{step.sub}</small>
       </button>)}
     </section>
 
-    <div class="overview-card-grid">
-      <section class={`overview-review-card ${openProposal ? 'attention' : ''}`}>
-        <header><i />{openProposal ? 'Needs your review' : 'Documentation is current'}</header>
-        <div><h3>{openProposal?.summary || (hasDocs ? 'No changes are waiting' : 'Create your first documentation plan')}</h3><p>{openProposal ? `${changed.length} file change${changed.length === 1 ? '' : 's'} · ${added} added · ${modified} modified` : hasDocs ? 'The latest accepted documentation is ready to preview.' : 'Connect sources and let the planning agent propose the right pages.'}</p></div>
-        <footer>
-          <button type="button" class="primary" onClick={() => navigate(openProposal ? 'proposals' : 'authoring')}>{openProposal ? 'Review changes' : hasDocs ? 'Plan an update' : 'Create documentation'}</button>
-          {hasDocs && <button type="button" onClick={() => void openPreview()}>Preview</button>}
-        </footer>
-      </section>
+    <section class={`ov-hero ${mood}`} aria-label="Workspace status">
+      <div class="ov-hero-copy">
+        <span class="ov-eyebrow"><i />{eyebrow}</span>
+        <h2>{headline}</h2>
+        <p>{detail}</p>
+        <div class="ov-hero-actions">
+          <Button tone="primary" icon={openProposal ? 'review' : hasDocs ? 'update' : project.sources.length ? 'sparkle' : 'sources'} onClick={() => navigate(primaryRoute)}>{primaryLabel}</Button>
+          {hasDocs && !openProposal && <Button icon="file" onClick={() => navigate('pages')}>Edit a page</Button>}
+          {hasDocs && <Button icon="preview" onClick={() => void openPreview()}>Preview docs</Button>}
+        </div>
+      </div>
+      <dl class="ov-hero-facts">
+        <div><dt>Coding agent</dt><dd><i class={`ov-dot ${agentTone}`} />{agent ? `${agentLabel(agent.name)} ${agentSignInLabel(agent.authentication.status)}` : 'None detected'}</dd><button type="button" class="ov-fact-link" onClick={() => navigate('settings', { section: 'general' })}>Agent settings</button></div>
+        <div><dt>Activity</dt><dd><i class={`ov-dot ${running ? 'info' : 'neutral'}`} />{running ? `${running} task${running === 1 ? '' : 's'} running` : 'Idle'}</dd></div>
+        <div><dt>Last checked</dt><dd>{latestTimestamp ? timeText(latestTimestamp) : 'Not yet'}</dd></div>
+      </dl>
+    </section>
 
-      <section class="overview-metric-card">
-        <header>Coverage</header>
-        <div class="overview-coverage"><span style={{ '--overview-coverage': `${coverage}%` }}><b>{intelligence ? `${coverage}%` : '—'}</b></span><div><h3>{!intelligence ? 'Checking evidence' : coverage >= 90 ? 'Strong coverage' : coverage >= 70 ? 'Good foundation' : coverage >= 40 ? 'Coverage gaps remain' : 'Needs attention'}</h3><p>{intelligence ? `${documentedItems} of ${discoveredItems} discovered items documented` : 'Coverage appears after source discovery completes'}</p></div></div>
-        <button type="button" class="overview-link" onClick={() => navigate('sources')}>See coverage by surface →</button>
-      </section>
-
-      <section class="overview-metric-card">
-        <header>Published site</header>
-        <div class="overview-published"><span><Icon name={deployedSlug ? 'check' : 'publish'} size={16} /></span><div><h3>{deployedSlug ? 'Deployment destination ready' : 'No deployment yet'}</h3><code>{deployedAddress}</code></div></div>
-        <button type="button" class="overview-link" onClick={() => navigate('publish')}>Deployment history →</button>
-      </section>
+    <div class="ov-metrics">
+      <button type="button" class="ov-metric" onClick={() => navigate('sources')}>
+        <span class="ov-donut" style={{ '--ov-coverage': `${coverage}%` }}><b>{intelligence ? `${coverage}%` : '—'}</b></span>
+        <span class="ov-metric-copy"><small>Coverage</small><strong>{coverageLabel}</strong><span>{intelligence ? `${documentedItems} of ${discoveredItems} discovered items documented` : 'Appears after source discovery completes'}</span></span>
+        <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
+      </button>
+      <button type="button" class={`ov-metric ${errors ? 'bad' : warnings ? 'warn' : 'good'}`} onClick={() => navigate('pages')}>
+        <span class="ov-figure">{pageCount}</span>
+        <span class="ov-metric-copy"><small>Pages</small><strong>{validation.ok ? validationHeadline(validation.result) : 'Validation unavailable'}</strong><span>{validation.ok ? (issues.length ? 'Fix the issues before deploying.' : 'Navigation, metadata, and links look consistent.') : validation.reason}</span></span>
+        <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
+      </button>
+      <button type="button" class={`ov-metric ${published ? 'good' : ''}`} onClick={() => navigate('publish')}>
+        <span class="ov-metric-icon"><Icon name={deployedSlug ? 'cloud' : 'publish'} size={20} /></span>
+        <span class="ov-metric-copy"><small>Published site</small><strong>{published ? 'Published successfully' : 'No deployment yet'}</strong><code>{deployedAddress}</code></span>
+        <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
+      </button>
     </div>
 
-    <section class="overview-activity-card">
-      <header><strong>Recent activity</strong><span>Agents run quietly in the background</span></header>
-      {recentJobs.length ? recentJobs.map((job) => <div class="overview-activity-row" key={job.id}>
-        <span class={job.status}><Icon name={job.type.startsWith('deploy') ? 'deploy' : job.type.startsWith('plan') ? 'list' : job.type.includes('proposal') ? 'review' : 'update'} size={14} /></span>
-        <p><strong>{workflowActivityLabel(job.type)}</strong>{job.status === 'running' ? ' is running' : job.status === 'succeeded' ? ' completed successfully' : job.status === 'failed' ? ' needs attention' : ` was ${job.status}`}</p>
-        <time>{timeText(job.finishedAt ?? job.startedAt)}</time>
-      </div>) : <div class="overview-activity-row empty"><span><Icon name="check" size={14} /></span><p>Your workspace is ready. Activity will appear here after the first run.</p><time>Now</time></div>}
+    {issues.length > 0 && <section class="panel ov-issues" aria-label="Validation issues">
+      <header class="panel-head">
+        <div class="panel-title"><h2>Validation issues</h2><p>{validation.ok ? validationHeadline(validation.result) : ''} across {pageCount} page{pageCount === 1 ? '' : 's'}.</p></div>
+        <div class="panel-actions"><Button size="sm" onClick={() => navigate('pages')}>Open pages</Button></div>
+      </header>
+      <ul>
+        {issues.slice(0, 6).map((issue, index) => <li key={`${issue.code}-${index}`}><Badge tone={issue.severity === 'error' ? 'bad' : 'warn'}>{issue.severity}</Badge>{issue.file && <code>{issue.file}</code>}<span>{issue.message}</span></li>)}
+        {issues.length > 6 && <li class="more">and {issues.length - 6} more</li>}
+      </ul>
+    </section>}
+
+    <section class="panel overview-activity-card" aria-label="Recent activity">
+      <header class="panel-head">
+        <div class="panel-title"><h2>Recent activity</h2><p>Agents run in the background. Every run keeps a full log.</p></div>
+        {running > 0 && <Badge tone="info" icon="refresh">{running} running</Badge>}
+      </header>
+      <ol class="ov-activity">
+        {recentJobs.length ? recentJobs.map((job) => <li key={job.id} class={job.status}>
+          <span class="ov-activity-icon"><Icon name={workflowActivityIcon(job.type)} size={15} /></span>
+          <p><strong>{workflowActivityLabel(job.type)}</strong>{job.status === 'running' ? ' is running' : job.status === 'succeeded' ? ' completed successfully' : job.status === 'failed' ? ` needs attention${jobFailureReason(job) ? `: ${jobFailureReason(job)}` : ''}` : ` was ${job.status}`}</p>
+          <time>{timeText(job.finishedAt ?? job.startedAt)}</time>
+          <span class="ov-activity-actions">
+            {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), `${workflowActivityLabel(job.type)} stopped`)}>Stop</Button>}
+            <a class="btn secondary sm" href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer" title="Open the full log">Log</a>
+          </span>
+        </li>) : <li class="empty">
+          <span class="ov-activity-icon"><Icon name="check" size={15} /></span>
+          <p>Your workspace is ready. Activity appears here after the first run.</p>
+        </li>}
+      </ol>
     </section>
   </section>
 }
@@ -551,6 +689,7 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
         })}</div>
       </div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
     </section>
+    {filtered.length > 0 && <DocumentationFreshness value={state.drift} navigate={navigate} />}
     {intelligence && <section class="source-intelligence-panel">
       <header><div><h2>Documentation coverage</h2><p>See which discovered product surfaces are supported by documentation evidence.</p></div><span class={intelligence.evidenceDiagnostics.length ? 'attention' : 'precise'}>{intelligence.evidenceDiagnostics.length ? `${intelligence.evidenceDiagnostics.length} evidence notes` : 'Evidence looks precise'}</span></header>
       <div class="coverage-overview">
@@ -565,7 +704,7 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
           <div class="source-coverage-list">{intelligence.coverage.metrics.map((metric) => {
             const measured = metric.status !== 'unknown'
             const discoveryTitle = 'Discovery completed, but no items in this category were found in the connected sources.'
-            const gaps = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human').length
+            const gaps = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human' || item.state === 'planned' || item.state === 'stale').length
             return <div class={`source-coverage-row ${measured ? '' : 'unknown'}`} key={metric.id} title={measured ? metric.denominator : `${discoveryTitle} ${metric.denominator}`}>
               <div class="source-coverage-row-heading"><span>{metric.label}</span>{measured ? <span><strong>{metric.percent}%</strong><small>{metric.documented} of {metric.total}</small></span> : <em>No items discovered</em>}</div>
               <div class="source-coverage-track" role="progressbar" aria-label={`${metric.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={measured ? metric.percent : undefined}><i style={{ width: measured ? `${metric.percent}%` : '0%' }} /></div>
@@ -605,6 +744,48 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
   </div>
 }
 
+/**
+ * Drift is computed on every state load but was never drawn. Show which pages
+ * fell behind their sources and why, so "stale" is something a reader can act
+ * on rather than a word in the sync status.
+ */
+function DocumentationFreshness({ value, navigate }: { value: UiState['drift']; navigate: (page: WorkspaceRoute) => void }) {
+  const drift = driftState(value)
+  if (!drift.ok) return <section class="source-freshness unknown" aria-label="Documentation freshness"><header><span class="source-freshness-icon"><Icon name="info" size={16} /></span><div><h2>Documentation freshness</h2><p>{drift.reason}</p></div></header></section>
+  const { status, pages, sources = [], trackedPages, notes = [] } = drift.drift
+  const changedSources = sources.filter((source) => source.changedPaths.length > 0 || source.filteredPaths > 0)
+  const headline = status === 'stale'
+    ? `${pages.length} page${pages.length === 1 ? '' : 's'} behind the sources`
+    : status === 'current'
+      ? 'Documentation matches the sources'
+      : 'Freshness not tracked yet'
+  const detail = status === 'stale'
+    ? 'Plan an update to bring these pages in line with what changed.'
+    : status === 'current'
+      ? `${trackedPages ?? pages.length} tracked page${(trackedPages ?? pages.length) === 1 ? '' : 's'} have evidence that still matches the connected sources.`
+      : notes[0] ?? 'Pages gain freshness tracking once an accepted update records their evidence.'
+  return <section class={`source-freshness ${status}`} aria-label="Documentation freshness">
+    <header>
+      <span class="source-freshness-icon"><Icon name={status === 'stale' ? 'alert' : status === 'current' ? 'check' : 'clock'} size={16} /></span>
+      <div><h2>Documentation freshness</h2><p><strong>{headline}.</strong> {detail}</p></div>
+      <Badge tone={status === 'stale' ? 'warn' : status === 'current' ? 'good' : 'neutral'}>{status === 'stale' ? `${pages.length} stale` : status === 'current' ? 'Up to date' : 'Not tracked'}</Badge>
+      {status === 'stale' && <Button size="sm" tone="primary" icon="update" onClick={() => navigate('authoring')}>Plan an update</Button>}
+    </header>
+    {status === 'stale' && pages.length > 0 && <ul class="source-freshness-pages">
+      {pages.slice(0, 8).map((page) => <li key={page.page}>
+        <code>{page.page}</code>
+        <span>{(page.reasons ?? []).map((reason) => reason.kind === 'max-age'
+          ? `evidence older than ${reason.ageDays ?? '?'} days`
+          : `${reason.source}: ${reason.paths?.length ?? 0} changed path${(reason.paths?.length ?? 0) === 1 ? '' : 's'}`).join(' · ') || 'Sources changed'}</span>
+      </li>)}
+      {pages.length > 8 && <li class="more">and {pages.length - 8} more</li>}
+    </ul>}
+    {changedSources.length > 0 && <ul class="source-freshness-sources">
+      {changedSources.map((source) => <li key={source.name}><Icon name="sources" size={13} /><span>{`${source.name}: ${source.changedPaths.length} changed`}</span>{source.filteredPaths > 0 && <small>{source.filteredPaths} filtered by watch rules</small>}</li>)}
+    </ul>}
+  </section>
+}
+
 function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCreateUpdate }: {
   metric: SourceIntelligence['coverage']['metrics'][number]
   pages: string[]
@@ -613,8 +794,8 @@ function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCre
   onReport: (report: SourceIntelligence) => void
   onCreateUpdate: (items: CoverageItem[]) => Promise<boolean>
 }) {
-  const attentionItems = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human')
-  const resolvedItems = metric.items.filter((item) => item.state !== 'uncovered' && item.state !== 'needs-human')
+  const attentionItems = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human' || item.state === 'planned' || item.state === 'stale')
+  const resolvedItems = metric.items.filter((item) => item.state === 'documented' || item.state === 'excluded')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [planning, setPlanning] = useState(false)
   const selectedItems = attentionItems.filter((item) => selectedIds.includes(item.id))
@@ -671,11 +852,11 @@ function CoverageResolutionItem({ item, pages, selected, onSelectedChange, onRes
       setResolutionMode(null)
     } finally { setBusy(false) }
   }
-  const needsAttention = item.state === 'uncovered' || item.state === 'needs-human'
+  const needsAttention = item.state === 'uncovered' || item.state === 'needs-human' || item.state === 'planned' || item.state === 'stale'
   return <article class={`coverage-resolution-item ${item.state} ${selected ? 'selected' : ''}`}>
     <div class="coverage-resolution-item-heading"><span><strong>{item.label}</strong><small>{[item.source, item.path].filter(Boolean).join(' · ') || item.page || 'Priority reader outcome'}</small></span>{needsAttention ? <label class="coverage-update-choice"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.currentTarget.checked)} /><span>{selected ? 'Added' : 'Add to update'}</span></label> : <Badge tone={item.state === 'documented' ? 'good' : 'neutral'}>{item.state}</Badge>}</div>
     {needsAttention && <div class="coverage-resolution-controls">
-      <div class="coverage-alternative-actions"><small>Or resolve without an update</small><span>{pages.length > 0 && <button type="button" aria-expanded={resolutionMode === 'link'} onClick={() => setResolutionMode(resolutionMode === 'link' ? null : 'link')}>Link existing page</button>}{item.surface === 'reader-journeys' ? <button type="button" disabled={busy} onClick={() => void run('remove-priority')}>No longer a priority</button> : <button type="button" aria-expanded={resolutionMode === 'exclude'} onClick={() => setResolutionMode(resolutionMode === 'exclude' ? null : 'exclude')}>Mark as internal</button>}<button type="button" disabled={busy} onClick={() => void run('needs-human')}>Decide later</button></span></div>
+      <div class="coverage-alternative-actions"><small>Or resolve without an update</small><span>{pages.length > 0 && item.surface !== 'verified-pages' && <button type="button" aria-expanded={resolutionMode === 'link'} onClick={() => setResolutionMode(resolutionMode === 'link' ? null : 'link')}>Link existing page</button>}{item.surface === 'reader-journeys' ? <button type="button" disabled={busy} onClick={() => void run('remove-priority')}>No longer a priority</button> : item.surface !== 'verified-pages' && <button type="button" aria-expanded={resolutionMode === 'exclude'} onClick={() => setResolutionMode(resolutionMode === 'exclude' ? null : 'exclude')}>Mark as internal</button>}<button type="button" disabled={busy} onClick={() => void run('needs-human')}>Decide later</button></span></div>
       {resolutionMode === 'link' && <div class="coverage-inline-resolution"><Select aria-label={`Page for ${item.label}`} value={page} onChange={(event) => setPage(event.currentTarget.value)}>{pages.map((candidate) => <option key={candidate} value={candidate}>{candidate}{candidate === item.suggestedPage ? ' — suggested' : ''}</option>)}</Select><Button size="sm" disabled={!page || busy} onClick={() => void run('link')}>Link page</Button><button type="button" aria-label="Cancel linking page" onClick={() => setResolutionMode(null)}><Icon name="close" size={14} /></button></div>}
       {resolutionMode === 'exclude' && <div class="coverage-inline-resolution"><Input value={reason} aria-label={`Reason ${item.label} is internal`} placeholder="Why is this not part of the public documentation?" onInput={(event) => setReason(event.currentTarget.value)} /><Button size="sm" disabled={!reason.trim() || busy} onClick={() => void run('exclude')}>Mark internal</Button><button type="button" aria-label="Cancel marking internal" onClick={() => setResolutionMode(null)}><Icon name="close" size={14} /></button></div>}
     </div>}
@@ -705,7 +886,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   const defaultReasoning = preferredReasoningLevel(defaultAgent, defaultModel)
   // A configured application means the reviewer set it up to be captured;
   // default to screenshots rather than making them opt in on every plan.
-  const [form, setForm] = useState({ request: '', scope: 'comprehensive', targetPages: '', clarificationMode: 'review', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: (state.project?.application?.baseUrl ? 'enabled' : 'disabled') as 'auto' | 'enabled' | 'disabled' })
+  const [form, setForm] = useState({ request: '', scope: 'starter', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 }, targetPages: '', clarificationMode: 'review', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: 'disabled' as 'auto' | 'enabled' | 'disabled' })
   const [showNewPlan, setShowNewPlan] = useState(() => shouldShowAuthoringForm(state))
   const [agentConfigOpen, setAgentConfigOpen] = useState(false)
   const availableAuthorModels = agentModels(form.agent)
@@ -714,7 +895,10 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   const [submitting, setSubmitting] = useState(false)
   const [discovery, setDiscovery] = useState<PlanDiscoverySummary>()
   const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
-  const runs = state.jobs.filter((job) => job.type.startsWith('plan:') || job.type.startsWith('author:') || job.type === 'capture')
+  const [gitSources, setGitSources] = useState<string[]>([])
+  const [contentType, setContentType] = useState<'documentation' | 'release-notes'>('documentation')
+  const [release, setRelease] = useState<ReleaseTemplateForm>({ source: '', version: '', from: '', to: '' })
+  const runs = state.jobs.filter((job) => job.type.startsWith('plan:') || job.type.startsWith('author:') || job.type.startsWith('page-edit:') || job.type === 'capture' || job.type === 'sync')
   const activeRun = runs.find((job) => job.status === 'running')
   const currentRun = activeRun ?? runs[0]
   const runBusy = Boolean(activeRun || submitting)
@@ -737,6 +921,14 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   }, [mode, state.project?.sources.length])
 
   useEffect(() => {
+    let active = true
+    void api<{ sources: string[] }>('/api/sources/git')
+      .then((result) => { if (active) setGitSources(Array.isArray(result?.sources) ? result.sources : []) })
+      .catch(() => { if (active) setGitSources([]) })
+    return () => { active = false }
+  }, [state.project?.sources.map((source) => `${source.name}:${source.path}`).join('|')])
+
+  useEffect(() => {
     if (form.screenshots === 'disabled') { setCaptureReadiness(undefined); return }
     let active = true
     void api<ApplicationReadiness>('/api/application/readiness')
@@ -755,16 +947,22 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
       onError('Screenshots are selected. Configure and start the application, then wait for the page check to succeed before planning.')
       return
     }
+    if (contentType === 'release-notes' && (!release.version.trim() || !release.from.trim() || !release.to.trim())) {
+      onError('Release notes need a version label and the two Git refs that bound the release.')
+      return
+    }
     const { reasoning, effort, targetPages, ...planForm } = form
     const parsedTarget = targetPages.trim() ? Number(targetPages) : undefined
     if (parsedTarget !== undefined && (!Number.isInteger(parsedTarget) || parsedTarget < 1)) {
       onError('Target page count must be a whole number of at least 1.')
       return
     }
+    if (parsedTarget !== undefined && parsedTarget > form.limits.maxPages) { onError('The minimum pages exceeds this batch maximum. Raise Maximum pages or lower the minimum.'); return }
     const request = {
       ...planForm,
       scope: mode === 'create' ? form.scope : 'custom',
       ...(parsedTarget !== undefined ? { targetPages: parsedTarget } : {}),
+      ...(contentType === 'release-notes' ? { template: { kind: 'release-notes', version: release.version.trim(), from: release.from.trim(), to: release.to.trim(), sources: [release.source || gitSources[0]].filter(Boolean) }, request: form.request.trim() || `Release notes for ${release.version.trim()}` } : {}),
       mode,
       ...(form.agent === 'codex' && reasoning ? { reasoning } : {}),
       ...(form.agent === 'claude' && effort ? { effort } : {}),
@@ -782,7 +980,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
 
   return <div class="authoring-page">
     <PageHeader
-      title={visiblePlan?.status === 'generated' ? 'Documentation proposal' : mode === 'create' ? 'Create documentation' : 'Update documentation'}
+      title={visiblePlan?.status === 'generated' ? 'Documentation plan' : mode === 'create' ? 'Create documentation' : 'Update documentation'}
       description={visiblePlan?.status === 'generated' ? 'Shape and approve the documentation plan before the agent writes any pages.' : 'Describe the outcome. The agent researches evidence, proposes a plan, and writes nothing until you approve.'}
     />
     {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
@@ -798,9 +996,11 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
       : <div class="authoring-workbench">
         <Panel class="authoring-request">
           <fieldset class="authoring-fields" disabled={runBusy}>
+            {gitSources.length > 0 && <div class="authoring-content-type"><strong>What should the agent write?</strong><Segmented value={contentType} onChange={setContentType} items={[['documentation', 'Documentation'], ['release-notes', 'Release notes']] as const} /></div>}
             <div class="authoring-prompt-block">
-              <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>What should readers be able to do?</h2><p>Describe the outcome or product change. The agent will research the evidence and propose the documentation shape first.</p></div></div>
-              <span class="authoring-textarea-wrap"><Textarea rows={6} maxlength={2000} value={form.request} placeholder={mode === 'create' ? 'For example: Help developers install the SDK, authenticate, and complete their first successful API request.' : 'For example: Document API key rotation and update the authentication journey with a TypeScript example.'} onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
+              <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>{contentType === 'release-notes' ? 'Anything the release notes must call out?' : 'What should readers be able to do?'}</h2><p>{contentType === 'release-notes' ? 'Optional. The commit range and changelog below are the evidence; add emphasis, audience, or exclusions here.' : 'Describe the outcome or product change. The agent will research the evidence and propose the documentation shape first.'}</p></div></div>
+              <span class="authoring-textarea-wrap"><Textarea rows={contentType === 'release-notes' ? 3 : 6} maxlength={2000} value={form.request} placeholder={contentType === 'release-notes' ? 'For example: Lead with the new billing API and mark the removed legacy mode as breaking.' : mode === 'create' ? 'For example: Help developers install the SDK, authenticate, and complete their first successful API request.' : 'For example: Document API key rotation and update the authentication journey with a TypeScript example.'} onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
+              {contentType === 'release-notes' && <ReleaseTemplateFields sources={gitSources} value={release} onChange={setRelease} disabled={runBusy} />}
             </div>
           </fieldset>
           {mode === 'create' && <section class="plan-scope-section" aria-label="Documentation scope">
@@ -817,7 +1017,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
             </div>
             {discovery && <small class="plan-scope-evidence">Based on {discovery.publicSignals} public source signal{discovery.publicSignals === 1 ? '' : 's'}. Small products stay small; unsupported topics are never added as filler.</small>}
             <div class="plan-target-pages">
-              <Field label="Minimum pages to write (optional)" hint="Leave empty to let the evidence decide. There is no upper limit — the planner splits the public surface into as many focused pages as the target needs."><Input type="number" min="1" max="500" value={form.targetPages} placeholder={discovery ? String(discovery.suggestedPages[form.scope as 'starter' | 'standard' | 'comprehensive']) : 'For example: 40'} onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
+              <Field label="Minimum pages to write (optional)" hint="Leave empty to let the evidence decide. The batch maximum below limits what can be approved for this run."><Input type="number" min="1" max="500" value={form.targetPages} placeholder={discovery ? String(discovery.suggestedPages[form.scope as 'starter' | 'standard' | 'comprehensive']) : 'For example: 40'} onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
             </div>
           </section>}
           {mode === 'update' && <section class="plan-scope-section" aria-label="Documentation size">
@@ -828,11 +1028,11 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
           <section class="authoring-run-config">
             <button type="button" class="agent-config-summary" aria-expanded={agentConfigOpen} onClick={() => setAgentConfigOpen(!agentConfigOpen)}>
               <Icon name="bot" size={16} />
-              <span>Planning agent: <b>{form.agent ? agentLabel(form.agent) : 'Automatically detect'}{form.model ? ` · ${form.model}` : ''}{form.agent === 'codex' && form.reasoning ? ` · ${form.reasoning} reasoning` : form.agent === 'claude' && form.effort ? ` · ${form.effort} effort` : ''}</b></span>
+              <span>Agent: <b>{form.agent ? agentLabel(form.agent) : 'Automatically detect'}{form.model ? ` · ${form.model}` : ''}{form.agent === 'codex' && form.reasoning ? ` · ${form.reasoning} reasoning` : form.agent === 'claude' && form.effort ? ` · ${form.effort} effort` : ''}</b></span>
               <strong>{agentConfigOpen ? 'Hide options' : 'Change'}</strong>
             </button>
             {agentConfigOpen && <fieldset class="authoring-options" disabled={runBusy}>
-              <Field label="Planning agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
+              <Field label="Agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
                 const agent = event.currentTarget.value
                 const model = defaultModelForAgent(agent)
                 const level = preferredReasoningLevel(agent, model)
@@ -845,9 +1045,10 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
             <section class="screenshot-run-choice" aria-label="Application screenshot behavior">
               <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
               <div><strong>Add product screenshots?</strong><small>Optional. If you choose Yes, Doxloop must capture and verify the planned images before it can finish.</small></div>
-              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value) })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
-              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => { history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')) }}>Settings</button>.</>}</small>}
+              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? Math.max(5, form.limits.maxScreenshots) : 0 } })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
+              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}</small>}
             </section>
+            <details class="batch-limits-control"><summary>Run limits: {form.limits.maxPages} pages · {form.limits.maxScreenshots} screenshots · {form.limits.maxMinutes} minutes</summary><div class="batch-limits-fields"><label>Batch page limit<input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label><Button onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button>{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}</div><Estimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /></details>
             <footer><Button disabled={runBusy || (form.screenshots === 'enabled' && captureReadiness?.status !== 'ready')} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Start or configure the application before planning with screenshots.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
           </section>
         </Panel>
@@ -887,7 +1088,21 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
   const [captureCheck, setCaptureCheck] = useState<'idle' | 'checking' | 'done' | 'failed'>('idle')
   const [captureCheckNonce, setCaptureCheckNonce] = useState(0)
-  useEffect(() => { setDraft(plan); setClarificationAnswers(plan.clarification.answers) }, [plan.id, plan.version, plan.status, plan.updatedAt])
+  // A background refresh (a job finishing, a poll) delivers a newer plan. If
+  // the reviewer has unsaved edits, hold the new version behind a prompt
+  // instead of discarding what they typed.
+  const seededPlan = useRef(plan)
+  const [pendingPlan, setPendingPlan] = useState<DocumentationPlan | null>(null)
+  const loadPlan = (next: DocumentationPlan) => {
+    seededPlan.current = next
+    setDraft(next)
+    setClarificationAnswers(next.clarification.answers)
+    setPendingPlan(null)
+  }
+  useEffect(() => {
+    if (plan.id !== seededPlan.current.id || planEditableJson(draft) === planEditableJson(seededPlan.current)) loadPlan(plan)
+    else setPendingPlan(plan)
+  }, [plan.id, plan.version, plan.status, plan.updatedAt])
   useEffect(() => {
     let active = true
     if (plan.version <= 1) { setVersions([]); return () => { active = false } }
@@ -1057,7 +1272,7 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   }, [selectedPageId])
   if (plan.status === 'generated') return <Panel class="plan-complete-panel">
     <div class="plan-complete"><span><Icon name="check" size={24} /></span><div><h2>Documentation proposal is ready</h2><p>The approved plan was generated in an isolated workspace. Reader-facing files are still unchanged until you review and accept them.</p></div></div>
-    <div class="plan-complete-actions"><Button onClick={onStartAnother}>Plan another update</Button><Button tone="primary" icon="proposals" onClick={() => { history.pushState({}, '', '/proposals'); dispatchEvent(new PopStateEvent('popstate')) }}>Review generated files</Button></div>
+    <div class="plan-complete-actions"><Button onClick={onStartAnother}>Plan another update</Button><Button tone="primary" icon="proposals" onClick={() => setLocation('proposals', plan.proposalId ? { proposal: plan.proposalId } : {}, 'push')}>Review generated files</Button></div>
   </Panel>
   return <div class="documentation-plan-review">
     <section class="plan-review-header">
@@ -1077,6 +1292,12 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
       </div>
       <div class="plan-review-actions"><Badge tone={statusTone(plan.status)}>{statusLabel(plan.status)}</Badge>{editable && <Button size="sm" tone="ghost" onClick={() => setBriefOpen(!briefOpen)}>{briefOpen ? 'Close details' : 'Plan details'}</Button>}</div>
     </section>
+    {pendingPlan && <div class="plan-pending-refresh" role="status">
+      <Icon name="info" size={15} />
+      <span><strong>A newer version of this plan arrived while you were editing.</strong> Keep your unsaved edits, or load the new version and lose them.</span>
+      <span class="plan-pending-actions"><Button size="sm" onClick={() => setPendingPlan(null)}>Keep my edits</Button><Button size="sm" tone="primary" onClick={() => loadPlan(pendingPlan)}>Load new version</Button></span>
+    </div>}
+    <Estimate pages={pages.length} agent={draft.execution.agent} model={draft.execution.model} />
     {stale && <Panel class="plan-stale-panel" title="Sources changed since this plan was proposed" description="The plan itself is unchanged and can be approved as it is; generation reads the current sources when it writes each page. Ask the agent to revise only if the change should alter which pages are written.">
       <footer class="plan-stale-actions"><Button size="sm" icon="refresh" busy={resuming} disabled={busy} onClick={() => void resume()}>Clear this notice</Button><Button size="sm" icon="wand" disabled={busy} onClick={() => revisionInput.current?.focus()}>Ask the agent to revise</Button></footer>
     </Panel>}
@@ -1126,6 +1347,7 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         </div>
         <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
       </Panel>}
+      <Panel title="Batch limits" description="Approval and proposal validation enforce these maxima. Mark extra pages Later to keep them out of this run."><div class="form-grid">{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 })[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }), [key]: Number(event.currentTarget.value) } } })} /></Field>)}</div></Panel>
       <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
         <div class="plan-screenshot-summary">
           <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
@@ -1139,13 +1361,16 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
             <small>{captureReadiness?.message ?? (captureCheck === 'checking' ? 'Confirming the configured application answers before capture.' : 'Doxloop could not reach the readiness check. Start the application, then check again.')}</small>
           </span>
           {captureReadiness?.configured === false
-            ? <Button size="sm" onClick={() => { history.pushState({}, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')) }}>Configure application</Button>
+            ? <Button size="sm" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Configure application</Button>
             : <Button size="sm" icon="refresh" busy={captureCheck === 'checking'} onClick={() => setCaptureCheckNonce((value) => value + 1)}>Check again</Button>}
         </div>}
-        {visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? `${page.visuals.startPath} · ${page.visuals.rationale}` : `Starting route needed · ${page.visuals?.rationale}`}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : 'candidate'}</b></li>)}</ul>}
+        {visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span class="plan-screenshot-page-icon"><Icon name="camera" size={14} /></span><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? <code>{page.visuals.startPath}</code> : <em>Starting route needed</em>}{page.visuals?.rationale && <> · {page.visuals.rationale}</>}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : (page.visuals?.estimatedCaptures ?? 0) === 1 ? 'candidate' : 'candidates'}</b></li>)}</ul>}
         {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
         {plan.advisories?.map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
         {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
+      </Panel>
+      <Panel class="plan-navigation-panel" title="Navigation" description="Sections and page order for the sidebar. Drag pages between sections or add a section.">
+        <PlanNavigationEditor plan={draft} editable={editable} onChange={(navigation) => setDraft({ ...draft, scope: 'custom', navigation })} />
       </Panel>
       <Panel class="plan-pages-panel" title="Documentation structure" description={`${pages.length} pages · ${counts.activeChanges} changed`} actions={editable && <Button size="sm" icon="plus" onClick={addPage}>Add page</Button>}>
         <div class="plan-page-filters" role="tablist" aria-label="Filter documentation pages">
@@ -1212,6 +1437,9 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
             </section>
             <section class="plan-page-reason"><h3>Why the agent recommends this page</h3><p>{selectedPage.rationale || 'No rationale was provided for this page.'}</p>{selectedPage.evidenceDetails.length > 0 ? <details><summary>View {selectedPage.evidenceDetails.length} supporting source{selectedPage.evidenceDetails.length === 1 ? '' : 's'}</summary><div class="plan-evidence-list">{selectedPage.evidenceDetails.map((item, index) => <article key={`${item.source}-${item.path}-${index}`}><span>{item.source}</span><div><code>{item.path}{item.line ? `:${item.line}` : ''}</code>{(item.label || item.kind) && <small>{item.label ?? item.kind}</small>}</div></article>)}</div></details> : selectedPage.evidence.length > 0 && <details><summary>View {selectedPage.evidence.length} supporting source{selectedPage.evidence.length === 1 ? '' : 's'}</summary><ul>{selectedPage.evidence.map((item) => <li key={item}><code>{item}</code></li>)}</ul></details>}</section>
             <details class="plan-page-advanced"><summary>Advanced settings</summary><div><Field label="File path"><Input disabled={!editable} class="mono" value={selectedPage.path} onInput={(event) => setPage(selectedIndex, { ...selectedPage, path: event.currentTarget.value })} /></Field><small>The documentation section and file path are primarily used by the generator.</small></div></details>
+          </div>
+          <div class="plan-page-diagram">
+            <Field label="Diagram" hint="Concept pages default to a required Mermaid diagram; the writer must include one and the editor previews it."><Select disabled={!editable} value={selectedPage.diagram ?? (selectedPage.type === 'concept' ? 'required' : 'none')} onChange={(event) => setPage(selectedIndex, { ...selectedPage, diagram: event.currentTarget.value === 'required' ? 'required' : 'none' })}><option value="required">Required</option><option value="none">Not needed</option></Select></Field>
           </div>
           <footer><div class="plan-page-move"><Button size="sm" disabled={!editable || selectedIndex === 0} onClick={() => movePage(selectedIndex, -1)}>Move up</Button><Button size="sm" disabled={!editable || selectedIndex === pages.length - 1} onClick={() => movePage(selectedIndex, 1)}>Move down</Button></div>{editable && <Button size="sm" tone="danger" icon="trash" onClick={() => removePage(selectedIndex)}>Remove page</Button>}<Button size="sm" tone="primary" onClick={() => setSelectedPageId(undefined)}>Done</Button></footer>
         </aside>
@@ -1282,13 +1510,72 @@ function comparePlanVersions(previous: DocumentationPlan, current: Documentation
   return { added, removed, changed, briefChanged }
 }
 
-function workflowActivityLabel(type: string): string {
+export interface SyncNotice {
+  tone: 'good' | 'warn' | 'bad' | 'info'
+  title: string
+  detail: string
+  proposalId?: string
+}
+
+/** Turn a settled source check into the one-line answer the reader was waiting for. */
+export function syncOutcomeNotice(job: UiJob): SyncNotice {
+  const outcome = job.outcome
+  if (job.status === 'cancelled') return { tone: 'info', title: 'Source check stopped', detail: 'The check was stopped before it finished.' }
+  if (!outcome) {
+    return job.status === 'succeeded'
+      ? { tone: 'good', title: 'Source check finished', detail: 'Open the log under Recent activity for details.' }
+      : { tone: 'bad', title: 'Source check failed', detail: jobFailureReason(job) ?? 'Open the log under Recent activity for details.' }
+  }
+  const pages = outcome.pages ?? 0
+  const stale = `${pages} page${pages === 1 ? '' : 's'} stale`
+  switch (outcome.status) {
+    case 'current': return { tone: 'good', title: 'No change', detail: outcome.message }
+    case 'stale': return { tone: 'warn', title: stale, detail: outcome.message }
+    case 'proposal': return { tone: 'good', title: outcome.proposalId ? 'Proposal ready for review' : stale, detail: outcome.message, ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}) }
+    case 'skipped': return { tone: 'warn', title: `${stale} · update skipped`, detail: outcome.message }
+    case 'failed': return { tone: 'bad', title: 'Proposal failed', detail: outcome.message, ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}) }
+    default: return { tone: 'info', title: 'Freshness unknown', detail: outcome.message }
+  }
+}
+
+export function workflowActivityLabel(type: string): string {
+  if (type.startsWith('page-edit:')) return 'Editing a page with the agent'
   if (type === 'plan:propose') return 'Researching and building the documentation plan'
   if (type === 'plan:revise') return 'Revising the documentation plan'
   if (type === 'plan:generate') return 'Generating the approved documentation proposal'
   if (type === 'plan:continue') return 'Continuing the interrupted documentation run'
   if (type.startsWith('proposal:resume:')) return 'Continuing the interrupted documentation run'
+  if (type.startsWith('proposal:revise:')) return 'Revising the proposal with the agent'
+  if (type === 'author:update') return 'Updating documentation'
+  if (type === 'author:create') return 'Creating documentation'
+  if (type === 'author:review') return 'Reviewing documentation'
+  if (type === 'sync') return 'Checking sources for changes'
+  if (type === 'login') return 'Signing in to Doxbrix'
+  if (type === 'agent:install') return 'Installing the agent'
+  if (type === 'capture') return 'Capturing screenshots'
+  if (type === 'generator') return 'Changing the documentation generator'
+  if (type === 'deploy:dry-run') return 'Validating the deployment'
+  if (type === 'deploy') return 'Deploying documentation'
+  if (type === 'preview') return 'Running the local preview'
   return 'Documentation workflow in progress'
+}
+
+function workflowActivityIcon(type: string): string {
+  if (type.startsWith('deploy')) return 'deploy'
+  if (type.startsWith('plan')) return 'list'
+  if (type.includes('proposal')) return 'review'
+  if (type === 'login') return 'key'
+  if (type === 'agent:install') return 'bot'
+  if (type === 'capture') return 'camera'
+  return 'update'
+}
+
+/** The line a failed CLI job printed as its reason, without the command prefix. */
+export function jobFailureReason(job: Pick<UiJob, 'lines' | 'status'>): string | undefined {
+  if (job.status !== 'failed') return undefined
+  const reported = [...job.lines].reverse().find((line) => line.startsWith('doxloop: '))
+  const line = reported ?? [...job.lines].reverse().find((candidate) => candidate.trim() && !candidate.startsWith('DOXLOOP_EVENT '))
+  return line?.replace(/^doxloop: /, '').trim() || undefined
 }
 
 interface RunCapture {
@@ -1309,6 +1596,18 @@ interface RunCapture {
 function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
   const [captures, setCaptures] = useState<RunCapture[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [replaceError, setReplaceError] = useState('')
+  const [replacing, setReplacing] = useState<RunCapture | null>(null)
+  const replaceInput = useRef<HTMLInputElement>(null)
+  const replaceCapture = async (capture: RunCapture, file: File) => {
+    const runId = run ?? new URL(capture.url, location.origin).searchParams.get('run')
+    if (!runId) { setReplaceError('This screenshot no longer belongs to a run.'); return }
+    try {
+      setReplaceError('')
+      await post('/api/captures/replace', { run: runId, path: capture.file, data: await readFileAsBase64(file) })
+      setCaptures((current) => current.map((entry) => (entry.file === capture.file ? { ...entry, url: `${entry.url.split('&v=')[0]}&v=${Date.now()}` } : entry)))
+    } catch (cause) { setReplaceError(message(cause)) }
+  }
   useEffect(() => {
     let cancelled = false
     const load = async () => {
@@ -1332,6 +1631,8 @@ function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
     return <Empty icon="camera" title="No screenshots captured yet" detail={live ? 'Images appear here as the agent verifies each state.' : 'This run did not capture application screenshots.'} />
   }
   return <div class="capture-gallery">
+    <input ref={replaceInput} type="file" accept=".png" hidden onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file && replacing) void replaceCapture(replacing, file) }} />
+    {replaceError && <Note tone="bad">{replaceError}</Note>}
     {duplicates > 0 && <Note tone="bad">{duplicates} of {captures.length} captures repeat an earlier image. Steps showing the same screen under different names mislead readers — the agent should reach those states or record them as text-only.</Note>}
     <div class="capture-grid">
       {captures.map((capture) => <figure key={capture.file} class={`capture-tile${capture.duplicateOf ? ' duplicate' : ''}`}>
@@ -1339,13 +1640,14 @@ function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
         <figcaption>
           <strong>{capture.guide ? `${capture.guide} · ${capture.step ?? ''}` : capture.file.split('/').slice(-1)[0]}</strong>
           <small>{capture.duplicateOf ? `Identical to ${capture.duplicateOf.split('/').slice(-1)[0]}` : capture.alt ?? capture.file}</small>
+          {!live && <button type="button" class="capture-replace" onClick={() => { setReplacing(capture); replaceInput.current?.click() }}><Icon name="refresh" size={12} />Replace screenshot</button>}
         </figcaption>
       </figure>)}
     </div>
   </div>
 }
 
-function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
+function AuthoringLiveLog({ job, act, stopLabel = 'Stop update' }: { job: UiJob; act: Action; stopLabel?: string }) {
   const log = useRef<HTMLPreElement>(null)
   const agent = job.agent ? agentLabel(job.agent) : 'Agent'
   const [tab, setTab] = useState<'log' | 'captures'>('log')
@@ -1354,7 +1656,7 @@ function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
   }, [job.lines.length, tab])
   return <div class="authoring-live-log">
     {job.stages.length > 0 && <ol class="workflow-stages" aria-label="Documentation workflow stages">
-      {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span>{stage.status === 'completed' ? <Icon name="check" size={11} /> : stage.status === 'failed' ? <Icon name="alert" size={11} /> : <i />}</span><strong>{stage.label}</strong></li>)}
+      {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span>{stage.status === 'completed' ? <Icon name="check" size={11} /> : stage.status === 'failed' ? <Icon name="alert" size={11} /> : <i />}</span><strong>{stage.label}</strong>{stage.progress && (stage.progress.total !== undefined || stage.progress.done > 0) && <small>{stage.progress.total !== undefined ? `${stage.progress.done} of ${stage.progress.total}` : String(stage.progress.done)}</small>}</li>)}
     </ol>}
     <div class="live-job-meta" aria-live="polite">
       <span><Icon name="bot" size={14} />{agent}</span>
@@ -1362,14 +1664,626 @@ function AuthoringLiveLog({ job, act }: { job: UiJob; act: Action }) {
       <span><Icon name="file" size={14} />{job.lines.length} recent line{job.lines.length === 1 ? '' : 's'}</span>
       <span class="authoring-live-actions">
         <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
-        {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>Stop update</Button>}
+        {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>{stopLabel}</Button>}
         {job.status !== 'running' && job.retryable && <Button size="sm" icon="refresh" onClick={() => void act(() => post(`/api/jobs/${job.id}/retry`), 'Workflow restarted')}>Retry stage</Button>}
       </span>
     </div>
     <div class="live-log-tabs"><Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} /></div>
     {tab === 'log'
-      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.join('\n') : `Starting ${agent}…`}</pre>
+      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.filter((line) => !line.startsWith('DOXLOOP_EVENT ')).join('\n') : `Starting ${agent}…`}</pre>
       : <CaptureGallery live={job.status === 'running'} />}
+  </div>
+}
+
+const PAGE_EDIT_INTENTS = [
+  ['Fix wording', 'Fix the wording so it is clearer and more precise.'],
+  ['Add an example', 'Add a practical example that helps readers complete the task.'],
+  ['Update for a recent change', 'Update this page for the recent product change: '],
+  ['Add a section', 'Add a section that explains '],
+  ['Shorten', 'Shorten this page while preserving the essential instructions.'],
+  ['Rewrite for a different audience', 'Rewrite this page for a different audience: '],
+] as const
+
+const PAGE_EVIDENCE: Record<PageSummary['evidence'], readonly [string, string]> = {
+  verified: ['Verified', 'good'],
+  'needs-review': ['Needs review', 'warn'],
+  none: ['No evidence', 'neutral'],
+}
+
+const MIN_EDIT_INSTRUCTION = 8
+
+/**
+ * Refine supersedes the run it refines, so a URL or a remembered id can point at
+ * a proposal that has since been replaced. Follow the chain to the live one.
+ */
+function resolveEditRun(runs: Proposal[], id: string): Proposal | undefined {
+  let run = runs.find((candidate) => candidate.id === id)
+  const seen = new Set<string>()
+  while (run?.supersededBy && !seen.has(run.id)) {
+    seen.add(run.id)
+    const next = runs.find((candidate) => candidate.id === run!.supersededBy)
+    if (!next) break
+    run = next
+  }
+  return run
+}
+
+function Pages({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
+  const initial = new URLSearchParams(location.search)
+  const [pages, setPages] = useState<PageSummary[]>([])
+  const [loadingPages, setLoadingPages] = useState(true)
+  const [search, setSearch] = useState('')
+  const [collectionFilter, setCollectionFilter] = useState('')
+  const [query, setQuery] = useState('')
+  const [matches, setMatches] = useState<Array<{ path: string; line: number; section: string; excerpt: string }>>([])
+  const [focusLine, setFocusLine] = useState(Number(initial.get('line')) || (initial.get('edit') ? 1 : 0))
+  useEffect(() => { let current = true; if (!query) { setMatches([]); return } api<typeof matches>(`/api/pages/search?q=${encodeURIComponent(query)}`).then((value) => { if (current) setMatches(value) }).catch((cause) => { if (current) onError(cause.message) }); return () => { current = false } }, [query, state.runs])
+  const [selectedPaths, setSelectedPaths] = useState<string[]>(() => initial.get('path') ? [initial.get('path')!] : [])
+  const [runId, setRunId] = useState(initial.get('run') ?? '')
+  const [instruction, setInstruction] = useState('')
+  const [allowRelated, setAllowRelated] = useState(false)
+  const [screenshots, setScreenshots] = useState(false)
+  const defaultAgent = state.project?.defaultAgent ?? ''
+  const initialModel = defaultModelForAgent(defaultAgent)
+  const initialReasoning = preferredReasoningLevel(defaultAgent, initialModel)
+  const [agent, setAgent] = useState(defaultAgent)
+  const [model, setModel] = useState(initialModel)
+  const [reasoning, setReasoning] = useState(defaultAgent === 'codex' ? initialReasoning : '')
+  const [effort, setEffort] = useState(defaultAgent === 'claude' ? initialReasoning : '')
+  const [agentOpen, setAgentOpen] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [reviewView, setReviewView] = useState<'rendered' | 'source'>('rendered')
+  const [reviewLayout, setReviewLayout] = useState<'split' | 'unified'>('split')
+  const [onlyChanges, setOnlyChanges] = useState(true)
+  const [reviewChangeId, setReviewChangeId] = useState('')
+  const [refining, setRefining] = useState(false)
+  const [refinement, setRefinement] = useState('')
+  const [rationale, setRationale] = useState<ProposalChange | null>(null)
+  const [toast, setToast] = useState<Proposal | null>(null)
+  const [assetPicker, setAssetPicker] = useState(false)
+  const [view, setViewState] = useState<PagesView>(() => pagesViewFrom(initial.get('view')))
+  const [previewUrl, setPreviewUrl] = useState(state.preview?.running ? state.preview.url ?? '' : '')
+  const [previewState, setPreviewState] = useState<'idle' | 'starting' | 'ready' | 'failed'>(state.preview?.running && state.preview.url ? 'ready' : 'idle')
+  const [previewNonce, setPreviewNonce] = useState(0)
+  const [undoingPage, setUndoingPage] = useState(false)
+  const [historyEntries, setHistoryEntries] = useState<HistoryPageEntry[] | null>(null)
+  const [startedJob, setStartedJob] = useState<UiJob | null>(null)
+  const textarea = useRef<HTMLTextAreaElement>(null)
+  const refineInput = useRef<HTMLTextAreaElement>(null)
+  const listbox = useRef<HTMLDivElement>(null)
+
+  const editRuns = validRuns(state.runs).filter((run) => run.editRequest)
+  const proposal = resolveEditRun(editRuns, runId)
+  const streamedJob = state.jobs.find((job) => job.status === 'running' && (job.type.startsWith('page-edit:') || (job.type.startsWith('proposal:revise:') && editRuns.some((run) => job.type.endsWith(run.id)))))
+  const activeJob = streamedJob ?? (startedJob?.status === 'running' ? startedJob : undefined)
+  const activeRun = activeJob?.type.startsWith('page-edit:')
+    ? editRuns.find((run) => activeJob.type === `page-edit:${run.id}`)
+    : editRuns.find((run) => activeJob?.type === `proposal:revise:${run.id}`)
+  const activePaths = activeRun?.editRequest?.paths ?? (startedJob ? selectedPaths : proposal?.editRequest?.paths ?? [])
+  const titleFor = (path: string) => pages.find((page) => page.path === path)?.title ?? path.split('/').at(-1) ?? path
+  const selected = selectedPaths.map((path) => pages.find((page) => page.path === path)).filter((page): page is PageSummary => Boolean(page))
+  const activePage = selected[0]
+  const pageChanges = proposal?.changes.filter((change) => change.category === 'page') ?? []
+  const relatedChanges = proposal?.changes.filter((change) => change.category !== 'page') ?? []
+  const reviewChange = pageChanges.find((change) => change.id === reviewChangeId) ?? pageChanges[0]
+  const normalizedQuery = query.toLocaleLowerCase()
+  const collectionPages = collectionFilter ? pages.filter((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}` === collectionFilter) : pages
+  const filteredPages = normalizedQuery ? collectionPages.filter((page) => (`${page.title} ${page.path}`.toLocaleLowerCase().includes(normalizedQuery) || matches.some((match) => match.path === page.path))) : collectionPages
+  const groups = groupPageSummaries(filteredPages)
+  const proposalPaths = proposal?.editRequest?.paths ?? []
+  const viewingProposalPage = Boolean(activePage && proposalPaths.includes(activePage.path))
+  const otherPageWhileRunning = Boolean(activeJob && activePage && !activePaths.includes(activePage.path))
+  const reviewable = Boolean(proposal && !activeJob && ['awaiting-review', 'conflicted'].includes(proposal.status))
+  const failed = Boolean(proposal && !activeJob && proposal.status === 'failed')
+  const pendingElsewhere = editRuns.filter((run) => run.status === 'awaiting-review' && run.id !== proposal?.id)
+  const validationErrors = proposal?.validation?.errors ?? 0
+  const instructionReady = instruction.trim().length >= MIN_EDIT_INSTRUCTION
+  const composerLabel = selected.length > 1 ? `What should change on these ${selected.length} pages?` : 'What should change on this page?'
+
+  const refreshPages = async () => {
+    try { setPages(await api<PageSummary[]>('/api/pages')) }
+    catch (cause) { onError(message(cause)) }
+    finally { setLoadingPages(false) }
+  }
+  useEffect(() => { void refreshPages() }, [])
+  useEffect(() => {
+    const syncUrl = () => {
+      const params = new URLSearchParams(location.search)
+      setRunId(params.get('run') ?? '')
+      setViewState(pagesViewFrom(params.get('view')))
+      const nextPath = params.get('path')
+      if (nextPath) setSelectedPaths([nextPath])
+    }
+    addEventListener('popstate', syncUrl)
+    return () => removeEventListener('popstate', syncUrl)
+  }, [])
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 150)
+    return () => clearTimeout(timer)
+  }, [search])
+  useEffect(() => {
+    if (selectedPaths.length || !pages.length) return
+    setSelectedPaths([pages[0]!.path])
+  }, [pages.length])
+  useEffect(() => {
+    if (!proposal?.editRequest) return
+    setSelectedPaths(proposal.editRequest.paths)
+    setInstruction(proposal.editRequest.instruction)
+    setAllowRelated(proposal.editRequest.allowRelated)
+    setReviewChangeId(pageChanges[0]?.id ?? '')
+    setRefining(false)
+    setRefinement('')
+    if (proposal.id !== runId) {
+      setRunId(proposal.id)
+      updateUrl(proposal.editRequest.paths, proposal.id)
+    }
+  }, [proposal?.id])
+  useEffect(() => {
+    if (!startedJob) return
+    const matching = state.jobs.find((job) => job.id === startedJob.id)
+    const completed = startedJob.type.startsWith('page-edit:')
+      ? proposal?.id === startedJob.type.slice('page-edit:'.length) && proposal.status !== 'generating'
+      : proposal?.revisionOf === startedJob.type.slice('proposal:revise:'.length)
+    if (completed || (matching && matching.status !== 'running')) setStartedJob(null)
+  }, [proposal?.id, proposal?.status, state.jobs, startedJob?.id])
+  useEffect(() => {
+    if (!activePage || previewState !== 'idle') return
+    setPreviewState('starting')
+    void post<{ url: string }>('/api/preview/start', { open: false }).then((result) => {
+      setPreviewUrl(result.url)
+      setPreviewState('ready')
+    }).catch((cause) => {
+      setPreviewState('failed')
+      onError(message(cause))
+    })
+  }, [activePage?.path, previewState])
+
+  const updateUrl = (nextPaths: string[], nextRun = '', nextView: PagesView = view) => {
+    const params = new URLSearchParams()
+    if (nextView !== 'pages') params.set('view', nextView)
+    if (nextRun) params.set('run', nextRun)
+    else if (nextPaths[0]) params.set('path', nextPaths[0])
+    history.replaceState({}, '', `/pages${params.size ? `?${params}` : ''}`)
+  }
+  const setView = (next: PagesView) => {
+    setViewState(next)
+    updateUrl(selectedPaths, proposal && selectedPaths[0] && proposalPaths.includes(selectedPaths[0]) ? proposal.id : '', next)
+  }
+  const leaveProposal = () => {
+    setRunId('')
+    setRefining(false)
+    setRefinement('')
+  }
+  const chooseSingle = (path: string) => {
+    setSelectedPaths([path])
+    setHistoryEntries(null)
+    updateUrl([path], proposal && proposalPaths.includes(path) ? proposal.id : '')
+  }
+  const togglePath = (path: string) => {
+    const next = selectedPaths.includes(path) ? selectedPaths.filter((item) => item !== path) : [path, ...selectedPaths]
+    setSelectedPaths(next)
+    setHistoryEntries(null)
+    updateUrl(next, proposal && next[0] && proposalPaths.includes(next[0]) ? proposal.id : '')
+  }
+  const moveSelection = (path: string, direction: 1 | -1) => {
+    const index = filteredPages.findIndex((page) => page.path === path)
+    const next = filteredPages[index + direction]
+    if (!next) return
+    chooseSingle(next.path)
+    listbox.current?.querySelector<HTMLElement>(`[data-page-index="${index + direction}"]`)?.focus()
+  }
+  const insertIntent = (value: string) => {
+    const input = textarea.current
+    const start = input?.selectionStart ?? instruction.length
+    const end = input?.selectionEnd ?? instruction.length
+    const spacer = start > 0 && !/\s$/.test(instruction.slice(0, start)) ? ' ' : ''
+    const next = `${instruction.slice(0, start)}${spacer}${value}${instruction.slice(end)}`
+    const caret = start + spacer.length + value.length
+    setInstruction(next)
+    requestAnimationFrame(() => { input?.focus(); input?.setSelectionRange(caret, caret) })
+  }
+  const submit = async (override?: { instruction?: string; allowRelated?: boolean; paths?: string[] }) => {
+    const request = (override?.instruction ?? instruction).trim()
+    const paths = override?.paths ?? selectedPaths
+    if (request.length < MIN_EDIT_INSTRUCTION || paths.length === 0 || activeJob) return
+    setSubmitting(true)
+    setToast(null)
+    try {
+      const started = await act(() => post<{ job: UiJob }>('/api/pages/edit', {
+        paths,
+        instruction: request,
+        allowRelated: override?.allowRelated ?? allowRelated,
+        screenshots: screenshots ? 'enabled' : 'disabled',
+        agent: agent || undefined,
+        model: model || undefined,
+        ...(agent === 'codex' && reasoning ? { reasoning } : {}),
+        ...(agent === 'claude' && effort ? { effort } : {}),
+      }), 'Page edit started', false)
+      if (started?.job.type.startsWith('page-edit:')) {
+        setStartedJob(started.job)
+        const id = started.job.type.slice('page-edit:'.length)
+        setInstruction(request)
+        setSelectedPaths(paths)
+        setRunId(id)
+        setRefining(false)
+        updateUrl(paths, id)
+      }
+    } finally { setSubmitting(false) }
+  }
+  const accept = async () => {
+    if (!proposal) return
+    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all' }))
+    if (result?.status !== 'applied') return
+    const paths = result.editRequest?.paths ?? selectedPaths
+    setToast(result)
+    leaveProposal()
+    setInstruction('')
+    setAllowRelated(false)
+    setPreviewNonce((value) => value + 1)
+    updateUrl(paths)
+    await refreshPages()
+  }
+  const reject = async () => {
+    if (!proposal) return
+    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/reject`), 'Edit rejected')
+    if (result) { leaveProposal(); updateUrl(selectedPaths) }
+  }
+  const refine = async () => {
+    if (!proposal || refinement.trim().length < MIN_EDIT_INSTRUCTION) return
+    const result = await act(() => post<{ job: UiJob }>(`/api/proposals/${proposal.id}/refine`, { instruction: refinement.trim() }), 'Refinement started', false)
+    if (result) { setStartedJob(result.job); setRefining(false); setRefinement('') }
+  }
+  const undo = async (applied: Proposal) => {
+    setUndoingPage(true)
+    try {
+      const result = await act(() => post(`/api/proposals/${applied.id}/undo`), 'Page edit undone')
+      if (result) { setToast(null); setPreviewNonce((value) => value + 1); await refreshPages() }
+    } finally { setUndoingPage(false) }
+  }
+
+  const openHistory = async () => {
+    if (!activePage) return
+    if (historyEntries) { setHistoryEntries(null); return }
+    try {
+      const result = await api<{ entries: HistoryPageEntry[] }>(`/api/history?page=${encodeURIComponent(activePage.path)}`)
+      setHistoryEntries(result.entries)
+    } catch (cause) { onError(message(cause)) }
+  }
+  const openInPreview = async (route: string) => {
+    const tab = window.open('about:blank', '_blank')
+    if (tab) tab.opener = null
+    try {
+      const result = await post<{ url: string }>('/api/preview/start', { open: false })
+      setPreviewUrl(result.url)
+      setPreviewState('ready')
+      tab?.location.replace(`${result.url}${route}`)
+    } catch (cause) {
+      tab?.close()
+      onError(message(cause))
+    }
+  }
+  const openProposedPreview = async (route: string) => {
+    if (!proposal) return
+    const tab = window.open('about:blank', '_blank')
+    if (tab) tab.opener = null
+    try {
+      const result = await post<{ url: string }>(`/api/proposals/${proposal.id}/preview/start`, { open: false })
+      tab?.location.replace(`${result.url}${route}`)
+    } catch (cause) {
+      tab?.close()
+      onError(message(cause))
+    }
+  }
+  const openRun = (run: Proposal) => {
+    const paths = run.editRequest?.paths ?? []
+    setRunId(run.id)
+    if (paths[0]) setSelectedPaths(paths)
+    setHistoryEntries(null)
+    updateUrl(paths, run.id)
+  }
+  const focusComposer = () => requestAnimationFrame(() => textarea.current?.focus())
+
+  const previewFrame = (page: PageSummary) => <div class="current-page-preview">
+    <div class="preview-chrome" aria-hidden="true"><span class="preview-dots"><i /><i /><i /></span><code>{page.route}</code></div>
+    {previewState === 'ready' && previewUrl
+      ? <iframe key={`${page.path}:${previewNonce}`} title="Current page preview" src={`${previewUrl}${page.route}?embed=page`} />
+      : <div class="preview-placeholder">
+        {previewState === 'failed'
+          ? <><Icon name="alert" size={18} /><strong>The preview could not start</strong><Button size="sm" onClick={() => setPreviewState('idle')}>Try again</Button></>
+          : <><span class="spinner" /><strong>Preview is starting…</strong></>}
+      </div>}
+  </div>
+
+  return <div class="pages-page">
+    {rationale && <ProposalRationaleDrawer change={rationale} onClose={() => setRationale(null)} />}
+    {assetPicker && <AssetPicker act={act} title="Insert an image" onClose={() => setAssetPicker(false)} onPick={(asset) => { setAssetPicker(false); insertIntent(`Insert the image ${asset.publicPath} with descriptive alt text where it best supports the text.`) }} />}
+    {toast && <div class="page-updated-toast" role="status">
+      <span class="toast-icon"><Icon name="check" size={15} /></span>
+      <span class="toast-copy"><strong>Page updated</strong><small>{(toast.editRequest?.paths ?? []).map(titleFor).join(', ') || 'The change was written to the project.'}</small></span>
+      <Button size="sm" onClick={() => void undo(toast)}>Undo</Button>
+      <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setToast(null)}><Icon name="close" size={14} /></button>
+    </div>}
+    <PageHeader title="Pages" description={view === 'navigation' ? 'Arrange the sidebar: reorder pages, group them into sections, and rename labels.' : view === 'assets' ? 'Images and files the documentation embeds. Upload, replace, and describe them.' : 'Edit a page directly or ask the agent for a reviewed update.'} actions={<Segmented value={view} onChange={setView} items={[['pages', 'Pages'], ['navigation', 'Navigation'], ['assets', 'Images & files']] as const} />} />
+    {view === 'pages' && <PageTools root={state.root ?? state.cwd} contentDir={state.project?.contentDir ?? ''} {...(activePage ? { path: activePage.path } : {})} onChanged={async (path) => { const next = await api<PageSummary[]>('/api/pages'); setPages(next); const selected = path ?? next.find((page) => page.path === activePage?.path)?.path ?? next[0]?.path; setSelectedPaths(selected ? [selected] : []); updateUrl(selected ? [selected] : []); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
+    <Collections onChanged={async () => { await refreshPages(); await act(async () => true) }} onTranslate={async (paths, locale) => { await submit({ paths, instruction: `Translate these documentation pages to ${locale}. Preserve code, API names, navigation routes, source associations, and links. Re-verify factual claims. Change only the selected translation pages.`, allowRelated: false }) }} />
+    <AuditTools onChanged={async () => { await refreshPages(); await act(async () => true) }} />
+    {view === 'pages' && selectedPaths.length > 1 && <BulkMetadata paths={selectedPaths} onChanged={async () => { await refreshPages(); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
+    {view === 'navigation' && <NavigationView act={act} onError={onError} {...(previewState === 'ready' && previewUrl ? { previewUrl } : {})} />}
+    {view === 'assets' && <AssetLibrary act={act} onError={onError} onChanged={() => { setPreviewNonce((value) => value + 1); void refreshPages() }} />}
+    {view === 'pages' && <div class="pages-workbench">
+      <aside class="page-list-panel">
+        {[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].length > 1 && <label>Version / locale<select aria-label="Version / locale" value={collectionFilter} onChange={(event) => setCollectionFilter(event.currentTarget.value)}><option value="">All versions and languages</option>{[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].map((label) => <option>{label}</option>)}</select></label>}
+        <label class="page-search">
+          <span class="sr-only">Search pages</span>
+          <Icon name="search" size={16} />
+          <Input type="search" value={search} placeholder="Search titles, paths, or page text" onInput={(event) => setSearch(event.currentTarget.value)} />
+        </label>
+        {matches.length > 0 && <details open><summary>{matches.length} text matches{matches.length === 200 ? ' (first 200)' : ''}</summary><ul class="page-text-matches">{matches.map((match) => <li><button onClick={() => { chooseSingle(match.path); setFocusLine(match.line); }}><strong>{match.section} · line {match.line}</strong><small>{match.excerpt}</small></button></li>)}</ul></details>}
+        <div class="page-list-summary">
+          <span>{query ? `${filteredPages.length} of ${pages.length}` : pages.length} page{pages.length === 1 ? '' : 's'}</span>
+          {selectedPaths.length > 1
+            ? <button type="button" class="page-list-clear" onClick={() => activePage && chooseSingle(activePage.path)}>{selectedPaths.length} selected · Clear</button>
+            : <span class="page-list-hint">Tick boxes to edit several at once</span>}
+        </div>
+        <div ref={listbox} class="page-list" role="listbox" aria-label="Documentation pages" aria-multiselectable="true">
+          {loadingPages
+            ? <div class="page-list-empty"><span class="spinner" />Loading pages…</div>
+            : pages.length === 0
+              ? <div class="page-list-empty">No pages yet. Create a documentation plan to write the first ones.</div>
+              : filteredPages.length === 0
+                ? <div class="page-list-empty">No pages match “{query}”.</div>
+                : groups.map(([section, entries]) => <section key={section} class="page-list-group">
+                  <h2>{section}</h2>
+                  {entries.map((page) => {
+                    const globalIndex = filteredPages.indexOf(page)
+                    const checked = selectedPaths.includes(page.path)
+                    const active = selectedPaths[0] === page.path
+                    const [evidenceLabel, evidenceTone] = PAGE_EVIDENCE[page.evidence]
+                    return <div
+                      key={page.path}
+                      role="option"
+                      aria-selected={checked}
+                      aria-current={active ? 'page' : undefined}
+                      tabIndex={active || (globalIndex === 0 && !selectedPaths.some((path) => filteredPages.some((candidate) => candidate.path === path))) ? 0 : -1}
+                      data-page-index={globalIndex}
+                      class={`page-list-row ${checked ? 'selected' : ''} ${active ? 'active' : ''}`}
+                      onClick={() => chooseSingle(page.path)}
+                      onKeyDown={(event) => {
+                        if (event.target instanceof HTMLInputElement) return
+                        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); moveSelection(page.path, event.key === 'ArrowDown' ? 1 : -1) }
+                        else if (event.key === ' ') { event.preventDefault(); togglePath(page.path) }
+                        else if (event.key === 'Enter') { event.preventDefault(); chooseSingle(page.path) }
+                      }}
+                    >
+                      <span class="page-list-check" onClick={(event) => event.stopPropagation()}>
+                        <input type="checkbox" aria-label={`Select ${page.title}`} checked={checked} onChange={() => togglePath(page.path)} />
+                      </span>
+                      <span class="page-list-copy">
+                        <strong>{page.title}</strong>
+                        <code>{page.path}</code>
+                        <small><span class={`evidence-dot ${evidenceTone}`} />{evidenceLabel}<i>·</i>{page.wordCount.toLocaleString()} words{page.updatedAt ? <><i>·</i>{timeText(page.updatedAt)}</> : null}</small>
+                      </span>
+                    </div>
+                  })}
+                </section>)}
+        </div>
+      </aside>
+
+      <section class="page-detail-pane">
+        {!activePage ? <div class="page-detail-empty"><Empty icon="file" title="Choose a page" detail="Select a page on the left to preview it and ask the agent for a scoped edit." /></div> : <>
+          <header class="page-detail-header">
+            <div class="page-detail-copy">
+              <small>{activePage.section ?? 'Not in navigation'}</small>
+              <h2>{activePage.title}</h2>
+              <span class="page-detail-meta">
+                <code>{activePage.path}</code>
+                <Badge tone={PAGE_EVIDENCE[activePage.evidence][1]}>{PAGE_EVIDENCE[activePage.evidence][0]}</Badge>
+                <small>{activePage.wordCount.toLocaleString()} words{activePage.updatedAt ? ` · Updated ${timeText(activePage.updatedAt)}` : ''}</small>
+              </span>
+            </div>
+            <div class="page-detail-actions">
+              <Button icon="clock" class={historyEntries ? 'active-filter' : ''} onClick={() => void openHistory()}>Page history</Button>
+              <Button icon="external" onClick={() => void openInPreview(activePage.route)}>Open in preview</Button>
+            </div>
+          </header>
+
+          <Comments key={`comments:${activePage.path}`} path={activePage.path} onRequest={async (text) => { await submit({ paths: [activePage.path], instruction: `Address this reviewer comment on ${activePage.path}: ${text}` }) }} />
+          {!undoingPage && !activeJob && !(reviewable && viewingProposalPage) && <TextEditor key={activePage.path} focusLine={focusLine} refreshToken={previewNonce} root={state.root ?? state.cwd} path={activePage.path} onChanged={async () => { await refreshPages(); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
+          {!activeJob && !(reviewable && viewingProposalPage) && <PageMetadataForm path={activePage.path} act={act} onError={onError} onSaved={() => { setPreviewNonce((value) => value + 1); void refreshPages() }} />}
+
+          {selected.length > 1 && <div class="selected-pages-strip" aria-label="Pages selected for this update">
+            <strong><Icon name="list" size={14} />{selected.length} pages in this edit</strong>
+            {selected.map((page) => <span key={page.path} class={`selected-page-chip ${page.path === activePage.path ? 'active' : ''}`}>
+              <button type="button" onClick={() => { const next = [page.path, ...selectedPaths.filter((item) => item !== page.path)]; setSelectedPaths(next); updateUrl(next, proposal && proposalPaths.includes(page.path) ? proposal.id : '') }}>{page.title}</button>
+              <button type="button" aria-label={`Remove ${page.title}`} onClick={() => togglePath(page.path)}><Icon name="close" size={12} /></button>
+            </span>)}
+          </div>}
+
+          {pendingElsewhere.length > 0 && !activeJob && <div class="page-pending-strip">
+            <Icon name="info" size={15} />
+            <span>{pendingElsewhere.length === 1 ? <>An edit of <strong>{(pendingElsewhere[0]!.editRequest?.paths ?? []).map(titleFor).join(', ')}</strong> is waiting for your review.</> : <><strong>{pendingElsewhere.length} edits</strong> are waiting for your review.</>}</span>
+            <Button size="sm" onClick={() => openRun(pendingElsewhere[0]!)}>Open review</Button>
+          </div>}
+
+          {historyEntries && <section class="page-history-panel">
+            <header><strong><Icon name="clock" size={15} />History for {activePage.title}</strong><button type="button" aria-label="Close page history" onClick={() => setHistoryEntries(null)}><Icon name="close" size={14} /></button></header>
+            {historyEntries.length
+              ? historyEntries.map((entry) => <div class="page-history-row" key={entry.requestId}><Badge tone={statusTone(entry.requestStatus)}>{statusLabel(entry.requestStatus)}</Badge><span><strong>{entry.requestText ?? 'Documentation update'}</strong><small>{timeText(entry.requestedAt)}</small></span></div>)
+              : <p class="page-history-empty">No recorded changes for this page yet.</p>}
+          </section>}
+
+          {activeJob && otherPageWhileRunning && <>
+            {previewFrame(activePage)}
+            <div class="page-inline-notice">
+              <span class="notice-icon running"><i /></span>
+              <span><strong>An edit is in progress.</strong> Finish or stop it before starting another.</span>
+              {activePaths[0] && <Button size="sm" onClick={() => { const next = [...activePaths]; setSelectedPaths(next); updateUrl(next, activeRun?.id ?? runId) }}>Show the edit</Button>}
+            </div>
+          </>}
+
+          {activeJob && !otherPageWhileRunning && <>
+            {previewFrame(activePage)}
+            <section class="page-edit-running">
+              <header>
+                <span class="running-pulse" aria-hidden="true"><i /></span>
+                <div>
+                  <h2>Editing {activePaths.length === 1 ? titleFor(activePaths[0]!) : `${activePaths.length} pages`}</h2>
+                  <blockquote>{activeRun?.editRequest?.followUps.at(-1)?.instruction ?? activeRun?.editRequest?.instruction ?? instruction}</blockquote>
+                </div>
+                <Badge tone={streamConnected ? 'good' : 'warn'}>{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
+              </header>
+              <AuthoringLiveLog job={activeJob} act={act} stopLabel="Stop" />
+            </section>
+          </>}
+
+          {!activeJob && reviewable && proposal && viewingProposalPage && <section class="page-edit-review">
+            <header class="page-review-head">
+              <div>
+                <small>Agent proposal</small>
+                <h2>Review this edit</h2>
+                <p>{proposal.summary}</p>
+              </div>
+              <Badge tone={statusTone(proposal.status)}>{statusLabel(proposal.status)}</Badge>
+            </header>
+            <blockquote class="page-review-instruction"><Icon name="chat" size={14} /><span>{latestPageEditInstruction(proposal)}</span></blockquote>
+            {reviewChange && proposal.status === 'awaiting-review' && reviewChange.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${proposal.id}:${reviewChange.id}`} root={state.root ?? state.cwd} path={reviewChange.path} proposal={{ id: proposal.id, changeId: reviewChange.id }} onChanged={async () => { await act(async () => true) }} />}
+            {proposal.status === 'conflicted' && <Note tone="bad"><span class="note-body">{proposal.error}<span class="note-actions"><Button size="sm" onClick={() => { leaveProposal(); updateUrl(selectedPaths); setPreviewNonce((value) => value + 1); void refreshPages() }}>Reload and compare</Button><Button size="sm" tone="danger" onClick={() => void reject()}>Reject</Button></span></span></Note>}
+            {validationErrors > 0 && <Note tone="bad"><span class="note-body">The proposed edit has {validationErrors} validation error{validationErrors === 1 ? '' : 's'}. Fix the validation errors by refining the instruction, or reject this edit.<ul class="note-issues">{proposal.validation?.issues?.filter((issue) => issue.severity === 'error').map((issue) => <li key={`${issue.code}:${issue.file ?? ''}:${issue.message}`}>{issue.file ? <code>{issue.file}</code> : null}{issue.message}</li>)}</ul></span></Note>}
+            {reviewChange ? <>
+              <div class="page-review-toolbar">
+                {pageChanges.length > 1
+                  ? <Select aria-label="Changed page" value={reviewChange.id} onChange={(event) => setReviewChangeId(event.currentTarget.value)}>{pageChanges.map((change) => <option key={change.id} value={change.id}>{change.title} — {change.path}</option>)}</Select>
+                  : <code class="page-review-path">{reviewChange.path}</code>}
+                <div class="page-review-controls">
+                  <Segmented value={reviewView} onChange={setReviewView} items={[['rendered', 'Rendered'], ['source', 'Source']] as const} />
+                  {reviewView === 'rendered' && <>
+                    <Segmented value={reviewLayout} onChange={setReviewLayout} items={[['split', 'Side-by-side'], ['unified', 'Inline']] as const} />
+                    <Button size="sm" class={onlyChanges ? 'active-filter' : ''} onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Changes only' : 'Show all'}</Button>
+                  </>}
+                  <Button size="sm" icon="info" onClick={() => setRationale(reviewChange)}>Why this change</Button>
+                  <Button size="sm" icon="external" onClick={() => void openProposedPreview(pages.find((page) => page.path === reviewChange.path)?.route ?? activePage.route)}>Open proposed page</Button>
+                </div>
+              </div>
+              <div class="page-review-body">
+                {reviewView === 'source'
+                  ? <ProposalSourceDiff runId={proposal.id} change={reviewChange} act={act} partialActions={false} />
+                  : <ProposalRenderedDiff runId={proposal.id} change={reviewChange} layout={reviewLayout} onlyChanges={onlyChanges} />}
+              </div>
+            </> : <Empty title="The agent did not change the page" detail="Refine the instruction or reject this edit." />}
+            {relatedChanges.length > 0 && <details class="page-related-changes">
+              <summary>Also changed <span>{relatedChanges.length}</span></summary>
+              {relatedChanges.map((change) => <div key={change.id}><Icon name="file" size={14} /><span><strong>{change.title}</strong><code>{change.path}</code></span><Badge tone="neutral">{change.category}</Badge></div>)}
+            </details>}
+            {refining && <div class="page-refine">
+              <Field label="What should be different?" hint="The agent continues in the same isolated copy, so earlier instructions still apply."><Textarea ref={refineInput} rows={4} value={refinement} placeholder="For example: keep the new example, but shorten the introduction to two sentences." onInput={(event) => setRefinement(event.currentTarget.value)} /></Field>
+              <div class="page-refine-actions"><Button tone="primary" icon="sparkles" disabled={refinement.trim().length < MIN_EDIT_INSTRUCTION} onClick={() => void refine()}>Send to the agent</Button><Button tone="ghost" onClick={() => { setRefining(false); setRefinement('') }}>Cancel</Button></div>
+            </div>}
+            <footer class="page-review-actions">
+              <Button tone="primary" icon="check" disabled={proposal.status === 'conflicted' || validationErrors > 0} title={validationErrors > 0 ? 'Fix the validation errors by refining the instruction, or reject this edit.' : undefined} onClick={() => void accept()}>Accept</Button>
+              <Button tone="danger" onClick={() => void reject()}>Reject</Button>
+              <Button icon="chat" class={refining ? 'active-filter' : ''} onClick={() => { setRefining(!refining); if (!refining) requestAnimationFrame(() => refineInput.current?.focus()) }}>Refine</Button>
+              <small>Accepting writes the page to the project. You can undo it afterwards.</small>
+            </footer>
+          </section>}
+
+          {!activeJob && !(reviewable && viewingProposalPage) && <>
+            {previewFrame(activePage)}
+            {reviewable && proposal && !viewingProposalPage && <div class="page-inline-notice">
+              <Icon name="info" size={15} />
+              <span>An edit of <strong>{proposalPaths.map(titleFor).join(', ')}</strong> is waiting for your review.</span>
+              <Button size="sm" onClick={() => openRun(proposal)}>Open review</Button>
+            </div>}
+            {failed && proposal && viewingProposalPage && <PageEditFailure proposal={proposal} onRetry={(related) => void submit({ instruction: latestPageEditInstruction(proposal), allowRelated: related, paths: proposalPaths })} onRefine={() => { setInstruction(latestPageEditInstruction(proposal)); leaveProposal(); updateUrl(proposalPaths); focusComposer() }} />}
+            <section class="page-edit-composer">
+              <header class="composer-head">
+                <span class="composer-icon"><Icon name="sparkles" size={18} /></span>
+                <div>
+                  <h2>Edit with the agent</h2>
+                  <p>Describe the change in plain language. The agent works in an isolated copy and you review the result before anything is written.</p>
+                </div>
+              </header>
+              <div class="composer-body">
+                <div class="composer-field">
+                  <label for="page-edit-instruction" class="field-label">{composerLabel}</label>
+                  <div class="composer-textarea">
+                    <Textarea id="page-edit-instruction" ref={textarea} rows={5} maxlength={2000} value={instruction} disabled={submitting} placeholder="For example: add a curl example under Authentication and say that tokens expire after 24 hours." onInput={(event) => setInstruction(event.currentTarget.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void submit() } }} />
+                    <small class={instruction.length > 1900 ? 'warn' : ''}>{instruction.trim().length < MIN_EDIT_INSTRUCTION && instruction.length > 0 ? `At least ${MIN_EDIT_INSTRUCTION} characters` : `${instruction.length}/2000`}</small>
+                  </div>
+                </div>
+                <div class="page-intent-chips" aria-label="Starting points">
+                  <span>Start with</span>
+                  {PAGE_EDIT_INTENTS.map(([label, value]) => <button key={label} type="button" aria-pressed="false" disabled={submitting} onClick={() => insertIntent(value)}>{label}</button>)}
+                  <button type="button" aria-pressed="false" disabled={submitting} onClick={() => setAssetPicker(true)}><Icon name="plus" size={12} /> Insert an image…</button>
+                </div>
+                <div class="page-edit-options">
+                  <div class={`page-option-card ${allowRelated ? 'on' : ''}`}>
+                    <Toggle checked={allowRelated} disabled={submitting} onChange={setAllowRelated} label="Also allow related changes" />
+                    <small>Lets the agent update navigation and add or replace images for this page.</small>
+                  </div>
+                  {state.project?.application && <div class={`page-option-card ${screenshots ? 'on' : ''}`}>
+                    <Toggle checked={screenshots} disabled={submitting} onChange={setScreenshots} label="Capture product screenshots" />
+                    <small>Off by default for page edits. Turn on when the change needs a fresh screenshot.</small>
+                  </div>}
+                </div>
+                <button type="button" class="agent-config-summary" aria-expanded={agentOpen} onClick={() => setAgentOpen(!agentOpen)}><Icon name="bot" size={16} /><span>Agent: <b>{agent ? agentLabel(agent) : 'Automatically detect'}{model ? ` · ${model}` : ''}</b></span><strong>{agentOpen ? 'Done' : 'Change'}</strong></button>
+                {agentOpen && <div class="page-agent-options">
+                  <Field label="Agent"><Select value={agent} onChange={(event) => { const value = event.currentTarget.value; const nextModel = defaultModelForAgent(value); const level = preferredReasoningLevel(value, nextModel); setAgent(value); setModel(nextModel); setReasoning(value === 'codex' ? level : ''); setEffort(value === 'claude' ? level : '') }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+                  <Field label="Model"><Combo value={model} options={agentModels(agent).map((entry) => [entry.id, entry.label] as const)} disabled={!agent} onValueChange={setModel} /></Field>
+                  {(agent === 'codex' || agent === 'claude') && <Field label={agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={agent === 'claude' ? effort : reasoning} options={modelReasoningLevels(agent, model).map((value) => [value, value] as const)} onValueChange={agent === 'claude' ? setEffort : setReasoning} /></Field>}
+                </div>}
+              </div>
+              <footer class="composer-foot">
+                <Button tone="primary" icon="sparkles" busy={submitting} disabled={!instructionReady || selectedPaths.length === 0} onClick={() => void submit()}>Ask the agent to edit</Button>
+                <small>The page stays unchanged until you accept the result.</small>
+              </footer>
+            </section>
+          </>}
+        </>}
+      </section>
+    </div>}
+  </div>
+}
+
+type PagesView = 'pages' | 'navigation' | 'assets'
+
+function pagesViewFrom(value: string | null): PagesView {
+  return value === 'navigation' || value === 'assets' ? value : 'pages'
+}
+
+function groupPageSummaries(pages: PageSummary[]): Array<[string, PageSummary[]]> {
+  const groups = new Map<string, PageSummary[]>()
+  for (const page of pages) {
+    const section = page.inNavigation ? page.section ?? 'Documentation' : 'Not in navigation'
+    const entries = groups.get(section) ?? []
+    entries.push(page)
+    groups.set(section, entries)
+  }
+  const orphan = groups.get('Not in navigation')
+  if (orphan) { groups.delete('Not in navigation'); groups.set('Not in navigation', orphan) }
+  return [...groups]
+}
+
+function latestPageEditInstruction(proposal: Proposal): string {
+  return proposal.editRequest?.followUps.at(-1)?.instruction ?? proposal.editRequest?.instruction ?? ''
+}
+
+function PageEditFailure({ proposal, onRetry, onRefine }: { proposal: Proposal; onRetry: (allowRelated: boolean) => void; onRefine: () => void }) {
+  const error = proposal.error ?? 'The documentation agent could not complete this edit.'
+  const outsideScope = error.includes('outside this page') || error.includes('outside these pages')
+  const noChange = error.includes('did not change this page') || error.includes('did not change these pages')
+  return <div class="page-edit-failure" role="alert">
+    <span class="failure-icon"><Icon name="alert" size={16} /></span>
+    <div>
+      <strong>{outsideScope ? 'The agent changed files outside the selected page' : noChange ? 'The agent did not change the page' : 'The edit did not finish'}</strong>
+      <p>{error}</p>
+      <div class="note-actions">
+        {outsideScope
+          ? <><Button size="sm" tone="primary" onClick={() => onRetry(true)}>Retry allowing related changes</Button><Button size="sm" onClick={onRefine}>Refine the instruction</Button></>
+          : noChange
+            ? <Button size="sm" tone="primary" onClick={onRefine}>Refine the instruction</Button>
+            : <><Button size="sm" tone="primary" icon="refresh" onClick={() => onRetry(Boolean(proposal.editRequest?.allowRelated))}>Try again</Button><Button size="sm" onClick={onRefine}>Refine the instruction</Button></>}
+      </div>
+    </div>
   </div>
 }
 
@@ -1438,9 +2352,22 @@ export function historyRequestSummary(request: string): { text: string; truncate
   }
 }
 
+/** The pages a request touched, by title, trimmed to a readable few. */
+export function historyPageNames(pages: HistoryChangedPage[], limit = 3): string {
+  const names = pages.map((page) => page.title?.trim() || page.path.split('/').at(-1) || page.path)
+  if (names.length <= limit) return names.join(', ')
+  return `${names.slice(0, limit).join(', ')} and ${names.length - limit} more`
+}
+
 export function historyActionLabel(kind: HistoryRequest['kind']): string {
   if (kind === 'create') return 'Create'
   if (kind === 'review') return 'Review'
+  if (kind === 'edit') return 'Edit'
+  if (kind === 'navigation') return 'Navigation'
+  if (kind === 'branding') return 'Branding'
+  if (kind === 'asset') return 'Asset'
+  if (kind === 'metadata') return 'Metadata'
+  if (kind === 'glossary') return 'Glossary'
   return 'Update'
 }
 
@@ -1479,19 +2406,26 @@ function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: str
     {entries.map((entry) => {
       const pages = entry.pages ?? []
       const instruction = historyRequestSummary(historyInstruction(entry))
-      return <tr key={entry.id} class="history-row">
+      const editPath = entry.kind === 'edit' ? pages[0]?.path : undefined
+      const openEdit = () => { if (editPath) setLocation('pages', { path: editPath }, 'push') }
+      return <tr key={entry.id} class={`history-row ${editPath ? 'clickable' : ''}`} tabIndex={editPath ? 0 : undefined} onClick={openEdit} onKeyDown={(event) => {
+        if (!editPath || (event.key !== 'Enter' && event.key !== ' ')) return
+        event.preventDefault()
+        openEdit()
+      }}>
         <td class="history-action">
           <strong>{historyActionLabel(entry.kind)}</strong>
         </td>
         <td>
           <div class="history-request">
             <strong title={instruction.truncated ? historyInstruction(entry) : undefined}>{instruction.text}</strong>
+            {pages.length > 0 && <small class="history-pages" title={pages.map((page) => page.path).join('\n')}>{historyPageNames(pages)}</small>}
             {entry.error && <small class="history-error">{entry.error}</small>}
           </div>
         </td>
         <td class="history-result">
           <Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge>
-          <small>{entry.pagesChanged > 0 || pages.length > 0 ? `${changeCountText(pages, entry.pagesChanged)} changed` : 'No page changes'}</small>
+          <small>{entry.pagesChanged > 0 ? `${changeCountText(pages, entry.pagesChanged)} changed` : entry.kind === 'edit' && pages.length > 0 ? `${changeCountText(pages, pages.length)} selected` : 'No page changes'}</small>
         </td>
         <td class="muted-cell">
           {timeText(entry.createdAt)}
@@ -1569,7 +2503,8 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
     })
   }
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  const missingRemote = project.sources.filter((item) => (item.kind ?? 'directory') === 'directory' && !item.remote)
+  const localSources = project.sources.filter((item) => (item.kind ?? 'directory') === 'directory' && !item.remote)
+  const checking = state.jobs.some((job) => job.type === 'sync' && job.status === 'running')
   const save = async () => {
     setSaving(true)
     try {
@@ -1587,8 +2522,9 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
         <button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button>
       </header>
       <div class="monitoring-dialog-body">
-        <div class="monitoring-dialog-status"><span class={project.sync.on.length ? 'active' : ''}><i />{project.sync.on.length ? scheduleSummary(scheduleForm(project.sync.on)) : 'Monitoring is not configured'}</span><Button size="sm" icon="refresh" onClick={() => void act(() => post('/api/sync/now'), 'Source check started')}>Check now</Button></div>
-        {missingRemote.length > 0 && <Note>Scheduled monitoring needs a read-only remote for {missingRemote.map((item) => item.name).join(', ')}. Connect a Git repository before installing this schedule.</Note>}
+        <div class="monitoring-dialog-status"><span class={project.sync.on.length ? 'active' : ''}><i />{project.sync.on.length ? scheduleSummary(scheduleForm(project.sync.on)) : 'Monitoring is not configured'}</span><Button size="sm" icon="refresh" busy={checking} disabled={checking} onClick={() => void act(() => post('/api/sync/now'), 'Source check started', false)}>{checking ? 'Checking…' : 'Check now'}</Button></div>
+        {checking && <Note>A source check is running. Its result appears as a notice when it finishes; the live log is under Update.</Note>}
+        {localSources.length > 0 && <Note>{localSources.map((item) => item.name).join(', ')} {localSources.length === 1 ? 'is a local folder and is' : 'are local folders and are'} checked in place: a Git checkout by its HEAD commit and working tree, any other folder by the files recorded at the last sync. Nothing is fetched, pulled, or written there.</Note>}
         <section class="monitoring-policy-fields">
           <div class="form-grid">
             <Field label="Product branch"><Input value={sync.branch ?? ''} placeholder="main" onInput={(event) => set('branch', event.currentTarget.value)} /></Field>
@@ -1607,17 +2543,18 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
             <Field label="Ignored paths"><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
             <Field label="Maximum agent minutes"><Input type="number" min="1" value={sync.budget?.maxMinutes ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxMinutes', event.currentTarget.value) })} /></Field>
             <Field label="Maximum runs per day"><Input type="number" min="1" value={sync.budget?.maxRunsPerDay ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxRunsPerDay', event.currentTarget.value) })} /></Field>
+            <Field label="Maximum Claude spend (USD)" hint="Stops a Claude Code run at this cost and names the cap in the run log. Codex and Gemini have no spending flag, so this is ignored for them. 10 is a sensible starting point."><Input type="number" min="0.5" step="0.5" placeholder="10" value={sync.budget?.maxUsd ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxUsd', event.currentTarget.value) })} /></Field>
             <Field label="Re-verify after (days)" hint="Checks evidence age even when source content is unchanged."><Input type="number" min="1" max="3650" value={sync.maxVerificationAgeDays ?? ''} onInput={(event) => set('maxVerificationAgeDays', event.currentTarget.value ? clampNumber(event.currentTarget.value, 1, 3650) : undefined)} /></Field>
             <Field label="Expired verification"><Select value={sync.maxVerificationAgeSeverity ?? 'warn'} onChange={(event) => set('maxVerificationAgeSeverity', event.currentTarget.value as 'warn' | 'fail')}><option value="warn">Warn</option><option value="fail">Fail validation</option></Select></Field>
           </div>}
-          <Note>Monitoring creates the documentation update as a proposal under Review Changes. It never modifies the product source or publishes automatically.</Note>
+          <Note>Monitoring creates the documentation update as a proposal under Review. It never modifies the product source or publishes automatically.</Note>
         </section>
       </div>
       <footer>
         {project.sync.on.length > 0 && <Button tone="danger" onClick={() => confirm('Disable the installed monitoring schedule?') && void act(() => post('/api/sync/off'), 'Monitoring disabled')}>Disable</Button>}
         <span />
         <Button onClick={onClose}>Cancel</Button>
-        <Button tone="primary" busy={saving} disabled={missingRemote.length > 0} onClick={() => void save()}>Save and install</Button>
+        <Button tone="primary" busy={saving} onClick={() => void save()}>Save and install</Button>
       </footer>
     </section>
   </div>
@@ -1625,6 +2562,7 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
 
 const STATUS_ICONS: Record<string, string> = {
   'Remote source': 'cloud',
+  'Local source': 'folder',
   Schedule: 'calendar',
   Agent: 'bot',
   'Evidence map': 'map',
@@ -1680,14 +2618,22 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
   const [showArchived, setShowArchived] = useState(false)
   const archivedCount = runs.filter((run) => Boolean(run.archivedAt)).length
   const visibleRuns = runs.filter((run) => showArchived ? Boolean(run.archivedAt) : !run.archivedAt)
-  const [selectedId, setSelectedId] = useState('')
+  // The selected proposal and file live in the URL so a refresh or the back
+  // button returns to the same view, and the ready dialog can deep-link here.
+  const params = useSearchParams()
+  const selectedId = params.get('proposal') ?? ''
   const selected = runs.find((run) => run.id === selectedId)
-  const [changeId, setChangeId] = useState('')
+  const changeId = params.get('file') ?? ''
+  const setSelectedId = (id: string) => setLocation('proposals', id ? { proposal: id } : {}, 'push')
+  const setChangeId = (id: string) => setLocation('proposals', { proposal: selectedId, file: id })
   const [confirmingAcceptance, setConfirmingAcceptance] = useState<Proposal | null>(null)
+  const [overwriteConfirmed, setOverwriteConfirmed] = useState(false)
   const [appliedProposal, setAppliedProposal] = useState<Proposal | null>(null)
   const [delivery, setDelivery] = useState<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string; pushedAt?: string; pullRequestUrl?: string } | null>(null)
   const [view, setView] = useState<'rendered' | 'source'>('rendered')
   const [layout, setLayout] = useState<'split' | 'unified'>('split')
+  const [folder, setFolder] = useState('')
+  const [folderReason, setFolderReason] = useState('')
   const [onlyChanges, setOnlyChanges] = useState(true)
   const [rationaleChange, setRationaleChange] = useState<ProposalChange | null>(null)
   const [revision, setRevision] = useState<{
@@ -1696,27 +2642,24 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
     selectedIds: string[]
     hunkIds: string[]
   } | null>(null)
-  const [editor, setEditor] = useState<{
-    change: ProposalChange
-    content: string
-    evidenceDisposition: 'preserved' | 'needs-review'
-  } | null>(null)
-  const change = selected?.changes.find((item) => item.id === changeId) ?? selected?.changes[0]
-  useEffect(() => setChangeId(selected?.changes[0]?.id ?? ''), [selected?.id])
+  const change = selected?.changes.find((item) => item.id === changeId) ?? (selected ? defaultReviewChange(selected.changes) : undefined)
   const open = selected ? !selected.archivedAt && OPEN_STATUSES.includes(selected.status) : false
+  const concurrentChanges = selected ? reviewFileGroups(selected.changes).concurrent : []
+  useEffect(() => setOverwriteConfirmed(false), [confirmingAcceptance?.id])
+  /** File- and hunk-level accepts on a file edited during the run ask before replacing that edit. */
+  const confirmOverwrite = (target: ProposalChange): boolean =>
+    !target.changedDuringRun || confirm(`${target.path} was edited in the project while the agent ran. Applying this change replaces that edit. Continue?`)
+  // A revision or resumption runs as its own job; show it where the reviewer
+  // is waiting for it, with a way to stop it, and say why when it fails.
+  const [dismissedJobIds, setDismissedJobIds] = useState<string[]>([])
+  const selectedJobs = selected ? state.jobs.filter((job) => job.type === `proposal:revise:${selected.id}` || job.type === `proposal:resume:${selected.id}`) : []
+  const runningRevision = selectedJobs.find((job) => job.status === 'running')
+  const failedRevision = runningRevision ? undefined : selectedJobs.find((job) => job.status === 'failed' && !dismissedJobIds.includes(job.id))
   const counts = selected ? proposalChangeCounts(selected.changes) : { added: 0, modified: 0, deleted: 0 }
   const acceptAll = async (proposal: Proposal) => {
-    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all' }))
+    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all', ...(overwriteConfirmed ? { confirmChangedDuringRun: true } : {}) }))
     setConfirmingAcceptance(null)
     if (result?.status === 'applied') setAppliedProposal(result)
-  }
-  const openEditor = async (proposal: Proposal, selectedChange: ProposalChange) => {
-    try {
-      const result = await api<{ content: string; evidenceDisposition: 'preserved' | 'needs-review' }>(`/api/proposals/${proposal.id}/changes/${selectedChange.id}/content`)
-      setEditor({ change: selectedChange, content: result.content, evidenceDisposition: result.evidenceDisposition })
-    } catch (cause) {
-      onError(message(cause))
-    }
   }
   const requestRevision = async (proposal: Proposal) => {
     if (!revision?.instruction.trim()) return
@@ -1740,20 +2683,19 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
     {delivery && <div class="proposal-ready-scrim" role="presentation"><section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-delivery-title"><button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setDelivery(null)}><Icon name="close" size={16} /></button><span class="proposal-ready-icon"><Icon name="external" size={24} /></span><div><h2 id="proposal-delivery-title">{delivery.pullRequestUrl ? 'Pull request is ready' : delivery.pushedAt ? 'Branch published' : 'Pull-request branch is ready'}</h2><p>{delivery.pushedAt ? 'The reviewed commit is available on the remote without changing your current working tree.' : 'Doxloop created the branch in an isolated Git worktree without changing your current working tree.'}</p></div><div class="proposal-ready-summary"><strong>{delivery.branch}</strong><span>Commit {delivery.commit.slice(0, 12)}</span></div>{!delivery.pushedAt && delivery.pullRequestCommand && <code>{delivery.pullRequestCommand}</code>}<footer>{delivery.pullRequestUrl ? <a class="btn primary md" href={delivery.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request</a> : delivery.pushedAt ? delivery.compareUrl && <a class="btn primary md" href={delivery.compareUrl} target="_blank" rel="noreferrer">Open comparison</a> : <><Button onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: false }), 'Branch published'); if (result) setDelivery(result) })()}>Push branch</Button><Button tone="primary" onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: true }), 'Pull request created'); if (result) setDelivery(result) })()}>Push & create PR</Button></>}<Button onClick={() => setDelivery(null)}>Done</Button></footer></section></div>}
     {rationaleChange && <ProposalRationaleDrawer change={rationaleChange} onClose={() => setRationaleChange(null)} />}
     {revision && selected && <ProposalRevisionDialog proposal={selected} current={change} draft={revision} onChange={setRevision} onClose={() => setRevision(null)} onSubmit={() => void requestRevision(selected)} />}
-    {editor && selected && <ProposalEditDialog value={editor} onChange={setEditor} onClose={() => setEditor(null)} onSave={() => void (async () => {
-      const result = await act(() => patch<Proposal>(`/api/proposals/${selected.id}/changes/${editor.change.id}/content`, {
-        content: editor.content,
-        evidenceDisposition: editor.evidenceDisposition,
-      }), 'Page edit saved')
-      if (result) setEditor(null)
-    })()} />}
     {confirmingAcceptance && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-accept-title">
         <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingAcceptance(null)}><Icon name="close" size={16} /></button>
         <span class="proposal-ready-icon"><Icon name="proposals" size={24} /></span>
         <div><h2 id="proposal-accept-title">Apply these documentation changes?</h2><p>This replaces the current versions of the reviewed files with the proposed versions.</p></div>
         <div class="proposal-ready-summary"><strong>{proposalSummaryText(confirmingAcceptance.changes)}</strong><span>Only the files listed in this proposal will be applied.</span></div>
-        <footer><Button onClick={() => setConfirmingAcceptance(null)}>Cancel</Button><Button tone="primary" icon="check" onClick={() => void acceptAll(confirmingAcceptance)}>Apply changes</Button></footer>
+        {concurrentChanges.length > 0 && <div class="proposal-concurrent-warning" role="group" aria-label="Files edited while the agent ran">
+          <strong><Icon name="alert" size={14} />{concurrentChanges.length === 1 ? 'One file was edited while the agent ran' : `${concurrentChanges.length} files were edited while the agent ran`}</strong>
+          <p>The agent never saw these edits. Applying the proposal replaces them with the proposed versions.</p>
+          <ul>{concurrentChanges.map((item) => <li key={item.id}><code>{item.path}</code></li>)}</ul>
+          <Toggle checked={overwriteConfirmed} onChange={setOverwriteConfirmed} label="Replace my edits to these files" />
+        </div>}
+        <footer><Button onClick={() => setConfirmingAcceptance(null)}>Cancel</Button><Button tone="primary" icon="check" disabled={concurrentChanges.length > 0 && !overwriteConfirmed} onClick={() => void acceptAll(confirmingAcceptance)}>Apply changes</Button></footer>
       </section>
     </div>}
     {appliedProposal && <div class="proposal-ready-scrim" role="presentation">
@@ -1770,7 +2712,7 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
         <button type="button" class="review-back-button" onClick={() => setSelectedId('')}><Icon name="chevronRight" size={14} />All proposals</button>
         <PageHeader title="Review proposal" description="Compare the current documentation with the proposed update." actions={<><Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview documentation</Button>{open && <Button icon="publish" onClick={() => void (async () => { const result = await act(() => post<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string }>(`/api/proposals/${selected.id}/delivery/branch`, {}), 'Pull-request branch prepared'); if (result) setDelivery(result) })()}>Prepare PR branch</Button>}{!selected.archivedAt && selected.status !== 'generating' && <Button onClick={() => confirm('Archive this proposal? It can remain in history until cleanup.') && void act(() => post(`/api/proposals/${selected.id}/archive`), 'Proposal archived')}>Archive</Button>}</>} />
       </div>
-      : <PageHeader title="Review Changes" description="Choose a proposal to inspect and approve its documentation changes." />}
+      : <PageHeader title="Review" description="Choose a proposal to inspect and approve its documentation changes." />}
     {runs.length === 0
       ? <Panel flush><Empty icon="proposals" title="No proposals yet" detail="Run source monitoring, or start an update when documentation becomes stale." /></Panel>
       : !selected
@@ -1813,17 +2755,19 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                   </div>
                 </div>
                 <strong class="source-count">{selected.sourceSummary}</strong>
+                <small>{selected.changes.flatMap((item) => item.hunks).filter((hunk) => hunk.acceptedAt).length} accepted · {selected.changes.flatMap((item) => item.hunks).filter((hunk) => hunk.rejectedAt).length} rejected · {selected.changes.flatMap((item) => item.hunks).filter((hunk) => !hunk.acceptedAt && !hunk.rejectedAt).length} remaining</small>
               </div>
               <div class="proposal-summary-side">
                 <div class="proposal-actions">
                   {selected.status === 'applied' && selected.undo?.status === 'available' && <Button onClick={() => confirm('Undo every file applied by this proposal? Newer edits will be protected.') && void act(() => post(`/api/proposals/${selected.id}/undo`), 'Documentation changes undone')}>Undo</Button>}
                   {(open || (selected.status === 'stale' && !selected.archivedAt)) && <Button onClick={() => setRevision({ mode: 'all', instruction: 'Regenerate this proposal using the current approved plan and evidence.', selectedIds: selected.changes.map((item) => item.id), hunkIds: [] })}>Regenerate</Button>}
-                  <Button tone="danger" disabled={!open} onClick={() => confirm('Reject this complete proposal?') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Proposal rejected')}>Reject</Button>
+                  <Button tone="danger" disabled={!open} onClick={() => confirm('Reject the remaining undecided changes? Already accepted changes stay applied.') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Remaining changes rejected')}>Reject remaining</Button>
                   <Button tone="primary" icon="check" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
                 </div>
               </div>
             </header>
 
+            {open && <details class="text-editor"><summary>Review a folder</summary><div class="text-editor-body"><label>Folder<select value={folder} onChange={(event) => setFolder(event.currentTarget.value)}><option value="">Choose a folder</option>{[...new Set(selected.changes.flatMap((item) => { const parts = item.path.split('/'); return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/')) }))].sort().map((path) => <option>{path}</option>)}</select></label>{folder && <ul>{selected.changes.filter((item) => item.path.startsWith(`${folder}/`) && item.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)).map((item) => <li>{item.path}</li>)}</ul>}<label>Rejection reason<input value={folderReason} onInput={(event) => setFolderReason(event.currentTarget.value)} /></label><div class="text-editor-actions"><Button disabled={!folder} onClick={() => { const changes = selected.changes.filter((item) => item.path.startsWith(`${folder}/`)); if (changes.some((item) => item.changedDuringRun)) { onError('A file in this folder changed during generation. Review and accept it individually before accepting the folder.'); return } void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'folder', folder }), 'Folder changes accepted') }}>Accept pending changes in folder</Button><Button disabled={!folder || !folderReason.trim()} onClick={() => void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { scope: 'folder', folder, reason: folderReason }), 'Folder changes rejected')}>Reject pending changes in folder</Button></div></div></details>}
             {selected.status === 'failed' && !selected.archivedAt && <div class="proposal-lifecycle-notice failed">
               <Icon name="alert" size={15} />
               <span class="proposal-failed-copy"><strong>This run stopped before it could be reviewed.</strong>{selected.error && <small>{selected.error}</small>}{(selected.recovery?.resumable !== false || selected.recovery?.ignorable !== false) && <small>Its workspace is preserved: continue it instead of generating again.</small>}</span>
@@ -1832,6 +2776,18 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                 {selected.recovery?.ignorable !== false && <Button size="sm" icon="check" onClick={() => void act(() => post<Proposal>(`/api/proposals/${selected.id}/recover`, { ignoreScreenshotProblems: true }), 'Proposal ready for review with problems ignored')}>Ignore problems & review</Button>}
               </span>}
             </div>}
+            {failedRevision && <div class="proposal-lifecycle-notice failed" role="alert">
+              <Icon name="alert" size={15} />
+              <span class="proposal-failed-copy"><strong>{failedRevision.type.startsWith('proposal:resume:') ? 'The run could not be continued.' : 'The agent could not complete this revision.'}</strong><small>{jobFailureReason(failedRevision) ?? 'The agent stopped without reporting a reason. Open the log for details.'}</small></span>
+              <span class="proposal-failed-actions">
+                <a class="btn secondary sm" href={`/api/jobs/${failedRevision.id}/log`} target="_blank" rel="noreferrer">Open log</a>
+                <Button size="sm" onClick={() => setDismissedJobIds([...dismissedJobIds, failedRevision.id])}>Dismiss</Button>
+              </span>
+            </div>}
+            {runningRevision && <section class="proposal-revision-live" aria-label="Agent revision in progress">
+              <header><Icon name="bot" size={15} /><strong>{workflowActivityLabel(runningRevision.type)}</strong><small>The proposal updates when the agent finishes.</small></header>
+              <AuthoringLiveLog job={runningRevision} act={act} stopLabel="Stop" />
+            </section>}
             {selected.advisories?.map((advisory) => <div key={advisory} class="proposal-lifecycle-notice advisory"><Icon name="info" size={15} /><span>{advisory}</span></div>)}
             {(selected.status === 'stale' || selected.status === 'superseded' || selected.archivedAt) && <div class={`proposal-lifecycle-notice ${selected.status}`}>
               <Icon name="info" size={15} />
@@ -1847,14 +2803,17 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                     <div class="review-file-head-main">
                       <ReviewFilePicker
                         key={selected.id}
-                        nodes={proposalFileTree(selected.changes)}
+                        changes={selected.changes}
                         selected={change}
-                        fileCount={selected.changes.length}
                         onSelect={setChangeId}
                       />
                     </div>
                     <span class="file-position">{Math.max(0, selected.changes.findIndex((item) => item.id === change.id)) + 1} of {selected.changes.length}</span>
                   </header>
+                  {change.changedDuringRun && <div class="proposal-lifecycle-notice concurrent" role="note">
+                    <Icon name="alert" size={15} />
+                    <span><strong>This file was edited in the project while the agent ran.</strong> The comparison shows the proposal against your edited version; accepting replaces that edit and asks first.</span>
+                  </div>}
                   <div class="review-toolbar">
                     <div class="review-view-control">
                       <span class="toolbar-label">View</span>
@@ -1866,15 +2825,18 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                         <Button size="sm" class={onlyChanges ? 'active-filter' : ''} onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Changes only' : 'Show all'}</Button>
                       </>}
                       <Button size="sm" onClick={() => setRationaleChange(change)}>Why this change</Button>
-                      <Button size="sm" disabled={!open || change.category !== 'page' || change.binary || change.kind === 'deleted'} onClick={() => void openEditor(selected, change)}>Edit page</Button>
+                      {selected.status === 'applied' && change.category === 'page' && change.kind !== 'deleted' && <Button size="sm" onClick={() => setLocation('pages', { path: change.path }, 'push')}>Edit this page</Button>}
                       <Button size="sm" disabled={!open} onClick={() => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [] })}>Ask agent to revise</Button>
-                      <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id }), 'Page accepted')}>Accept file</Button>
+                      <Button size="sm" tone="danger" disabled={!open || !change.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)} onClick={() => { const reason = prompt('Why reject the remaining changes in this file? (optional)', ''); if (reason !== null) void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { changeId: change.id, reason }), 'File changes rejected') }}>Reject file</Button>
+                      <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => confirmOverwrite(change) && void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id, ...(change.changedDuringRun ? { confirmChangedDuringRun: true } : {}) }), 'Page accepted')}>Accept file</Button>
                     </div>
                   </div>
+                  <Comments key={`comments:${selected.id}:${change.id}`} path={change.path} proposal={{ id: selected.id, change }} onRequest={async (text, hunkId) => { if (!open) throw new Error('This proposal is closed. Comment on the live page to request a new update.'); await act(() => post(`/api/proposals/${selected.id}/revise`, { instruction: `Address this reviewer comment: ${text}`, changeIds: [change.id], hunkIds: hunkId ? [hunkId] : [] }), 'Comment revision started') }} />
+                  {open && change.category === 'page' && !change.binary && change.kind !== 'deleted' && change.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${selected.id}:${change.id}`} root={state.root ?? state.cwd} path={change.path} proposal={{ id: selected.id, changeId: change.id }} onChanged={async () => { await act(async () => true) }} />}
                   <div class="review-diff-body">
                     {view === 'source'
-                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} onReviseHunk={(hunkId) => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [hunkId] })} />
-                      : <div class="review-device"><iframe class="review-frame" title={`Review ${change.title}`} src={`/review-preview/${selected.id}/${change.id}?layout=${layout}${onlyChanges ? '&only=1' : ''}`} /></div>}
+                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} partialActions={open} beforeAccept={() => confirmOverwrite(change)} onReviseHunk={(hunkId) => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [hunkId] })} />
+                      : <ProposalRenderedDiff key={`${selected.id}:${change.afterHash}`} runId={selected.id} change={change} layout={layout} onlyChanges={onlyChanges} />}
                   </div>
                 </> : <Empty title="This proposal contains no file changes" />}
               </section>
@@ -1890,30 +2852,6 @@ type ProposalRevisionDraft = {
   instruction: string
   selectedIds: string[]
   hunkIds: string[]
-}
-
-type ProposalEditorDraft = {
-  change: ProposalChange
-  content: string
-  evidenceDisposition: 'preserved' | 'needs-review'
-}
-
-function ProposalRationaleDrawer({ change, onClose }: { change: ProposalChange; onClose: () => void }) {
-  const rationale = change.rationale
-  const claims = [...rationale.claims.added, ...rationale.claims.changed, ...rationale.claims.removed]
-  return <div class="proposal-drawer-scrim" role="presentation" onClick={(event) => event.target === event.currentTarget && onClose()}>
-    <aside class="proposal-rationale-drawer" role="dialog" aria-modal="true" aria-labelledby="proposal-rationale-title">
-      <header><span><small>Why this change</small><h2 id="proposal-rationale-title">{change.title}</h2><code>{change.path}</code></span><button type="button" aria-label="Close rationale" onClick={onClose}><Icon name="close" size={17} /></button></header>
-      <div class="proposal-drawer-body">
-        <section class="rationale-lead"><Badge tone={statusTone(rationale.confidence)}>{rationale.confidence.replace('-', ' ')}</Badge><p>{rationale.reason}</p></section>
-        <section><h3>Supporting evidence</h3>{rationale.evidence.length > 0 ? <div class="rationale-evidence-list">{rationale.evidence.map((item, index) => <article key={index} class={!item.available ? 'unavailable' : ''}><Icon name="link" size={14} /><span><strong>{item.source}</strong><code>{item.path ?? item.operation ?? 'Configured source'}</code>{item.revision && <small>Revision {item.revision.slice(0, 12)}</small>}{!item.available && <small>Unavailable in this environment</small>}</span></article>)}</div> : <p class="muted-copy">No precise source reference was recorded. Review this change manually before acceptance.</p>}</section>
-        {claims.length > 0 && <section><h3>Reader-facing claims</h3><ul>{claims.map((claim) => <li key={claim}>{claim}</li>)}</ul></section>}
-        {rationale.affectedInterfaces.length > 0 && <section><h3>Public interfaces affected</h3><div class="rationale-tags">{rationale.affectedInterfaces.map((item) => <span key={item}>{item}</span>)}</div></section>}
-        <section class="rationale-validation"><h3>Checks</h3><p><Icon name="check" size={14} /> {rationale.validation.errors} errors · {rationale.validation.warnings} warnings</p><small>{rationale.authorship === 'human' ? 'Edited by a reviewer' : rationale.planId ? `From approved plan ${rationale.planId}` : 'Generated from the review request'}</small></section>
-        {rationale.assumptions.length > 0 && <details><summary>Assumptions to verify</summary><ul>{rationale.assumptions.map((item) => <li key={item}>{item}</li>)}</ul></details>}
-      </div>
-    </aside>
-  </div>
 }
 
 function ProposalRevisionDialog({ proposal, current, draft, onChange, onClose, onSubmit }: {
@@ -1939,22 +2877,6 @@ function ProposalRevisionDialog({ proposal, current, draft, onChange, onClose, o
   </div>
 }
 
-function ProposalEditDialog({ value, onChange, onClose, onSave }: {
-  value: ProposalEditorDraft
-  onChange: (next: ProposalEditorDraft) => void
-  onClose: () => void
-  onSave: () => void
-}) {
-  return <div class="proposal-ready-scrim" role="presentation">
-    <section class="proposal-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-edit-title">
-      <header><span><small>Direct page edit</small><h2 id="proposal-edit-title">{value.change.title}</h2><code>{value.change.path}</code></span><button type="button" aria-label="Close editor" onClick={onClose}><Icon name="close" size={16} /></button></header>
-      <Textarea class="proposal-code-editor" rows={22} value={value.content} onInput={(event) => onChange({ ...value, content: event.currentTarget.value })} />
-      <label class="evidence-disposition"><span><strong>Evidence after this edit</strong><small>Keep the source links only if your edit does not change the factual claims.</small></span><select value={value.evidenceDisposition} onChange={(event) => onChange({ ...value, evidenceDisposition: event.currentTarget.value as ProposalEditorDraft['evidenceDisposition'] })}><option value="preserved">Evidence still applies</option><option value="needs-review">Needs evidence review</option></select></label>
-      <footer><Button onClick={onClose}>Cancel</Button><Button tone="primary" icon="check" disabled={!value.content.trim()} onClick={onSave}>Validate and save</Button></footer>
-    </section>
-  </div>
-}
-
 type ReviewTreeNode = {
   name: string
   path: string
@@ -1962,18 +2884,27 @@ type ReviewTreeNode = {
   change?: ProposalChange
 }
 
-function ReviewFilePicker({ nodes, selected, fileCount, onSelect }: {
-  nodes: ReviewTreeNode[]
+function ReviewFilePicker({ changes, selected, onSelect }: {
+  changes: ProposalChange[]
   selected: ProposalChange
-  fileCount: number
   onSelect: (id: string) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const filteredNodes = filterReviewFileTree(nodes, query)
-  const matchingFiles = countReviewTreeFiles(filteredNodes)
+  const groups = reviewFileGroups(changes)
+  // Supporting files stay folded unless the reviewer asks for them or the
+  // selected file is one of them, so review opens on documentation.
+  const [showSupporting, setShowSupporting] = useState(false)
+  const supportingVisible = showSupporting || groups.supporting.some((item) => item.id === selected.id) || (groups.documentation.length === 0 && groups.concurrent.length === 0)
+  const sections = [
+    { id: 'concurrent', label: 'Changed while the agent ran', hint: 'Applying these replaces your edits', changes: groups.concurrent, tone: 'warn' },
+    { id: 'documentation', label: 'Documentation', hint: 'Pages, navigation, and assets', changes: groups.documentation, tone: '' },
+    ...(supportingVisible ? [{ id: 'supporting', label: 'Supporting files', hint: 'Evidence, configuration, and skills', changes: groups.supporting, tone: '' }] : []),
+  ].filter((section) => section.changes.length > 0)
+  const filteredSections = sections.map((section) => ({ ...section, nodes: filterReviewFileTree(proposalFileTree(section.changes), query) })).filter((section) => section.nodes.length > 0)
+  const matchingFiles = filteredSections.reduce((count, section) => count + countReviewTreeFiles(section.nodes), 0)
   const selectedName = selected.path.split('/').filter(Boolean).pop() ?? selected.path
 
   useEffect(() => {
@@ -2013,12 +2944,13 @@ function ReviewFilePicker({ nodes, selected, fileCount, onSelect }: {
       <Icon name="file" size={15} />
       <strong class="review-file-picker-name">{selectedName}</strong>
       <span class={`review-file-picker-status ${selected.kind}`}>{selected.kind}</span>
+      {selected.changedDuringRun && <span class="review-file-picker-status concurrent" title="Edited in the project while the agent ran">edited</span>}
       <Icon name="chevronRight" size={13} />
     </button>
 
     {open && <div id="review-file-picker-menu" class="review-file-picker-menu" role="dialog" aria-label="Changed files">
       <header>
-        <span><strong>Changed files</strong><small>{fileCount} file{fileCount === 1 ? '' : 's'} in this proposal</small></span>
+        <span><strong>Changed files</strong><small>{changes.length} file{changes.length === 1 ? '' : 's'} in this proposal</small></span>
         <button type="button" aria-label="Close changed files" onClick={() => setOpen(false)}><Icon name="close" size={14} /></button>
       </header>
       <label class="review-file-search">
@@ -2035,8 +2967,14 @@ function ReviewFilePicker({ nodes, selected, fileCount, onSelect }: {
       </label>
       <div class="review-file-picker-tree">
         {matchingFiles > 0
-          ? <ReviewFileTree nodes={filteredNodes} selectedId={selected.id} onSelect={selectFile} />
+          ? filteredSections.map((section) => <section key={section.id} class={`review-file-group ${section.tone}`} aria-label={section.label}>
+            <header><strong>{section.label}</strong><small>{section.hint}</small></header>
+            <ReviewFileTree nodes={section.nodes} selectedId={selected.id} onSelect={selectFile} />
+          </section>)
           : <div class="review-file-search-empty"><Icon name="search" size={18} /><strong>No matching files</strong><small>Try a filename or folder path.</small></div>}
+        {groups.supporting.length > 0 && !query.trim() && <button type="button" class="review-file-group-toggle" aria-expanded={supportingVisible} onClick={() => setShowSupporting(!supportingVisible)}>
+          <Icon name="chevronRight" size={12} />{supportingVisible ? 'Hide' : 'Show'} {groups.supporting.length} supporting file{groups.supporting.length === 1 ? '' : 's'}
+        </button>}
       </div>
       {query.trim() && <footer>{matchingFiles} matching file{matchingFiles === 1 ? '' : 's'}</footer>}
     </div>}
@@ -2116,48 +3054,6 @@ function proposalSummaryText(changes: ProposalChange[]): string {
   return `${changes.length} file change${changes.length === 1 ? '' : 's'} · ${counts.added} added · ${counts.modified} modified · ${counts.deleted} deleted`
 }
 
-function ProposalSourceDiff({ runId, change, act, onReviseHunk }: { runId: string; change: ProposalChange; act: Action; onReviseHunk: (hunkId: string) => void }) {
-  const [diff, setDiff] = useState<SourceDiff | null>(null)
-  const [error, setError] = useState('')
-  useEffect(() => {
-    setDiff(null)
-    setError('')
-    void api<SourceDiff>(`/api/proposals/${runId}/changes/${change.id}/diff`).then(setDiff).catch((cause) => setError(message(cause)))
-  }, [runId, change.id])
-  if (error) return <div class="diff-message error">{error}</div>
-  if (!diff) return <div class="diff-message">Loading source diff…</div>
-  if (diff.binary) return <Empty title="Binary asset" detail="This file has no line-by-line source diff. Accept the page to apply it." />
-  const groups = diffGroups(diff.rows)
-  return <div class="source-diff">
-    <div class="diff-summary"><span class="added">+{diff.added}</span><span class="removed">−{diff.removed}</span><small>Accept one change at a time, or accept the complete page.</small></div>
-    {groups.map((group, index) => <section class={`hunk ${group.state ?? ''}`} key={group.hunkId ?? index}>
-      <header>
-        <strong>{group.hunkId ? `Change ${index + 1}` : 'Context'}</strong>
-        {group.hunkId && group.state === 'pending' && <span class="hunk-actions"><Button size="sm" onClick={() => onReviseHunk(group.hunkId!)}>Revise</Button><Button size="sm" tone="primary" onClick={() => void act(() => post(`/api/proposals/${runId}/accept`, { scope: 'hunk', changeId: change.id, hunkId: group.hunkId }), 'Change accepted')}>Accept change</Button></span>}
-        {group.hunkId && group.state !== 'pending' && <Badge tone={statusTone(group.state ?? '')}>{group.state ?? 'resolved'}</Badge>}
-      </header>
-      <div class="diff-lines">{group.rows.map((row, rowIndex) => <DiffLine key={rowIndex} row={row} />)}</div>
-    </section>)}
-  </div>
-}
-
-function DiffLine({ row }: { row: DiffRow }) {
-  if (row.type === 'gap') return <div class="diff-line gap"><span /><span /><b /><code>{row.hidden} unchanged lines</code></div>
-  const sign = row.type === 'insert' ? '+' : row.type === 'delete' ? '−' : ' '
-  return <div class={`diff-line ${row.type}`}><span>{row.oldNumber ?? ''}</span><span>{row.newNumber ?? ''}</span><b>{sign}</b><code dangerouslySetInnerHTML={{ __html: row.html || ' ' }} /></div>
-}
-
-function diffGroups(rows: DiffRow[]): Array<{ hunkId?: string; state?: string; rows: DiffRow[] }> {
-  const groups: Array<{ hunkId?: string; state?: string; rows: DiffRow[] }> = []
-  for (const row of rows) {
-    const last = groups.at(-1)
-    if (last && last.hunkId === row.hunkId) last.rows.push(row)
-    else groups.push({ ...(row.hunkId ? { hunkId: row.hunkId } : {}), ...(row.hunkState ? { state: row.hunkState } : {}), rows: [row] })
-  }
-  return groups
-}
-
-
 /**
  * The deploy CLI prints one checklist line per finished step (`✓ label · detail`,
  * or `✗ label` for the step that failed). Nothing is printed while a step runs,
@@ -2166,7 +3062,8 @@ function diffGroups(rows: DiffRow[]): Array<{ hunkId?: string; state?: string; r
 const DEPLOY_STEP_LINE = /^\s*([✓✗])\s+(.+)$/
 const ANSI = /\x1b\[[0-9;]*m/g
 
-function deployStepLabels(generator: string | undefined, dryRun: boolean): string[] {
+function deployStepLabels(generator: string | undefined, dryRun: boolean, exporting = false): string[] {
+  if (exporting) return ['Validating documentation', 'Building static site', 'Writing folder and zip']
   if (generator === 'doxbrix') {
     return dryRun
       ? ['Validating documentation', 'Building bundle']
@@ -2207,26 +3104,28 @@ function deploySteps(job: UiJob, labels: string[]): { steps: DeployStep[]; perce
 }
 
 /** Live checklist, progress bar and log for the deployment that is running (or just finished). */
-function DeployProgress({ job, generator, act, streamConnected }: {
+function DeployProgress({ job, generator, act, streamConnected, onDismiss }: {
   job: UiJob
   generator: string | undefined
   act: Action
   streamConnected: boolean
+  onDismiss?: (() => void) | undefined
 }) {
   const log = useRef<HTMLPreElement>(null)
   const [logOpen, setLogOpen] = useState(true)
   const dryRun = job.type === 'deploy:dry-run'
-  const { steps, percent } = deploySteps(job, deployStepLabels(generator, dryRun))
+  const exporting = job.type === 'export'
+  const { steps, percent } = deploySteps(job, deployStepLabels(generator, dryRun, exporting))
   const running = job.status === 'running'
   const active = steps.find((step) => step.status === 'running')
   useEffect(() => {
     if (log.current) log.current.scrollTop = log.current.scrollHeight
   }, [job.lines.length, logOpen])
   const headline = running
-    ? active?.label ?? (dryRun ? 'Validating deployment' : 'Deploying documentation')
+    ? active?.label ?? (exporting ? 'Exporting static site' : dryRun ? 'Validating deployment' : 'Deploying documentation')
     : job.status === 'succeeded'
-      ? dryRun ? 'Deployment is valid' : 'Documentation published'
-      : job.status === 'cancelled' ? 'Deployment cancelled' : 'Deployment failed'
+      ? exporting ? 'Static site exported' : dryRun ? 'Deployment is valid' : 'Documentation published'
+      : job.status === 'cancelled' ? exporting ? 'Export cancelled' : 'Deployment cancelled' : exporting ? 'Export failed' : 'Deployment failed'
   return <section class={`deploy-progress ${job.status}`} aria-live="polite">
     <header class="deploy-progress-head">
       <span class={`deploy-progress-icon ${job.status}`}>
@@ -2234,12 +3133,13 @@ function DeployProgress({ job, generator, act, streamConnected }: {
       </span>
       <div class="deploy-progress-title">
         <strong>{headline}</strong>
-        <small>{dryRun ? 'Validation only — nothing is uploaded.' : 'Uploading the documentation snapshot to Doxbrix.'}</small>
+        <small>{exporting ? 'Writing a self-hostable folder and zip on this computer.' : dryRun ? 'Validation only — nothing is uploaded.' : 'Publishing the validated static bundle to the selected target.'}</small>
       </div>
       {running
         ? <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
         : <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>}
       {running && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Deployment stopped')}>Stop</Button>}
+      {!running && onDismiss && <Button size="sm" icon="close" onClick={onDismiss}>Dismiss</Button>}
     </header>
     <div class="deploy-progress-bar">
       <div class={`deploy-progress-track ${running ? 'running' : ''}`}><i style={{ width: `${percent}%` }} /></div>
@@ -2263,25 +3163,36 @@ function DeployProgress({ job, generator, act, streamConnected }: {
           <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
         </span>
       </div>
-      {logOpen && <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? job.lines.join('\n') : 'Starting deployment…'}</pre>}
+      {logOpen && <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? job.lines.filter((line) => !line.startsWith('DOXLOOP_EVENT ')).join('\n') : 'Starting deployment…'}</pre>}
     </div>
   </section>
 }
 
 function Publish({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
   const effective = state.effectiveDeployment!
-  const [deployment, setDeployment] = useState(effective)
+  const [deployment, setDeployment, deploymentSync] = useSeededForm(() => effective, JSON.stringify(effective))
   /** Visibility is asked once. An explicit saved choice means every later deploy runs straight away. */
   const chosenVisibility = state.project?.deployment?.visibility
   const [dialog, setDialog] = useState<'first' | 'change' | null>(null)
   const [choice, setChoice] = useState<'private' | 'public'>(deployment.visibility === 'public' ? 'public' : 'private')
   const [starting, setStarting] = useState(false)
+  const [providerToken, setProviderToken] = useState('')
   /** Set when a deploy is attempted while signed out, so the reason is explained in place. */
   const [signInRequired, setSignInRequired] = useState(false)
   const account = state.account
   const signedIn = Boolean(account?.signedIn)
-  const activeDeploy = state.jobs.find((job) => job.type.startsWith('deploy') && job.status === 'running')
+  const target = deployment.target ?? 'doxbrix'
+  const targetLabel = target === 'github-pages' ? 'GitHub Pages' : target === 'netlify' ? 'Netlify' : target === 'vercel' ? 'Vercel' : 'Doxbrix'
+  const activeDeploy = state.jobs.find((job) => (job.type.startsWith('deploy') || job.type === 'export') && job.status === 'running')
   const busy = Boolean(activeDeploy || starting)
+  // A finished deployment keeps its checklist and log on screen until it is
+  // dismissed, so a failure can be read instead of vanishing with the job.
+  const [dismissedDeployId, setDismissedDeployId] = useState<string>()
+  const shownDeploy = activeDeploy ?? recentSettledJob(state.jobs, (job) => job.type.startsWith('deploy') || job.type === 'export', dismissedDeployId)
+  const loginJob = state.jobs.find((job) => job.type === 'login')
+  const [dismissedLoginId, setDismissedLoginId] = useState<string>()
+  const signingIn = loginJob?.status === 'running' ? loginJob : undefined
+  const failedLogin = !signingIn && !signedIn ? recentSettledJob(state.jobs, (job) => job.type === 'login' && job.status === 'failed', dismissedLoginId) : undefined
   const isPublic = deployment.visibility === 'public'
   const deployments = useHistoryFeed<DeploymentRecord>(
     '/api/history/deployments?limit=25',
@@ -2295,15 +3206,15 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
    * stored an editor link, which must never be offered as the deployed site.
    */
   const [siteUrl, setSiteUrl] = useState<string | null>(null)
-  const settledDeploys = state.jobs.filter((job) => job.type.startsWith('deploy') && job.status !== 'running').length
+  const settledDeploys = state.jobs.filter((job) => (job.type.startsWith('deploy') || job.type === 'export') && job.status !== 'running').length
   useEffect(() => {
-    if (!signedIn) return
+    if (!signedIn || target !== 'doxbrix') return
     let current = true
     void api<{ url: string | null }>('/api/deployment/site')
       .then((payload) => { if (current) setSiteUrl(payload.url) })
       .catch(() => undefined)
     return () => { current = false }
-  }, [signedIn, settledDeploys])
+  }, [signedIn, settledDeploys, target])
   const recordedUrl = deployments.entries.find((entry) => entry.status === 'succeeded' && entry.url)?.url
   const publishedUrl = siteUrl ?? (recordedUrl && !recordedUrl.includes('/editor?project=') ? recordedUrl : undefined)
 
@@ -2325,17 +3236,24 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
   }
   const deploy = async (dryRun: boolean) => {
     if (busy) return
-    if (!signedIn) {
+    if (target === 'doxbrix' && !signedIn) {
       setSignInRequired(true)
       return
     }
     setSignInRequired(false)
-    if (!dryRun && !chosenVisibility) {
+    if (target === 'doxbrix' && !dryRun && !chosenVisibility) {
       setChoice(isPublic ? 'public' : 'private')
       setDialog('first')
       return
     }
     await start(isPublic ? 'public' : 'private', dryRun)
+  }
+  const saveDeployment = () => act(() => patch('/api/project', { deployment }), 'Deployment settings saved')
+  const exportSite = () => act(() => post('/api/export', { basePath: deployment.basePath }), 'Static export started')
+  const saveProviderToken = async () => {
+    if (target !== 'netlify' && target !== 'vercel') return
+    const result = await act(() => post('/api/deployment/credentials', { target, token: providerToken }), `${targetLabel} token saved outside the project`)
+    if (result !== undefined) setProviderToken('')
   }
   const confirmFirstDeploy = async () => {
     setDialog(null)
@@ -2378,31 +3296,46 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
 
     <PageHeader
       title="Deploy"
-      description="Deploy the generated documentation to Doxbrix. Configured product sources are never included."
+      description="Export a self-hostable site or publish it to a configured host. Product sources are never included."
       actions={publishedUrl
         ? <a class="btn secondary md" href={publishedUrl} target="_blank" rel="noreferrer"><Icon name="external" size={16} />View deployed docs</a>
         : undefined}
     />
+    {deploymentSync.stale && <StaleFormNotice onResync={deploymentSync.resync} />}
+
+    <section class="deploy-target-picker" aria-label="Deployment target">
+      {([
+        ['doxbrix', 'Doxbrix', 'Managed hosting with private or public access'],
+        ['github-pages', 'GitHub Pages', 'Publish the static build to gh-pages'],
+        ['netlify', 'Netlify', 'Upload directly to an existing Netlify site'],
+        ['vercel', 'Vercel', 'Create a production deployment through Vercel'],
+      ] as const).map(([id, label, detail]) => <button type="button" key={id} class={target === id ? 'selected' : ''} aria-pressed={target === id} onClick={() => setDeployment({ ...deployment, target: id, ...(id === 'netlify' ? { apiUrl: 'https://api.netlify.com' } : id === 'vercel' ? { apiUrl: 'https://api.vercel.com' } : id === 'doxbrix' ? { apiUrl: account?.apiUrl ?? 'https://app.doxbrix.com' } : {}) })}>
+        <strong>{label}</strong><small>{detail}</small>
+      </button>)}
+    </section>
 
     <section class="publish-card">
       <header class="publish-card-head">
         <span class="publish-card-icon"><Icon name="publish" size={20} /></span>
         <div>
-          <h2>Deploy to Doxbrix</h2>
-          <p>{chosenVisibility
+          <h2>Deploy to {targetLabel}</h2>
+          <p>{target === 'doxbrix' && chosenVisibility
             ? `This documentation publishes ${isPublic ? 'publicly' : 'privately'} — no further prompts.`
-            : 'The first deployment asks who can see the documentation.'}</p>
+            : target === 'doxbrix' ? 'The first deployment asks who can see the documentation.' : 'Doxloop builds and validates the same portable static bundle before publishing.'}</p>
         </div>
-        {signedIn
+        {target === 'doxbrix' && (signedIn
           ? <Badge tone="good" icon="check">Signed in</Badge>
-          : <Badge tone="warn" icon="alert">Not signed in</Badge>}
+          : <Badge tone="warn" icon="alert">Not signed in</Badge>)}
       </header>
 
       <dl class="publish-destination">
-        <div><dt>Project</dt><dd>{deployment.name}</dd></div>
-        <div><dt>Address</dt><dd><code class="mono">{deployment.slug}</code></dd></div>
-        <div><dt>Doxbrix</dt><dd><code class="mono">{deployment.apiUrl}</code></dd></div>
-        <div class="publish-destination-visibility">
+        <div><dt>Project name</dt><dd><input class="input" value={deployment.name} onInput={(event) => setDeployment({ ...deployment, name: event.currentTarget.value })} /></dd></div>
+        <div><dt>Slug</dt><dd><input class="input mono" value={deployment.slug} onInput={(event) => setDeployment({ ...deployment, slug: event.currentTarget.value })} /></dd></div>
+        {(target === 'doxbrix' || target === 'netlify' || target === 'vercel') && <div><dt>API URL</dt><dd><input class="input mono" value={deployment.apiUrl} onInput={(event) => setDeployment({ ...deployment, apiUrl: event.currentTarget.value })} /></dd></div>}
+        {target === 'netlify' && <div><dt>Site ID</dt><dd><input class="input mono" placeholder="Netlify site ID" value={deployment.siteId ?? ''} onInput={(event) => setDeployment({ ...deployment, siteId: event.currentTarget.value })} /></dd></div>}
+        {target === 'vercel' && <><div><dt>Project ID or name</dt><dd><input class="input mono" value={deployment.projectId ?? ''} onInput={(event) => setDeployment({ ...deployment, projectId: event.currentTarget.value })} /></dd></div><div><dt>Team ID (optional)</dt><dd><input class="input mono" value={deployment.teamId ?? ''} onInput={(event) => setDeployment({ ...deployment, teamId: event.currentTarget.value })} /></dd></div></>}
+        {target === 'github-pages' && <><div><dt>Branch</dt><dd><input class="input mono" value={deployment.branch ?? 'gh-pages'} onInput={(event) => setDeployment({ ...deployment, branch: event.currentTarget.value })} /></dd></div><div><dt>Base path (optional)</dt><dd><input class="input mono" placeholder="/repository" value={deployment.basePath ?? ''} onInput={(event) => setDeployment({ ...deployment, basePath: event.currentTarget.value })} /></dd></div></>}
+        {target === 'doxbrix' && <div class="publish-destination-visibility">
           <dt>Visibility</dt>
           <dd>
             <span class={`visibility-pill ${isPublic ? 'public' : 'private'}`}><Icon name={isPublic ? 'cloud' : 'lock'} size={13} />{isPublic ? 'Public' : 'Private'}</span>
@@ -2410,10 +3343,17 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
               ? <button type="button" class="publish-link-button" onClick={() => { setChoice(isPublic ? 'public' : 'private'); setDialog('change') }}>Change</button>
               : <small>Chosen on first deploy</small>}
           </dd>
-        </div>
+        </div>}
       </dl>
 
-      {signedIn
+      <div class="deploy-config-actions"><Button icon="check" onClick={() => void saveDeployment()}>Save target settings</Button></div>
+      {(target === 'netlify' || target === 'vercel') && <div class="deploy-token-row">
+        <label><span>{targetLabel} access token</span><input class="input mono" type="password" autocomplete="off" placeholder="Stored outside this project" value={providerToken} onInput={(event) => setProviderToken(event.currentTarget.value)} /></label>
+        <Button disabled={providerToken.length < 8} onClick={() => void saveProviderToken()}>Save token</Button>
+        <small>You can also use <code>{target === 'netlify' ? 'DOXLOOP_NETLIFY_TOKEN' : 'DOXLOOP_VERCEL_TOKEN'}</code>.</small>
+      </div>}
+
+      {target === 'doxbrix' && (signedIn
         ? <div class="publish-account-row">
           <span class="avatar">{account?.user?.email.slice(0, 1).toUpperCase()}</span>
           <span class="publish-account-identity">
@@ -2428,10 +3368,29 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
             <strong>Not signed in</strong>
             <small>{account?.detail ?? 'Deploying needs a connected Doxbrix account.'}</small>
           </span>
-          <Button tone="primary" icon="key" onClick={() => { setSignInRequired(false); void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started') }}>Sign in with browser</Button>
-        </div>}
+          {signingIn
+            ? <Button tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${signingIn.id}/cancel`), 'Sign-in cancelled')}>Cancel sign-in</Button>
+            : <Button tone="primary" icon="key" onClick={() => { setSignInRequired(false); void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started') }}>Sign in with browser</Button>}
+        </div>)}
 
-      {signInRequired && !signedIn && <div class="publish-signin-required" role="alert">
+      {target === 'doxbrix' && signingIn && <div class="publish-signin-pending" role="status" aria-live="polite">
+        <Icon name="external" size={16} />
+        <span>
+          <strong>Finish signing in in your browser.</strong>
+          <small>Doxbrix opened in a new browser tab. Approve the sign-in there; this page updates as soon as the account is connected.</small>
+        </span>
+        <a href={`/api/jobs/${signingIn.id}/log`} target="_blank" rel="noreferrer">Show log</a>
+      </div>}
+      {target === 'doxbrix' && failedLogin && <div class="publish-signin-required" role="alert">
+        <Icon name="alert" size={16} />
+        <span>
+          <strong>Sign-in did not complete.</strong>
+          <small>{jobFailureReason(failedLogin) ?? 'The sign-in stopped before an account was connected. Try again.'}</small>
+        </span>
+        <Button size="sm" onClick={() => setDismissedLoginId(failedLogin.id)}>Dismiss</Button>
+      </div>}
+
+      {target === 'doxbrix' && signInRequired && !signedIn && <div class="publish-signin-required" role="alert">
         <Icon name="alert" size={16} />
         <span>
           <strong>Sign in with Doxbrix to deploy the documentation.</strong>
@@ -2440,13 +3399,14 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
       </div>}
 
       <footer class="publish-card-actions">
-        <Button class="publish-deploy-button" tone="primary" icon="publish" busy={busy} onClick={() => void deploy(false)}>Deploy to Doxbrix</Button>
+        <Button class="publish-deploy-button" tone="primary" icon="publish" busy={busy} onClick={() => void deploy(false)}>Deploy to {targetLabel}</Button>
         <Button disabled={busy} onClick={() => void deploy(true)}>Dry run</Button>
-        <small>A dry run validates and builds the bundle without uploading anything.</small>
+        <Button disabled={busy} onClick={() => void exportSite()}>Export folder + zip</Button>
+        <small>A dry run validates and leaves a zip in <code>.doxloop/exports</code> without uploading.</small>
       </footer>
     </section>
 
-    {activeDeploy && <DeployProgress job={activeDeploy} generator={state.project?.generator} act={act} streamConnected={streamConnected} />}
+    {shownDeploy && <DeployProgress job={shownDeploy} generator={state.project?.generator} act={act} streamConnected={streamConnected} onDismiss={shownDeploy.status === 'running' ? undefined : () => setDismissedDeployId(shownDeploy.id)} />}
 
     <Panel
       class="history-panel"
@@ -2462,15 +3422,23 @@ const SETTINGS_SECTIONS = [
   ['general', 'General', 'Project identity and defaults', 'settings'],
   ['experience', 'Audience and voice', 'Writing style and accessibility', 'book'],
   ['capture', 'Visual evidence', 'Application screenshots', 'preview'],
+  ['branding', 'Branding', 'Logo, colours, and fonts', 'sparkle'],
   ['tools', 'Generator', 'Active documentation generator', 'publish'],
 ] as const
 
-function Settings({ state, act }: { state: UiState; act: Action }) {
+type SettingsSection = typeof SETTINGS_SECTIONS[number][0]
+
+function Settings({ state, act, onError }: { state: UiState; act: Action; onError: (error: string) => void }) {
   const project = state.project!
-  const [section, setSection] = useState<typeof SETTINGS_SECTIONS[number][0]>('general')
-  const [identity, setIdentity] = useState({ title: project.title, defaultAgent: project.defaultAgent ?? '' })
-  const [docs, setDocs] = useState({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), termsText: termText(project.documentation.terminology) })
-  const [application, setApplication] = useState({
+  const params = useSearchParams()
+  const requestedSection = params.get('section')
+  const section: SettingsSection = SETTINGS_SECTIONS.some(([id]) => id === requestedSection) ? requestedSection as SettingsSection : 'general'
+  const setSection = (next: SettingsSection) => setLocation('settings', { section: next })
+  // Forms reseed from the project after a save or a reload; unsaved edits are
+  // kept and flagged instead of being replaced underneath the reader.
+  const [identity, setIdentity, identitySync] = useSeededForm(() => ({ title: project.title, defaultAgent: project.defaultAgent ?? '' }), JSON.stringify([project.title, project.defaultAgent]))
+  const [docs, setDocs, docsSync] = useSeededForm(() => ({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), terms: termsFromRecord(project.documentation.terminology) }), JSON.stringify(project.documentation))
+  const [application, setApplication, applicationSync] = useSeededForm(() => ({
     baseUrl: project.application?.baseUrl ?? '',
     source: project.application?.source ?? '',
     readyPath: project.application?.readyPath ?? '',
@@ -2480,17 +3448,19 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
     workflow: project.application?.screenshots?.workflow ?? '',
     viewportWidth: String(project.application?.screenshots?.viewport?.width ?? 1440),
     viewportHeight: String(project.application?.screenshots?.viewport?.height ?? 900),
-  })
+    loginPath: project.application?.authentication?.loginPath ?? '',
+  }), JSON.stringify(project.application ?? null))
   const [applicationReadiness, setApplicationReadiness] = useState<ApplicationReadiness>()
   const [testingApplication, setTestingApplication] = useState(false)
-  const applicationPayload = { baseUrl: application.baseUrl, source: application.source, readyPath: application.readyPath, screenshots: { policy: application.policy, highlight: application.highlight, viewport: { width: application.viewportWidth, height: application.viewportHeight }, startPath: application.startPath, workflow: application.workflow } }
+  const applicationPayload = { baseUrl: application.baseUrl, source: application.source, readyPath: application.readyPath, screenshots: { policy: application.policy, highlight: application.highlight, viewport: { width: application.viewportWidth, height: application.viewportHeight }, startPath: application.startPath, workflow: application.workflow }, authentication: { loginPath: application.loginPath } }
   const testApplication = async () => {
     setTestingApplication(true)
     try { setApplicationReadiness(await post<ApplicationReadiness>('/api/application/readiness', applicationPayload)) }
     catch { setApplicationReadiness(undefined) }
     finally { setTestingApplication(false) }
   }
-  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), preferredExamples: splitComma(docs.preferredExamplesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: parseTerms(docs.termsText) } }), 'Documentation preferences saved')
+  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), preferredExamples: splitComma(docs.preferredExamplesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: recordFromTerms(docs.terms) } }), 'Documentation preferences saved')
+  const unsavedTerms = JSON.stringify(recordFromTerms(docs.terms)) !== JSON.stringify(project.documentation.terminology)
   return <>
     <PageHeader title="Settings" description="Shape the documentation experience for this workspace." />
     <div class="settings">
@@ -2501,15 +3471,21 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
       </nav>
       <div class="stack">
         {section === 'general' && <Panel title="Project identity" description="The name and default documentation tool used across this workspace.">
+          {identitySync.stale && <StaleFormNotice onResync={identitySync.resync} />}
           <div class="form-grid">
             <Field label="Site title"><Input value={identity.title} onInput={(event) => setIdentity({ ...identity, title: event.currentTarget.value })} /></Field>
             <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => setIdentity({ ...identity, defaultAgent: event.currentTarget.value })}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
           </div>
           <KeyValues items={[['Content directory', <code class="mono">{project.contentDir || 'Project root'}</code>], ['Generator', generatorLabel(state.generators, project.generator)], ['Workspace', <code class="mono">{state.root ?? state.cwd}</code>]]} />
+          <details class="agent-capabilities-details" open={identity.defaultAgent === 'gemini'}>
+            <summary>What each assistant supports</summary>
+            <AgentCapabilityMatrix selected={identity.defaultAgent || undefined} />
+          </details>
           <div class="form-actions"><Button tone="primary" onClick={() => void act(() => patch('/api/project', identity), 'Identity settings saved')}>Save changes</Button></div>
         </Panel>}
 
         {section === 'experience' && <Panel title="Audience and voice" description="These preferences guide every documentation run, so results stay consistent.">
+          {docsSync.stale && <StaleFormNotice onResync={docsSync.resync} />}
           <div class="form-grid">
             <Field label="Primary audience"><Input value={docs.primaryAudience ?? ''} placeholder="Developers integrating our API" onInput={(event) => setDocs({ ...docs, primaryAudience: event.currentTarget.value })} /></Field>
             <Field label="Audiences" hint="Separate multiple audiences with commas"><Input value={docs.audiencesText} placeholder="Developers, API consumers, administrators" onInput={(event) => setDocs({ ...docs, audiencesText: event.currentTarget.value })} /></Field>
@@ -2522,40 +3498,46 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
             <Field label="Design direction"><Input value={docs.designDirection ?? ''} placeholder="Compact, task-led developer documentation" onInput={(event) => setDocs({ ...docs, designDirection: event.currentTarget.value })} /></Field>
             <Field label="Standards profile"><Input value={docs.standardsProfile} onInput={(event) => setDocs({ ...docs, standardsProfile: event.currentTarget.value })} /></Field>
             <Field label="Style guide"><Input value={docs.styleGuide} onInput={(event) => setDocs({ ...docs, styleGuide: event.currentTarget.value })} /></Field>
-            <Field label="Preferred terminology" hint="One “term = replacement” per line"><Textarea rows={5} value={docs.termsText} onInput={(event) => setDocs({ ...docs, termsText: event.currentTarget.value })} /></Field>
+            <Field label="Preferred terminology" hint="Product vocabulary with its meaning or preferred wording. Feeds every run and the glossary page." wide><TermsEditor value={docs.terms} onChange={(terms) => setDocs({ ...docs, terms })} /></Field>
             <Field label="Content exclusions" hint="One item per line"><Textarea rows={5} value={docs.exclusionsText} onInput={(event) => setDocs({ ...docs, exclusionsText: event.currentTarget.value })} /></Field>
             <Field label="Instructions" hint="Additional guidance reused for future documentation runs" wide><Textarea rows={5} value={docs.customInstructions} placeholder="Use concise explanations and include TypeScript examples." onInput={(event) => setDocs({ ...docs, customInstructions: event.currentTarget.value })} /></Field>
           </div>
           <div class="form-actions"><Button tone="primary" onClick={() => void saveDocs()}>Save changes</Button></div>
         </Panel>}
+        {section === 'experience' && <GlossaryPanel act={act} onError={onError} unsavedTerms={unsavedTerms} onOpenPage={(path) => setLocation('pages', { path }, 'push')} />}
+
+        {section === 'branding' && <BrandingPanel act={act} onError={onError} {...(state.preview?.running && state.preview.url ? { previewUrl: state.preview.url } : {})} onPreviewStart={() => post<{ url: string }>('/api/preview/start', { open: false }).then((result) => result.url).catch((cause) => { onError(message(cause)); return undefined })} />}
 
         {section === 'capture' && <>
           <Panel title="Application screenshots" description="Configure a safe local or test application for guide screenshots.">
+            {applicationSync.stale && <StaleFormNotice onResync={applicationSync.resync} />}
             <div class="form-grid">
               <Field label="Application base URL"><Input value={application.baseUrl} placeholder="http://localhost:3000" onInput={(event) => setApplication({ ...application, baseUrl: event.currentTarget.value })} /></Field>
               <Field label="Product source"><Select value={application.source} onChange={(event) => setApplication({ ...application, source: event.currentTarget.value })}><option value="">None</option>{project.sources.map((source) => <option value={source.name}>{source.name}</option>)}</Select></Field>
               <Field label="Ready path"><Input value={application.readyPath} placeholder="/health" onInput={(event) => setApplication({ ...application, readyPath: event.currentTarget.value })} /></Field>
               <Field label="Default starting route"><Input value={application.startPath} placeholder="/settings/team" onInput={(event) => setApplication({ ...application, startPath: event.currentTarget.value })} /></Field>
+              <Field label="Sign-in route" hint="Where the browser sign-in opens; leave empty when the app redirects to its login page"><Input value={application.loginPath} placeholder="/login" onInput={(event) => setApplication({ ...application, loginPath: event.currentTarget.value })} /></Field>
               <Field label="Screenshot policy"><Select value={application.policy} onChange={(event) => setApplication({ ...application, policy: event.currentTarget.value })}><option value="requested">Only when requested</option><option value="auto">Automatically for UI workflows</option><option value="off">Never</option></Select></Field>
               <Field label="Viewport width"><Input type="number" min="320" max="3840" value={application.viewportWidth} onInput={(event) => setApplication({ ...application, viewportWidth: event.currentTarget.value })} /></Field>
               <Field label="Viewport height"><Input type="number" min="320" max="2160" value={application.viewportHeight} onInput={(event) => setApplication({ ...application, viewportHeight: event.currentTarget.value })} /></Field>
               <Field label="Capture workflow guidance" hint="Safe test state, authentication, actions, and expected outcomes" wide><Textarea rows={4} value={application.workflow} placeholder="Reuse the signed-in demo workspace and synthetic data only." onInput={(event) => setApplication({ ...application, workflow: event.currentTarget.value })} /></Field>
             </div>
             <Toggle checked={application.highlight} onChange={(checked) => setApplication({ ...application, highlight: checked })} label="Highlight captured controls" />
-            {applicationReadiness && <div class={`plan-capture-readiness ${applicationReadiness.reachable ? 'ready' : 'missing'}`}><Icon name={applicationReadiness.reachable ? 'check' : 'info'} size={15} /><span><strong>{applicationReadiness.reachable ? 'Application reachable' : 'Application not reachable'}</strong><small>{applicationReadiness.message}</small></span></div>}
+            {applicationReadiness && <div class={`plan-capture-readiness ${applicationReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={applicationReadiness.status === 'ready' ? 'check' : 'info'} size={15} /><span><strong>{applicationReadiness.status === 'ready' ? 'Application reachable' : applicationReadiness.status === 'authentication-required' ? 'Sign-in needed' : 'Application not reachable'}</strong><small>{applicationReadiness.message}</small></span></div>}
             <div class="form-actions">
               <Button tone="danger" onClick={() => void act(() => patch('/api/project', { application: null }), 'Application configuration removed')}>Remove</Button>
               <Button disabled={!application.baseUrl} busy={testingApplication} onClick={() => void testApplication()}>Test application</Button>
               <Button tone="primary" disabled={!application.baseUrl} onClick={() => void act(() => patch('/api/project', { application: applicationPayload }), 'Application settings saved')}>Save application</Button>
             </div>
           </Panel>
+          <CaptureSignInPanel application={applicationPayload} configured={Boolean(project.application)} onError={onError} onChanged={() => setApplicationReadiness(undefined)} />
         </>}
 
         {section === 'tools' && <Panel title="Documentation generator" description="The generator selected for this workspace." flush>
           <Table head={<><th>Generator</th><th>Status</th></>}>
             {state.generators.filter((generator) => generator.id === project.generator).map((generator) => <tr key={generator.id}>
               <td><div class="cell-lead"><span class="generator-mark">{generator.displayName.slice(0, 1)}</span><div class="row-copy"><strong>{generator.displayName}</strong><small>{generator.id === 'doxbrix' ? 'Built in' : generator.packageName ?? generator.id}</small></div></div></td>
-              <td><Badge tone="good" icon="check">Active</Badge></td>
+              <td><Badge tone="good" icon="check">Active</Badge>{generator.tierLabel && <small class={`generator-tier-label tier-${generator.tier}`} title={generator.tierDescription}>{generator.tierLabel} tier{generator.toolchainLabels?.length ? ` · ${generator.toolchainLabels.join(', ')}` : ''}</small>}</td>
             </tr>)}
           </Table>
         </Panel>}
@@ -2567,10 +3549,110 @@ function Settings({ state, act }: { state: UiState; act: Action }) {
 
 
 
+/** Shown when the project changed elsewhere while a form holds unsaved edits. */
+type CaptureAuthState = {
+  credentials?: { username: string; savedAt: string }
+  session?: { savedAt: string; origin: string; cookies: number; origins: number }
+  signIn: { active: boolean; open?: boolean; url?: string; currentUrl?: string }
+}
+
+/**
+ * Two ways past a login page: a session recorded from a visible Chrome window
+ * the person signs in to by hand, or credentials the agent types by name. Both
+ * are stored outside the project, so this panel only ever shows summaries.
+ */
+function CaptureSignInPanel({ application, configured, onError, onChanged }: { application: Record<string, unknown> & { baseUrl: string }; configured: boolean; onError: (error: string) => void; onChanged: () => void }) {
+  const [auth, setAuth] = useState<CaptureAuthState>()
+  const [busy, setBusy] = useState<'' | 'start' | 'finish' | 'cancel' | 'forget' | 'save' | 'remove'>('')
+  const [credentials, setCredentials] = useState({ username: '', password: '' })
+  const load = async () => {
+    try { setAuth(await api<CaptureAuthState>('/api/application/auth')) }
+    catch (cause) { onError(message(cause)) }
+  }
+  useEffect(() => { if (configured) void load() }, [configured])
+  // While the Chrome window is open, keep an eye on whether it is still there.
+  useEffect(() => {
+    if (!auth?.signIn.active) return
+    const timer = setInterval(() => { void load() }, 2_000)
+    return () => clearInterval(timer)
+  }, [auth?.signIn.active])
+  const run = async (kind: typeof busy, request: () => Promise<CaptureAuthState>) => {
+    setBusy(kind)
+    try {
+      setAuth(await request())
+      onChanged()
+    } catch (cause) {
+      onError(message(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+  const signIn = auth?.signIn
+  return <Panel title="Application sign-in" description="Let the capture browser past a login page without sharing secrets with the agent or the project.">
+    {!configured && <Note>Save the application settings above first. Sign-in details are stored on this computer against the project, never in the repository.</Note>}
+    <div class="capture-signin">
+      <section class="capture-signin-block">
+        <header><strong>Recorded browser session</strong><small>Sign in by hand in a Chrome window Doxloop opens, including MFA, SSO, or passkeys. The signed-in cookies and local storage are saved and loaded into every capture run.</small></header>
+        {auth?.session
+          ? <div class="plan-capture-readiness ready"><Icon name="check" size={15} /><span><strong>Session saved {timeText(auth.session.savedAt)}</strong><small>{auth.session.origin} · {auth.session.cookies} cookie{auth.session.cookies === 1 ? '' : 's'} · {auth.session.origins} storage origin{auth.session.origins === 1 ? '' : 's'}. Sign in again when the application reports the session expired.</small></span></div>
+          : auth && <div class="plan-capture-readiness missing"><Icon name="info" size={15} /><span><strong>No session recorded</strong><small>Screenshots of signed-in screens need a session or credentials.</small></span></div>}
+        {signIn?.active && <Note tone={signIn.open ? 'info' : 'warn'}><span>{signIn.open
+          ? <>A Chrome window is open at {signIn.url}. Complete the sign-in there, wait for the signed-in screen, then choose <strong>Save session</strong>.</>
+          : <>The Chrome window was closed. Choose <strong>Save session</strong> to keep the last signed-in state, or start again.</>}</span></Note>}
+        <div class="form-actions start">
+          {signIn?.active
+            ? <>
+              <Button busy={busy === 'cancel'} onClick={() => void run('cancel', () => post('/api/application/sign-in/cancel'))}>Cancel</Button>
+              <Button tone="primary" icon="check" busy={busy === 'finish'} onClick={() => void run('finish', () => post('/api/application/sign-in/finish'))}>Save session</Button>
+            </>
+            : <>
+              {auth?.session && <Button tone="danger" busy={busy === 'forget'} onClick={() => void run('forget', () => remove('/api/application/session'))}>Forget session</Button>}
+              <Button tone="primary" icon="preview" disabled={!application.baseUrl} busy={busy === 'start'} onClick={() => void run('start', () => post('/api/application/sign-in', application))}>{auth?.session ? 'Sign in again with browser' : 'Sign in with browser'}</Button>
+            </>}
+        </div>
+      </section>
+      <section class="capture-signin-block">
+        <header><strong>Sign-in credentials</strong><small>For a plain username and password form. The agent fills the form by secret name; the capture server substitutes the values and redacts them from every result. Use a test account, never a production one.</small></header>
+        {auth?.credentials && <div class="plan-capture-readiness ready"><Icon name="check" size={15} /><span><strong>Credentials saved for {auth.credentials.username}</strong><small>Saved {timeText(auth.credentials.savedAt)}. Enter new values below to replace them.</small></span></div>}
+        <div class="form-grid">
+          <Field label="Username or email"><Input value={credentials.username} autocomplete="off" placeholder="docs-demo@example.com" onInput={(event) => setCredentials({ ...credentials, username: event.currentTarget.value })} /></Field>
+          <Field label="Password"><Input type="password" value={credentials.password} autocomplete="new-password" placeholder="••••••••" onInput={(event) => setCredentials({ ...credentials, password: event.currentTarget.value })} /></Field>
+        </div>
+        <div class="form-actions start">
+          {auth?.credentials && <Button tone="danger" busy={busy === 'remove'} onClick={() => void run('remove', () => remove('/api/application/credentials'))}>Remove credentials</Button>}
+          <Button tone="primary" disabled={!configured || !credentials.username.trim() || !credentials.password} busy={busy === 'save'} onClick={() => void run('save', async () => { const next = await put<CaptureAuthState>('/api/application/credentials', credentials); setCredentials({ username: '', password: '' }); return next })}>Save credentials</Button>
+        </div>
+      </section>
+    </div>
+  </Panel>
+}
+
+function StaleFormNotice({ onResync }: { onResync: () => void }) {
+  return <div class="stale-form-notice" role="status">
+    <Icon name="info" size={14} />
+    <span>These settings changed elsewhere while you were editing. Your unsaved edits are still here.</span>
+    <Button size="sm" onClick={onResync}>Load the saved values</Button>
+  </div>
+}
+
 type Action = <T>(run: () => Promise<T>, success?: string, refresh?: boolean) => Promise<T | undefined>
 
 /** Proposal states a reviewer can still act on. */
 const OPEN_STATUSES = ['awaiting-review', 'partially-applied', 'conflicted']
+
+const SETTLED_JOB_VISIBLE_MS = 30 * 60_000
+
+/**
+ * The newest job matching the filter that finished recently enough to still
+ * matter, unless the reader dismissed it. Jobs arrive newest first.
+ */
+export function recentSettledJob(jobs: UiJob[], matches: (job: UiJob) => boolean, dismissedId: string | undefined, now = Date.now()): UiJob | undefined {
+  const job = jobs.find(matches)
+  if (!job || job.status === 'running' || job.id === dismissedId) return undefined
+  const finished = Date.parse(job.finishedAt ?? job.startedAt)
+  if (Number.isFinite(finished) && now - finished > SETTLED_JOB_VISIBLE_MS) return undefined
+  return job
+}
 
 function statusTone(status: string): string {
   if (['applied', 'accepted', 'approved', 'generated', 'succeeded', 'pass', 'added'].includes(status)) return 'good'
@@ -2601,6 +3683,45 @@ function gitServiceLabel(repository: string, provider?: 'git' | 'github'): strin
 
 function validRuns(value: UiState['runs']): Proposal[] {
   return Array.isArray(value) ? value : []
+}
+
+function isFailed(value: unknown): value is Failed {
+  return Boolean(value && typeof value === 'object' && typeof (value as Failed).error === 'string')
+}
+
+/**
+ * The server reports validation as either a result or a failure object.
+ * Treat the failure as "unavailable" rather than reading `.pages` off it.
+ */
+export function validationState(value: Validation | Failed | undefined): { ok: true; result: Validation } | { ok: false; reason: string } {
+  if (!value) return { ok: false, reason: 'Validation has not run yet.' }
+  if (isFailed(value) || !Array.isArray((value as Validation).pages)) return { ok: false, reason: `Validation could not run: ${isFailed(value) ? value.error : 'unexpected response'}` }
+  return { ok: true, result: { ...value, issues: Array.isArray(value.issues) ? value.issues : [] } }
+}
+
+export function validationHeadline(result: Pick<Validation, 'errors' | 'warnings'>): string {
+  if (result.errors > 0) return `${result.errors} validation error${result.errors === 1 ? '' : 's'}${result.warnings > 0 ? ` and ${result.warnings} warning${result.warnings === 1 ? '' : 's'}` : ''}`
+  if (result.warnings > 0) return `${result.warnings} validation warning${result.warnings === 1 ? '' : 's'}`
+  return 'Documentation validates cleanly'
+}
+
+export function driftState(value: DriftSummary | Failed | undefined): { ok: true; drift: DriftSummary } | { ok: false; reason: string } {
+  if (!value) return { ok: false, reason: 'Freshness has not been checked yet.' }
+  if (isFailed(value) || !Array.isArray((value as DriftSummary).pages)) return { ok: false, reason: `Freshness could not be checked: ${isFailed(value) ? value.error : 'unexpected response'}` }
+  return { ok: true, drift: value }
+}
+
+/** The agent updates run with: the project default when detected, else the first detected agent. */
+export function preferredAgent(agents: AgentState[] | undefined, defaultAgent: string | undefined): AgentState | undefined {
+  if (!agents?.length) return undefined
+  return agents.find((agent) => agent.name === defaultAgent && agent.executable) ?? agents.find((agent) => agent.preferred && agent.executable) ?? agents.find((agent) => agent.executable)
+}
+
+function agentSignInLabel(status: string): string {
+  if (status === 'authenticated') return 'is signed in'
+  if (status === 'unauthenticated' || status === 'missing') return 'needs sign-in'
+  if (status === 'unknown') return 'sign-in unknown'
+  return status.replaceAll('-', ' ')
 }
 
 function documentationExists(state: UiState): boolean {
@@ -2681,7 +3802,7 @@ function clampNumber(raw: string, min: number, max: number): number {
 
 function numberBudget(
   budget: SyncConfig['budget'],
-  key: 'maxRunsPerDay' | 'maxMinutes',
+  key: 'maxRunsPerDay' | 'maxMinutes' | 'maxUsd',
   raw: string,
 ): NonNullable<SyncConfig['budget']> {
   const next = { ...budget }

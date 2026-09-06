@@ -47,7 +47,15 @@ project.
 
 ### 1. Install
 
-Doxloop requires Node.js 22.13 or later.
+Doxloop requires Node.js 22.13 or later. Install Google Chrome for application screenshots and sign-in capture; text-only authoring does not need a browser.
+
+Try the bundled demo first, without an agent or a model charge:
+
+```sh
+npx @doxbrix/doxloop demo
+```
+
+Then adopt an existing documentation folder in the setup wizard, or create a new project. Run the read-only documentation audit before requesting an update. Start with the five-page preset: review the plan and its page, screenshot, and time caps before generation. Planning and writing are separate agent runs; each may take several minutes and uses your agent subscription or billing. Doxloop reports observed durations when comparable completed runs exist; a time cap is not a price quote.
 
 ```bash
 npm install --global @doxbrix/doxloop
@@ -68,12 +76,20 @@ This is the only command you need. It starts a loopback-only server on
 browser. When no documentation project exists yet, Doxloop opens the setup
 wizard. When one exists, it opens the workspace for that project.
 
+Already have a documentation site? The wizard's first step offers **Use
+existing documentation folder**, which adopts a Docusaurus, MkDocs, Hugo,
+Sphinx, VitePress, Starlight, Nextra, Markdoc, Jekyll, or Doxbrix site as it
+is: Doxloop reads the site's configuration, lists its pages, and changes none
+of them. Every project you open is remembered, and the project switcher in the
+sidebar moves between them.
+
 ### 3. Set up the workspace
 
 The wizard walks through five steps and creates nothing until the last one.
 
-1. **Workspace.** Enter a folder name for the documentation project and the
-   title readers will see.
+1. **Workspace.** Choose **Start new** and enter a folder name for the
+   documentation project and the title readers will see, or choose **Use
+   existing documentation folder** to adopt a site you already have.
 2. **Sources.** Choose **Add source**, then **Source code** for a local folder
    or a Git repository, or **OpenAPI spec** to upload a file or paste a public
    URL. Private repositories accept a username and a personal access token that
@@ -111,8 +127,8 @@ and the documentation project is still unchanged.
 ### 5. Review, preview, and deploy
 
 1. Open **Review** to compare the current and proposed versions of every file.
-   Accept one change, one file, or everything, edit a page directly, or ask
-   the agent to revise a specific file.
+   Accept one change, one file, or everything, or ask the agent to revise a
+   specific file.
 2. Choose **Preview docs** in the top bar to open the rendered site locally.
 3. Open **Deploy**, sign in with your browser, run a **Dry run** if you want to
    validate and build without uploading, and choose **Deploy to Doxbrix**.
@@ -187,26 +203,113 @@ left navigation shows:
 | **Overview** | Follow the loop from sources through plan, write, review, and deploy. See what needs your review, overall coverage, the published address, and recent activity. |
 | **Sources** | Connect and test local folders, Git repositories, and OpenAPI specifications. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
 | **Create** or **Update** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
-| **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, edit pages, ask the agent to revise, and optionally prepare a pull request branch. |
-| **Deploy** | Sign in to Doxbrix, set visibility, run a dry run, deploy, open the published site, and see the **Deployment history**. |
-| **Settings** | Change the site title, default agent, audience and voice, application screenshot settings, and see the active generator. |
+| **Pages** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
+| **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, ask the agent to revise, and optionally prepare a pull request branch. |
+| **Deploy** | Export a static folder/zip or publish to Doxbrix, GitHub Pages, Netlify, or Vercel, with target-specific settings and **Deployment history**. |
+| **Settings** | Change the site title, default agent, audience and voice, terminology and the generated glossary, application screenshot settings, branding (logo, colours, fonts), and see the active generator. |
 
 **Preview docs** in the top bar starts a local preview of the current
-documentation and opens it in a new tab. **New documentation project** in the
-sidebar explains how to start another workspace.
+documentation and opens it in a new tab. The project name at the top of the
+sidebar is the **project switcher**: it lists the projects you opened recently,
+opens any folder, imports an existing documentation site, or starts the setup
+wizard for a new project. **New documentation project** at the bottom of the
+sidebar opens the same wizard.
+
+### Work with more than one project
+
+Doxloop shows one project at a time and remembers every project it has opened.
+Open the project switcher and pick a recent project to move to it in one click;
+both stay in the list. **Open folder…** opens a folder that is already a
+Doxloop project, or offers to import it when it only holds a documentation
+site. **Import existing documentation…** asks for the folder, shows the
+detected generator, content directory, page count, and the first pages, lets
+you correct any of them, and then adopts the folder: Doxloop writes its own
+project file, an evidence map that marks every page as not yet verified, and
+the agent skills, and runs a read-only discovery pass. No page is modified.
+Sites built with a generator other than Doxbrix need that generator's Doxloop
+package; the import dialog offers to add it to the folder's `package.json`.
+
+Switching is refused while a plan, generation, edit, or deployment is running
+in the current project; a local preview is stopped, because it serves the
+project that started it.
+
+### Edit a page
+
+Run `doxloop ui`, open **Pages**, and select one or more existing pages. Tell
+the agent what should change, optionally allow related navigation or image
+updates, and wait for the isolated proposal. The live documentation remains
+unchanged until you compare the rendered and source versions and choose
+**Accept**; you can also **Reject**, **Refine**, or **Undo** the edit.
+
+Some changes need no agent at all. **Page metadata** under the page header
+edits the title, description, sidebar icon, canonical URL, and social image
+directly, with validation and rollback. **Insert an image…** in the composer
+picks or uploads an image and adds it to the instruction.
+
+### Arrange the navigation
+
+Open **Pages → Navigation**. Drag rows to reorder pages, drop them into a
+section to group them, or use Alt with the arrow keys; select a row to rename
+its label, choose an icon, or hide it. Pages that exist but are not in the
+sidebar are listed under **Add page**. **Save navigation** validates the tree,
+writes it to the generator's own file (`docs.json` for Doxbrix, the `nav` list
+in `mkdocs.yml` for MkDocs), and reloads the preview beside the editor.
+Generators whose navigation lives in code are named instead of edited. The
+same editor appears in plan review, where it arranges the sections of a
+proposed plan.
+
+### Brand the site
+
+Open **Settings → Branding**. For Doxbrix sites, choose the logo and favicon
+from the project's images (or upload them), set the primary colour and the
+light and dark accents and backgrounds, pick the colour mode and code theme,
+and name the body, heading, and code fonts. The preview below reloads on save.
+Other generators keep their theme in their own configuration file, which the
+panel names.
+
+### Manage images and files
+
+Open **Pages → Images & files**. Upload or drop images and files into the
+generator's asset directory, see which pages embed each one, edit the alt text
+across all of them at once, replace a file in place, or delete one that no page
+uses. Screenshots in a proposal that is still under review can be replaced from
+the capture gallery before you accept it.
+
+### Write release notes
+
+When a connected source is a Git checkout, the **Update** page offers
+**Release notes** beside the usual documentation request. Choose the
+repository, the version label, and the two refs that bound the release;
+Doxloop reads the commits, changed files, and the matching changelog section
+between them and gives the planner that inventory as the only evidence for the
+release page.
+
+### Generate a glossary
+
+Under **Settings → Audience and voice**, terminology is edited as term and
+definition rows. **Generate glossary page** writes a glossary page from those
+rows in the generator's format, adds it to the navigation, and records it in
+the evidence map, so the vocabulary the team curates is visible to readers
+without an agent run.
 
 ### Change project settings
 
-Open **Settings** instead of editing `.doxloop/project.json` by hand. Its four
+Open **Settings** instead of editing `.doxloop/project.json` by hand. Its five
 sections manage:
 
 - **General**: site title and the default documentation agent;
 - **Audience and voice**: primary audience, audiences, experience level,
   locale, accessibility target, tone, priority outcomes, preferred examples,
-  design direction, terminology, exclusions, and standing instructions;
+  design direction, terminology and the generated glossary page, exclusions,
+  and standing instructions;
 - **Visual evidence**: the safe application URL, ready path, starting route,
-  screenshot policy, viewport, capture workflow guidance, and a **Test
-  application** check; and
+  sign-in route, screenshot policy, viewport, capture workflow guidance, a
+  **Test application** check, and **Application sign-in** for login-protected
+  apps: record a signed-in browser session from a Chrome window Doxloop opens,
+  or save a test account's credentials that the capture server types for the
+  agent;
+- **Branding**: logo, favicon, colours, colour mode, and fonts for Doxbrix
+  sites, or the theme file to edit for other generators; and
 - **Generator**: the generator selected for this workspace.
 
 Generator changes are intentionally not performed in place because changing
@@ -241,22 +344,26 @@ Open **Sources** and choose **Monitoring** to configure it:
 2. Choose a **Schedule**: daily, weekdays, weekly, monthly, or a custom
    interval in minutes or hours. Times use your device timezone.
 3. Optionally open **Advanced watch scope and budgets** to set watched and
-   ignored paths, the maximum agent minutes and runs per day, and how old
-   verified evidence may become before it is re-verified.
+   ignored paths, the maximum agent minutes and runs per day, a maximum
+   Claude spend per run, and how old verified evidence may become before it
+   is re-verified.
 4. Choose **Save and install**.
 
-Doxloop installs a local scheduled job that checks the configured branch
-through the provider's read-only API. When the commit changed, it downloads
-that exact commit as isolated evidence and drafts a proposal under **Review**.
-Monitoring never modifies the product source, never installs repository hooks,
-never needs a model API key, and never publishes. Choose **Check now** to run a
-cycle immediately and **Disable** to remove the schedule while keeping the
+Doxloop installs a local scheduled job that checks every connected source. A
+Git repository source is checked through the provider's read-only API; when
+the commit changed, that exact commit is downloaded as isolated evidence. A
+local folder is checked in place: a Git checkout by its HEAD commit and
+working tree, any other folder by comparing its files with the content
+recorded at the last sync. When documentation went stale, the job drafts a
+proposal under **Review**. Monitoring never modifies the product source, never
+fetches or pulls into a checkout, never installs repository hooks, never needs
+a model API key, and never publishes. Choose **Check now** to run a cycle
+immediately; the result appears as a notice in the control center and under
+**Recent activity**. **Disable** removes the schedule while keeping the
 settings.
 
-Scheduled monitoring needs a Git repository source so the check can run without
-a local checkout. Lock files and snapshots are ignored by default. Test files
-are not, because the authoring workflow reads tests as evidence of supported
-behaviour.
+Lock files and snapshots are ignored by default. Test files are not, because
+the authoring workflow reads tests as evidence of supported behaviour.
 
 ## Review what changed and why
 
@@ -271,9 +378,9 @@ The **Review** page keeps the full review in one place:
 4. **Why this change** shows the supporting evidence, reader-facing claims,
    affected public interfaces, assumptions to verify, and validation results.
 5. **Accept change**, **Accept file**, and **Accept all** apply the selection.
-   **Edit page** lets you change a page directly and record whether the
-   evidence still applies. **Ask agent to revise** regenerates only the
-   selected scope and supersedes the earlier proposal.
+   **Ask agent to revise** regenerates only the selected scope and supersedes
+   the earlier proposal. Applied page files link back to **Pages** for a new
+   agent-driven edit.
 6. **Preview documentation** renders the proposal, **Prepare PR branch**
    stages the accepted result in a Git branch, and **Push & create PR** opens
    a pull request.
@@ -300,13 +407,20 @@ deployment. Validation errors stop a deployment; warnings are reported.
 Choose **Preview docs** at any time to open the local site. Then open
 **Deploy**:
 
-1. Choose **Sign in with browser**. Doxloop uses a device sign-in flow and
-   keeps the token on your machine.
-2. Check the project name, address, destination, and **Visibility**.
-   Deployments are private by default; **Public** means anyone with the URL
-   can open the documentation.
-3. Choose **Dry run** to validate and build the bundle without uploading.
-4. Choose **Deploy to Doxbrix**, then **View deployed docs** when it finishes.
+1. Select Doxbrix, GitHub Pages, Netlify, or Vercel and save its settings.
+   Netlify and Vercel tokens are stored outside the project; GitHub Pages uses
+   the repository's existing `origin` remote.
+2. Choose **Dry run** to validate, build, and leave a timestamped zip in
+   `.doxloop/exports` without uploading.
+3. Choose **Export folder + zip** for self-hosting, or deploy to the selected
+   target. Doxbrix deployments can be private or public.
+
+The same export is available from the command line:
+
+```bash
+doxloop export --out ./site-export --zip
+doxloop deploy --target github-pages --base-path /my-repository
+```
 
 Authoring never publishes automatically, and configured product sources are
 never included in a deployment.
@@ -317,20 +431,28 @@ Doxbrix is built in and selected by default. External generators use a separate
 adapter package that Doxloop installs into the documentation project when you
 choose the generator in the setup wizard.
 
-| Generator | Package | Source format | Build output |
-| --- | --- | --- | --- |
-| **Doxbrix** | Included | Markdown and Doxbrix MDX | Doxbrix bundle |
-| Docusaurus | `@doxbrix/doxloop-generator-docusaurus` | Markdown and MDX | `build/` |
-| MkDocs Material | `@doxbrix/doxloop-generator-mkdocs` | Material Markdown | `site/` |
-| Sphinx | `@doxbrix/doxloop-generator-sphinx` | reStructuredText | `_build/html/` |
-| Hugo | `@doxbrix/doxloop-generator-hugo` | Markdown | `public/` |
-| VitePress | `@doxbrix/doxloop-generator-vitepress` | Markdown | `docs/.vitepress/dist/` |
-| Markdoc | `@doxbrix/doxloop-generator-markdoc` | Markdoc | `dist/` |
-| Nextra | `@doxbrix/doxloop-generator-nextra` | MDX | `out/` |
-| Starlight | `@doxbrix/doxloop-generator-starlight` | Markdown and MDX | `dist/` |
-| Jekyll | `@doxbrix/doxloop-generator-jekyll` | Markdown and Liquid | `_site/` |
-| Static HTML | `@doxbrix/doxloop-generator-static` | HTML | `site/` |
+| Generator | Tier | Needs | Package | Source format | Build output |
+| --- | --- | --- | --- | --- | --- |
+| **Doxbrix** | Full | Nothing extra | Included | Markdown and Doxbrix MDX | Static `build/` plus Doxbrix bundle |
+| Docusaurus | Full | Node.js 22.13+ | `@doxbrix/doxloop-generator-docusaurus` | Markdown and MDX | `build/` |
+| MkDocs Material | Full | Python 3.9+ | `@doxbrix/doxloop-generator-mkdocs` | Material Markdown | `site/` |
+| Sphinx | Supported | Python 3.9+ | `@doxbrix/doxloop-generator-sphinx` | reStructuredText | `_build/html/` |
+| Hugo | Supported | Hugo | `@doxbrix/doxloop-generator-hugo` | Markdown | `public/` |
+| VitePress | Supported | Node.js 22.13+ | `@doxbrix/doxloop-generator-vitepress` | Markdown | `docs/.vitepress/dist/` |
+| Starlight | Supported | Node.js 22.13+ | `@doxbrix/doxloop-generator-starlight` | Markdown and MDX | `dist/` |
+| Markdoc | Basic | Node.js 22.13+ | `@doxbrix/doxloop-generator-markdoc` | Markdoc | `dist/` |
+| Nextra | Basic | Node.js 22.13+ | `@doxbrix/doxloop-generator-nextra` | MDX | `out/` |
+| Jekyll | Basic | Ruby + Bundler | `@doxbrix/doxloop-generator-jekyll` | Markdown and Liquid | `_site/` |
+| Static HTML | Basic | Node.js 22.13+ | `@doxbrix/doxloop-generator-static` | HTML | `site/` |
 
+The tier describes Doxloop's adapter, not the framework. **Full** generators
+have their navigation, components, and diagrams validated and documented and
+are built end to end in CI. **Supported** generators validate nested
+navigation wherever the configuration can be read and report "navigation not
+verified" instead of guessing when it cannot. **Basic** generators scaffold,
+preview, and build, with navigation checks limited to the files the scaffold
+owns. The wizard's **Tools** step shows the tier beside each generator and
+checks that the required toolchain is installed before the project is created.
 Doxbrix is the recommended first choice. The
 [public generator guide](https://doxloop.sites.doxbrix.com/generators) covers
 selection, native build requirements, and migration.
@@ -352,3 +474,46 @@ Browse all documentation at <https://doxloop.sites.doxbrix.com/>.
 and run unmodified copies for lawful personal or commercial purposes. Copying,
 modification, incorporation into other products, and redistribution are not
 permitted without explicit written permission from Doxbrix.
+
+### Direct page editing and bounded runs
+
+In **Pages**, open **Edit text directly** to edit Markdown/MDX, preview a draft,
+compare it with the saved version, and save without an agent. Browser drafts
+survive reloads. A fingerprint conflict keeps your draft and prevents an
+overwrite. Saves normally mark evidence for review; preserve verification only
+when the change is wording alone. Direct edits have persistent undo in
+**Manage pages → Recent direct edits**. Undo refuses to replace newer changes.
+
+**Manage pages** creates, moves and deletes pages while updating navigation,
+links and evidence in one validated transaction. Moves preserve or redirect
+old URLs; deletion requires a replacement when other pages link to the target.
+Doxbrix, MkDocs and autogenerated Docusaurus navigation are supported directly;
+custom coded navigation requires a reviewed agent proposal. Unsupported native
+formats are reported before any files change.
+
+Proposal review supports direct text edits, per-file and per-change rejection
+with reasons, and mixed accept/reject decisions. Rejecting remaining changes
+keeps already accepted work. A fully decided mixed proposal can be undone;
+rejected changes do not advance the source freshness baseline.
+
+New UI runs default to a small first batch: five pages, no screenshots and
+15 minutes per authoring attempt. **Run limits** and the plan review expose
+maximum pages, screenshot artifacts and minutes. Approval refuses oversized
+plans; mark extra pages **Later** or raise the limits explicitly. Generated
+proposals outside the approved page scope or artifact limits remain in the
+recovery workspace. The timer bounds each attempt; retries consume another
+attempt. Planned coverage earns no documented-page credit.
+
+Monitoring coordinates scheduled and manual authoring across processes,
+reserves daily starts in a persistent ledger, and pauses while a proposal
+needs review. Scheduled authoring requires verified agent sign-in. Monitoring
+logs rotate at 1 MiB, retaining one previous file; rotation does not reset the
+budget.
+
+GitHub Pages publishing permits `gh-pages` or `doxloop-pages/<name>`, rejects
+the checked-out source branch, and only updates existing branches marked as
+Doxloop deployments. Each update preserves deployment history and protects
+against concurrent remote changes. Use a fresh `doxloop-pages/<name>` for a
+legacy branch without the ownership marker.
+
+See [editing, auditing, versions, and review workflows](docs/review-workflows.md) for comments, bulk operations, read-only imports, reader verification, and the hosted pull-request impact check.

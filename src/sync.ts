@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstat, readFile, readlink, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { lstat, readFile, readdir, readlink, writeFile } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathExists, readJson } from './fs.js'
 import { diffOpenApi, loadOpenApiSource, openApiChangedIdentifiers } from './openapi.js'
@@ -10,6 +10,12 @@ import { remoteHead } from './remote-source.js'
 import type { SourceBinding, SourceChange, SyncState } from './types.js'
 
 const SPEC_BASELINE = 'openapi-spec'
+/**
+ * Baseline marker for a local folder that is not a Git repository. Such a
+ * source is compared by content: the recorded per-file digests name exactly
+ * which files changed, so drift can still be traced to individual pages.
+ */
+export const LOCAL_CONTENT_BASELINE = 'local-content'
 
 export const SYNC_STATE_FILE = join('.doxloop', 'sync-state.json')
 
@@ -56,13 +62,23 @@ export async function recordSyncState(
       }
       continue
     }
-    const commit = await headCommit(resolve(root, source.path))
+    const sourcePath = resolve(root, source.path)
+    const commit = await headCommit(sourcePath)
     if (commit) {
-      const sourcePath = resolve(root, source.path)
       state.sources[source.name] = {
         commit,
         recordedAt: new Date().toISOString(),
         contentFingerprint: await sourceContentFingerprint(sourcePath),
+      }
+      continue
+    }
+    if (await pathExists(sourcePath)) {
+      const manifest = await localSourceManifest(sourcePath)
+      state.sources[source.name] = {
+        commit: LOCAL_CONTENT_BASELINE,
+        recordedAt: new Date().toISOString(),
+        contentFingerprint: manifest.fingerprint,
+        files: manifest.files,
       }
     }
   }
@@ -92,7 +108,7 @@ export async function collectSourceChanges(
     }
     const head = await headCommit(path)
     if (!head) {
-      changes.push({ ...source, kind: 'not-git' })
+      changes.push(await collectLocalContentChange(source, path, state))
       continue
     }
     const uncommittedFiles = await uncommittedChanges(path)
@@ -125,6 +141,47 @@ export async function collectSourceChanges(
     })
   }
   return changes
+}
+
+/**
+ * A folder without Git history is compared against the file digests recorded
+ * at the last sync, so a scheduled check on a plain folder still names the
+ * files that changed.
+ */
+async function collectLocalContentChange(
+  source: SourceBinding,
+  path: string,
+  state: SyncState,
+): Promise<SourceChange> {
+  const record = state.sources[source.name]
+  if (!record || record.commit !== LOCAL_CONTENT_BASELINE || !record.files) {
+    return { ...source, kind: 'no-baseline', head: LOCAL_CONTENT_BASELINE, uncommittedFiles: [] }
+  }
+  const manifest = await localSourceManifest(path)
+  const changedFiles = record.contentFingerprint === manifest.fingerprint
+    ? []
+    : manifestChanges(record.files, manifest.files)
+  return {
+    ...source,
+    kind: changedFiles.length === 0 ? 'unchanged' : 'changed',
+    baseline: LOCAL_CONTENT_BASELINE,
+    head: LOCAL_CONTENT_BASELINE,
+    changedFiles,
+    uncommittedFiles: [],
+  }
+}
+
+/** Name-status lines, in Git's format, describing how one manifest became another. */
+export function manifestChanges(before: Record<string, string>, after: Record<string, string>): string[] {
+  const lines: string[] = []
+  for (const file of Object.keys(after).sort()) {
+    if (!(file in before)) lines.push(`A\t${file}`)
+    else if (before[file] !== after[file]) lines.push(`M\t${file}`)
+  }
+  for (const file of Object.keys(before).sort()) {
+    if (!(file in after)) lines.push(`D\t${file}`)
+  }
+  return lines
 }
 
 /** Stable content fingerprints used to invalidate an approved planning checkpoint. */
@@ -258,7 +315,7 @@ Update only documentation affected by this structural delta; the new baseline is
         )
       case 'unchanged':
         return withUncommitted(
-          `${heading}: no source-content changes since the last documentation sync (${short(change.baseline)}).`,
+          `${heading}: no source-content changes since the last documentation sync (${change.baseline === LOCAL_CONTENT_BASELINE ? 'compared by content' : short(change.baseline)}).`,
           change.uncommittedFiles,
         )
       case 'changed':
@@ -266,6 +323,9 @@ Update only documentation affected by this structural delta; the new baseline is
           return change.changedFiles.length > 0
             ? `${heading}: the remote repository changed (${short(change.baseline)} -> ${short(change.head)}).\nChanged files reported by ${change.remote.provider}:\n${fileList(change.changedFiles)}\nThe current commit was downloaded into this isolated read-only evidence snapshot; inspect files there directly.`
             : `${heading}: the remote repository changed (${short(change.baseline)} -> ${short(change.head)}). Inspect the isolated evidence snapshot directly.`
+        }
+        if (change.baseline === LOCAL_CONTENT_BASELINE) {
+          return `${heading}: files changed since the last documentation sync (compared by content; this folder has no Git history).\nChanged files:\n${fileList(change.changedFiles)}\nInspect the current files directly.`
         }
         return withUncommitted(
           change.changedFiles.length > 0
@@ -335,14 +395,34 @@ async function uncommittedChanges(path: string): Promise<string[]> {
 }
 
 async function sourceContentFingerprint(path: string): Promise<string> {
+  return (await localSourceManifest(path)).fingerprint
+}
+
+export interface LocalSourceManifest {
+  /** Source-relative portable paths to their content digests. */
+  files: Record<string, string>
+  /** One digest over every path and content, in the historical format. */
+  fingerprint: string
+}
+
+/**
+ * Every file that counts as source content, with its digest. Git repositories
+ * contribute tracked and untracked-but-not-ignored files; a plain folder is
+ * walked directly with the same exclusions a repository would apply by
+ * convention. Secrets are never read.
+ */
+export async function localSourceManifest(path: string): Promise<LocalSourceManifest> {
   const output = await git(path, [
     'ls-files',
     '-co',
     '--exclude-standard',
     '-z',
   ])
-  const files = (output ?? '').split('\0').filter(Boolean).sort()
+  const files = output === undefined
+    ? await walkPlainFolder(path)
+    : output.split('\0').filter(Boolean).sort()
   const hash = createHash('sha256')
+  const manifest: Record<string, string> = {}
   for (const file of files) {
     if (isSensitiveSourcePath(file)) continue
     const absolute = resolve(path, file)
@@ -362,8 +442,33 @@ async function sourceContentFingerprint(path: string): Promise<string> {
     hash.update('\0')
     if (content !== undefined) hash.update(content)
     hash.update('\0')
+    manifest[file] = createHash('sha256').update(content ?? '').digest('hex')
   }
-  return hash.digest('hex')
+  return { files: manifest, fingerprint: hash.digest('hex') }
+}
+
+const PLAIN_FOLDER_IGNORED = new Set(['.git', 'node_modules', '.doxloop-sources', '.doxloop'])
+
+async function walkPlainFolder(root: string): Promise<string[]> {
+  const files: string[] = []
+  const visit = async (directory: string): Promise<void> => {
+    let entries
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (PLAIN_FOLDER_IGNORED.has(entry.name)) continue
+      const absolute = join(directory, entry.name)
+      if (entry.isDirectory()) await visit(absolute)
+      else if (entry.isFile() || entry.isSymbolicLink()) {
+        files.push(relative(root, absolute).split('\\').join('/'))
+      }
+    }
+  }
+  await visit(root)
+  return files.sort()
 }
 
 function isSensitiveSourcePath(path: string): boolean {
@@ -417,7 +522,18 @@ function isSourceRecords(value: unknown): value is SyncState['sources'] {
         ((record as { contentFingerprint?: unknown }).contentFingerprint ===
           undefined ||
           typeof (record as { contentFingerprint?: unknown })
-            .contentFingerprint === 'string'),
+            .contentFingerprint === 'string') &&
+        isFileManifest((record as { files?: unknown }).files),
     )
+  )
+}
+
+function isFileManifest(value: unknown): boolean {
+  if (value === undefined) return true
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.values(value).every((digest) => typeof digest === 'string')
   )
 }
