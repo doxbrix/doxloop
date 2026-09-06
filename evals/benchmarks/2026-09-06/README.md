@@ -43,8 +43,10 @@ Repeat with `node scripts/ci-existing-sites.mjs`. These are representative
 existing-site fixtures, not an audit of customer production sites.
 
 Python container command restrictions and fail-closed behavior passed targeted
-tests. A Docker daemon was unavailable on this machine, so actual container
-execution was not claimed; unconfigured Python checks stay skipped.
+tests. The follow-through run also passed a real digest-pinned container probe
+locally and in hosted CI. Fixture access works; host-file access, writes to
+read-only mounts, and network access are blocked. Unconfigured Python checks
+stay skipped, and execution never falls back to host Python.
 
 The follow-through existing-site run passed six native builds for each generator, including version and locale creation and undo. Screenshots: [Docusaurus](docusaurus-existing.png), [MkDocs](mkdocs-existing.png). The real container boundary result is in `python-boundary.json`.
 

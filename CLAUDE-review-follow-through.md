@@ -24,7 +24,7 @@ Licensing is excluded at the user's request.
 - Package audit: zero source maps or marketing/social assets in the tarball.
 - Full typecheck, skill validation, and source-boundary checks passed.
 - The repeat real generation benchmark completed planning/generation/acceptance and scored 62/100 (floor 60), with zero quality failures and 19 warnings. Both review and generation observations are recorded separately in the benchmark baseline.
-- The implementation is published on `codex/claude-review-follow-through`. Hosted CI run [34030432814](https://github.com/doxbrix/doxloop/actions/runs/34030432814) passed all 14 jobs on commit `7fa8de2`: unit/typecheck/skills, browser E2E, existing-site round trips, the real container check, and all ten external generators. A subsequent PR-impact edge-case fix passes all three focused script tests and will receive the same hosted checks. Licensing files are unchanged.
+- The implementation is published on `codex/claude-review-follow-through`. Hosted CI run [34030432814](https://github.com/doxbrix/doxloop/actions/runs/34030432814) passed all 14 jobs on commit `7fa8de2`: unit/typecheck/skills, browser E2E, existing-site round trips, the real container check, and all ten external generators. The subsequent PR-impact edge-case fix passes all three focused script tests. Every push to the review branch receives the same hosted checks; see the [branch runs](https://github.com/doxbrix/doxloop/actions/workflows/ci.yml?query=branch%3Acodex%2Fclaude-review-follow-through) for validation of the latest revision. Licensing files are unchanged.
 
 Implementation boundaries and usage are documented in [review workflows](docs/review-workflows.md).
 
