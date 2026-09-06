@@ -190,7 +190,7 @@ let regressions = []
 try {
   const baseline = JSON.parse(await readFile(baselinePath, 'utf8'))
   regressions = summaries.flatMap((summary) => {
-    const previous = baseline.results?.find((entry) => entry.agent === summary.agent && entry.model === summary.model && entry.case === summary.case && (entry.mode ?? 'review') === summary.mode)
+    const previous = baseline.results?.find((entry) => entry.agent === summary.agent && entry.model === summary.model && entry.case === summary.case && (entry.mode ?? 'review') === summary.mode && (entry.reasoning ?? 'unspecified') === (summary.reasoning ?? 'unspecified') && entry.fixtureDigest === summary.fixtureDigest)
     if (!previous) return []
     if (summary.score === null || previous.score === null) return []
     const delta = summary.score - previous.score
@@ -202,7 +202,15 @@ try {
 if (regressions.length > 0) failures += regressions.length
 const matrix = { schemaVersion: 1, contractVersion: '1.0.0', generatedAt: new Date().toISOString(), regressionThreshold: options.regressionThreshold, results: summaries, regressions }
 await writeFile(join(resultsRoot, 'matrix.json'), `${JSON.stringify(matrix, null, 2)}\n`)
-if (options.approveBaseline) await writeFile(baselinePath, `${JSON.stringify(matrix, null, 2)}\n`)
+if (options.approveBaseline) {
+  if (failures > 0) throw new Error('A failing evaluation cannot replace the approved baseline. Inspect its reports first.')
+  let previous = { results: [] }
+  try { previous = JSON.parse(await readFile(baselinePath, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const key = (entry) => JSON.stringify([entry.agent, entry.model, entry.mode ?? 'review', entry.case, entry.reasoning ?? 'unspecified'])
+  const replacements = new Map(summaries.map((entry) => [key(entry), entry]))
+  for (const entry of previous.results ?? []) if (!replacements.has(key(entry))) replacements.set(key(entry), entry)
+  await writeFile(baselinePath, `${JSON.stringify({ ...matrix, results: [...replacements.values()] }, null, 2)}\n`)
+}
 process.stdout.write(`Evaluation reports: ${resultsRoot}\n`)
 if (regressions.length > 0) process.stdout.write(`Release blocked by ${regressions.length} agent/model regression${regressions.length === 1 ? '' : 's'}.\n`)
 process.exitCode = failures === 0 ? 0 : 1
