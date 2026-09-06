@@ -1,18 +1,34 @@
 import { readFile } from 'node:fs/promises'
-import { resolve, relative } from 'node:path'
+import { resolve, relative, basename } from 'node:path'
 
 export function affectedPages(project, evidence, changedFiles, documentationRoot = '.') {
-  const matches = (path, glob) => new RegExp('^' + glob.split('**').map((part) => part.split('*').map((piece) => piece.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*') + '$').test(path)
+  const matches = (path, glob) => {
+    let pattern = ''
+    for (let index = 0; index < glob.length; index++) {
+      const character = glob[index]
+      if (character === '*' && glob[index + 1] === '*') {
+        index++
+        if (glob[index + 1] === '/') { pattern += '(?:.*/)?'; index++ }
+        else pattern += '.*'
+      } else if (character === '*') pattern += '[^/]*'
+      else pattern += character.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    }
+    return new RegExp('^' + pattern + '$').test(path)
+  }
   const affected = []
   const unavailable = []
   for (const source of project.sources ?? []) {
-    if (source.remote || !source.path) { unavailable.push(source.name); continue }
+    if (source.remote || !source.path || /^https?:\/\//i.test(source.path)) { unavailable.push(source.name); continue }
     const prefix = relative(process.cwd(), resolve(documentationRoot, source.path)).replace(/\\/g, '/')
-    if (prefix.startsWith('..') || prefix.startsWith('/')) { unavailable.push(source.name); continue }
+    if (prefix === '..' || prefix.startsWith('../') || prefix.startsWith('/')) { unavailable.push(source.name); continue }
+    const changedSourceFile = Boolean(prefix && changedFiles.includes(prefix))
     const paths = changedFiles.filter((path) => !prefix || path.startsWith(prefix + '/')).map((path) => prefix ? path.slice(prefix.length + 1) : path)
     for (const [page, entry] of Object.entries(evidence.pages ?? {})) {
       const references = entry.sources?.filter((item) => item.source === source.name) ?? []
       const hits = paths.filter((path) => references.some((item) => !item.paths?.length || item.paths.some((glob) => matches(path, glob))))
+      // A whole source file (for example an OpenAPI specification) changing can
+      // affect any of its referenced operations; file globs cannot prove otherwise.
+      if (changedSourceFile && references.length) hits.push(basename(prefix))
       if (hits.length) affected.push({ page, source: source.name, paths: hits })
     }
   }
