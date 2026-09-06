@@ -1,0 +1,100 @@
+{
+  "score": 28,
+  "hardGates": "fail",
+  "summary": "Not release-ready: the only documented CI workflow contradicts the CLI contract, is too thin to complete the persisted outcome, and has no evidence-map coverage.",
+  "findings": [
+    {
+      "id": "incorrect-cli-option",
+      "severity": "blocker",
+      "title": "Documented JSON option is wrong",
+      "description": "The guide tells platform engineers to use `--output json`, but the product CLI reads `--format` and returns usage error status `2` for unsupported formats. The documented CI command will not produce the intended JSON mode.",
+      "pages": [
+        "docs/index.md"
+      ],
+      "evidence": [
+        "docs/index.md:8-11",
+        "../product/src/cli.ts:3-5",
+        "../product/tests/cli-contract.ts:4-5"
+      ],
+      "recommendation": "Replace `--output json` with the verified `--format json` option and document the default `text` format and unsupported-format exit behavior."
+    },
+    {
+      "id": "incorrect-invalid-exit-status",
+      "severity": "blocker",
+      "title": "Invalid input exit behavior is reversed",
+      "description": "The guide says invalid configuration exits successfully so a pipeline can continue, but the CLI returns `1` when the validated path does not end in `.yaml`, and the contract test explicitly expects a nonzero status for invalid input. This would cause CI handling to be implemented incorrectly.",
+      "pages": [
+        "docs/index.md"
+      ],
+      "evidence": [
+        "docs/index.md:14-15",
+        "../product/src/cli.ts:6",
+        "../product/tests/cli-contract.ts:4-5"
+      ],
+      "recommendation": "Document that valid `.yaml` input returns `0`, invalid input returns `1`, and unsupported commands or formats return `2`; show CI examples that fail the job or branch on these statuses intentionally."
+    },
+    {
+      "id": "thin-primary-workflow",
+      "severity": "blocker",
+      "title": "Primary CI validation outcome is a stub",
+      "description": "The persisted brief prioritizes validating a configuration file in CI, but the only page has about 24 words of prose and Doxloop reports `thin-page`. It lacks prerequisites, installation, expected results, failure handling, a complete CI sequence, and a next step.",
+      "pages": [
+        "docs/index.md"
+      ],
+      "evidence": [
+        ".doxloop/project.json documentation.priorityOutcomes",
+        "docs/index.md:1-15",
+        "Doxloop test: warning thin-page docs/index.md",
+        "../product/package.json:1-6"
+      ],
+      "recommendation": "Expand the page or split it into a compact getting-started/CI guide that covers installation from the package bin, the validated command, expected exit codes, supported input shape, expected output mode, and recovery for invalid command, format, and input cases."
+    },
+    {
+      "id": "missing-cli-reference",
+      "severity": "major",
+      "title": "CLI contract is not documented",
+      "description": "The product exposes a CLI named `config-check` with a `validate` command, one positional input, `--format` with `text` and `json`, and distinct exit statuses. There is no command reference or input/output section where platform engineers can look up automation-safe behavior.",
+      "pages": [
+        "docs/index.md"
+      ],
+      "evidence": [
+        "../product/package.json:4-5",
+        "../product/src/cli.ts:1-7",
+        "../product/tests/cli-contract.ts:4-5",
+        "docs/docs.json:8-13"
+      ],
+      "recommendation": "Add a Doxbrix-native command reference section or page covering syntax, arguments, flags, defaults, accepted values, output format behavior, and exit statuses."
+    },
+    {
+      "id": "missing-evidence-map",
+      "severity": "major",
+      "title": "Existing page has no evidence map coverage",
+      "description": "`.doxloop/evidence-map.json` does not exist, so the only reader-facing page cannot be traced back to the configured product source during future source synchronization. The review prompt specifically requires reporting uncovered pages.",
+      "pages": [
+        "docs/index.md"
+      ],
+      "evidence": [
+        "missing .doxloop/evidence-map.json",
+        "docs/index.md",
+        "../product/src/cli.ts",
+        "../product/tests/cli-contract.ts"
+      ],
+      "recommendation": "Create `.doxloop/evidence-map.json` for `docs/index.md` with narrow source paths such as `src/cli.ts`, `tests/cli-contract.ts`, and `package.json`, plus verification metadata."
+    },
+    {
+      "id": "weak-doxbrix-navigation-metadata",
+      "severity": "minor",
+      "title": "Navigation lacks semantic Doxbrix metadata",
+      "description": "The Doxbrix manifest reaches the only page, but the space and page entries do not include semantic icons, and the page frontmatter has no matching icon. This weakens native Doxbrix presentation consistency, though it is not the main release blocker.",
+      "pages": [
+        "docs/docs.json",
+        "docs/index.md"
+      ],
+      "evidence": [
+        "docs/docs.json:5-13",
+        "doxloop-doxbrix references/manifest.md navigation icon requirement"
+      ],
+      "recommendation": "Add meaningful icons to the Documentation space and page navigation, and mirror the page icon in frontmatter when the page remains in the manifest."
+    }
+  ]
+}

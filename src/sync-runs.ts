@@ -1,3 +1,6 @@
+import { safePath } from './direct-edit.js'
+import { approvedBatchLimits, batchLimits } from './batch-limits.js'
+import { withProjectLock } from './project-lock.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import {
@@ -15,7 +18,10 @@ import { tmpdir } from 'node:os'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual, promisify } from 'node:util'
 import {
+  EDIT_MIN_MAX_TURNS,
+  EDIT_TURNS_PER_PAGE,
   agentExitMessage,
+  editPrompt,
   runAuthor,
   type ClaudeEffortLevel,
   type ReasoningLevel,
@@ -32,6 +38,7 @@ import {
   type SyncRunContext,
 } from './history.js'
 import { loadProject, pageExtensions as documentationPageExtensions, readPage } from './project.js'
+import { listPages as listDocumentationPages, resolveEditScope } from './pages.js'
 import { recordReviewPreference } from './review-learning.js'
 import {
   SCREENSHOT_MANIFEST_FILE,
@@ -45,7 +52,7 @@ import {
 } from './screenshot-workflow.js'
 import { changedSourcePaths, collectSourceChanges, formatSourceChanges, sourceSnapshotFingerprints } from './sync.js'
 import { lineHunks, textLines } from './text-diff.js'
-import { formatValidation, validateProject } from './validation.js'
+import { formatValidation, isStarterContent, validateProject } from './validation.js'
 import type {
   AgentName,
   DocumentationPlan,
@@ -70,6 +77,8 @@ const BEFORE = 'before'
 const OPERATIONAL_BEFORE = 'operational-before'
 const ACCEPTANCE_BEFORE = 'acceptance-before'
 const APPLIED = 'applied'
+/** Content hashes of every file as the run workspace was created. */
+const BASELINE_FILE = 'baseline.json'
 
 const EXCLUDED_PREFIXES = [
   '.git',
@@ -91,6 +100,15 @@ const EXCLUDED_PREFIXES = [
   '.doxloop/review-preferences.json',
   '.doxloop/screenshot-manifest.json',
   '.doxloop/deliveries',
+  '.doxloop/locks',
+  '.doxloop/direct-edits',
+  '.doxloop/monitor-budget.json',
+  '.doxloop/monitor-interval.json',
+  '.doxloop/comments.json',
+  '.doxloop/sync.log.1',
+  // Raw browser captures are run scratch space. Adopted images are placed
+  // beside the pages that use them, so the staging folder is never a change.
+  '.doxloop/capture-output',
   // History is a derived local index. Copying it into a proposal workspace would
   // offer the database back as a binary documentation change.
   '.doxloop/doxloop.db',
@@ -127,6 +145,7 @@ const BINARY_EXTENSIONS = new Set([
 ])
 
 export interface CreateSyncRunOptions {
+  id?: string
   root: string
   project: DoxloopProject
   drift: DriftResult
@@ -142,6 +161,7 @@ export interface CreateSyncRunOptions {
   /** Existing proposal whose isolated workspace seeds a targeted revision. */
   revisionOf?: string
   revisionRequest?: { instruction: string; changeIds: string[]; hunkIds?: string[] }
+  editRequest?: SyncRun['editRequest']
   /** User-selected authoring controls for a manual workspace update. */
   authoring?: {
     mode?: 'create' | 'update'
@@ -161,22 +181,50 @@ export interface AcceptSelection {
   hunkIds?: string[]
 }
 
+export interface AcceptOptions {
+  /**
+   * Apply changes flagged `changedDuringRun` even though they replace an
+   * edit made in the project while the agent ran.
+   */
+  confirmChangedDuringRun?: boolean
+}
+
 export interface ReviseSyncRunInput {
   instruction: string
   changeIds: string[]
   hunkIds?: string[]
   author?: typeof runAuthor
+  trigger?: SyncRunTrigger
 }
 
 /** Generate and validate a proposal without changing the real documentation. */
 export async function createSyncRun(options: CreateSyncRunOptions): Promise<SyncRun> {
-  const revisionScope = options.revisionOf
-    ? await resolveRevisionScope(options.root, options.revisionOf, options.revisionRequest)
+  return withProjectLock(options.root, 'authoring', () => createSyncRunLocked(options), 0)
+}
+
+async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncRun> {
+  const previous = options.revisionOf ? await readSyncRun(options.root, options.revisionOf) : undefined
+  const inheritedEditRequest = options.editRequest ?? previous?.editRequest
+  const editRequest = inheritedEditRequest
+    ? { ...inheritedEditRequest, paths: [...new Set(inheritedEditRequest.paths)] }
     : undefined
-  const id = runId()
+  const revisionScope = previous?.editRequest && editRequest
+    ? await resolveEditScope(options.root, options.project, editRequest.paths, editRequest.allowRelated)
+    : options.revisionOf
+      ? await resolveRevisionScope(options.root, options.revisionOf, options.revisionRequest)
+      : editRequest
+        ? await resolveEditScope(options.root, options.project, editRequest.paths, editRequest.allowRelated)
+        : undefined
+  const id = options.id ?? createRunId()
+  assertRunId(id)
+  const pageSummaries = editRequest ? await listDocumentationPages(options.root) : []
+  const editPages = editRequest
+    ? editRequest.paths.map((path) => ({ path, title: pageSummaries.find((page) => page.path === path)?.title ?? path.split('/').at(-1) ?? path }))
+    : []
   const directory = runDirectory(options.root, id)
   await mkdir(directory, { recursive: true })
   await ensureRunsIgnored(options.root)
+  if (options.plan) await writeFile(join(directory, 'approved-plan.json'), JSON.stringify(options.plan), { mode: 0o600 })
   const createdAt = new Date().toISOString()
   const sourceSnapshot = await proposalSourceSnapshot(options.root, options.project)
   await snapshotOperationalBefore(options.root, directory)
@@ -184,16 +232,19 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
     schemaVersion: 2,
     id,
     status: 'generating',
-    mode: options.project.sync.mode === 'auto' ? 'auto' : 'propose',
-    trigger: options.trigger ?? 'manual',
+    mode: editRequest ? 'propose' : options.project.sync.mode === 'auto' ? 'auto' : 'propose',
+    trigger: options.trigger ?? (editRequest ? 'edit' : 'manual'),
     createdAt,
-    summary: `Generating a review for ${options.drift.pages.length} stale page${options.drift.pages.length === 1 ? '' : 's'}`,
+    summary: editRequest
+      ? editPages.length === 1 ? `Editing ${editPages[0]!.title}` : `Editing ${editPages.length} pages`
+      : options.plan ? `Writing ${options.plan.pages.filter((page) => ['create', 'update'].includes(page.action)).length} approved pages` : options.authoring ? 'Preparing the requested documentation update' : `Generating a review for ${options.drift.pages.length} stale page${options.drift.pages.length === 1 ? '' : 's'}`,
     sourceSummary: sourceSummary(options.sourceChanges),
     stalePages: options.drift.pages.map((page) => page.page),
     changes: [],
     sourceSnapshot,
     ...(options.authoring?.mode ? { authoringMode: options.authoring.mode } : {}),
     ...(options.plan ? { planId: options.plan.id } : {}),
+    ...(editRequest ? { editRequest } : {}),
     ...(options.revisionOf ? { revisionOf: options.revisionOf } : {}),
     retentionUntil: retentionDate(createdAt),
     revisionRequests: options.revisionRequest ? [{
@@ -207,14 +258,18 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
   }
   await writeRun(options.root, run)
   const history: SyncRunContext = {
-    requestText: options.authoring?.historyRequest ?? options.authoring?.request,
+    requestText: editRequest?.instruction ?? options.authoring?.historyRequest ?? options.authoring?.request,
     agent: options.authoring?.agent ?? options.project.defaultAgent,
     model: options.authoring?.model,
     reasoningEffort: options.authoring?.reasoning ?? options.authoring?.effort,
     runDir: join(SYNC_RUNS_DIRECTORY, id),
   }
   await recordSyncRun(options.root, run, history)
-  const screenshotIntent = normalizeScreenshotIntent(options.authoring?.screenshots)
+  if (editRequest) {
+    const learned = editRequest.followUps.at(-1)?.instruction ?? editRequest.instruction
+    await recordReviewPreference(options.root, { kind: 'edit', paths: editRequest.paths, instruction: learned }).catch(() => undefined)
+  }
+  const screenshotIntent = normalizeScreenshotIntent(options.authoring?.screenshots ?? (editRequest ? 'disabled' : undefined))
   const expectedScreenshots = options.plan ? screenshotPlanSummary(options.plan) : { guides: 0, captures: 0 }
   const changeSummary = options.sourceChanges.length > 0
     ? formatSourceChanges(
@@ -232,7 +287,7 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
   const persisted: RunAuthoringRecord = {
     schemaVersion: 1,
     mode: options.authoring?.mode ?? 'update',
-    trigger: options.trigger ?? 'manual',
+    trigger: options.trigger ?? (editRequest ? 'edit' : 'manual'),
     screenshots: screenshotIntent,
     ...(options.authoring?.request ? { request: options.authoring.request } : {}),
     ...(options.authoring?.historyRequest ? { historyRequest: options.authoring.historyRequest } : {}),
@@ -242,10 +297,11 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
     ...(options.authoring?.model ? { model: options.authoring.model } : {}),
     ...(options.authoring?.reasoning ? { reasoning: options.authoring.reasoning } : {}),
     ...(options.authoring?.effort ? { effort: options.authoring.effort } : {}),
-    ...(options.project.sync.budget?.maxMinutes ? { timeoutMinutes: options.project.sync.budget.maxMinutes } : {}),
+    ...((options.plan || options.project.sync.budget?.maxMinutes) ? { timeoutMinutes: Math.min(options.plan ? batchLimits(options.plan.execution.limits).maxMinutes : 120, options.project.sync.budget?.maxMinutes ?? 120) } : {}),
     ...(changeSummary ? { changeSummary } : {}),
     ...(options.authoringSources ? { authoringSources: options.authoringSources } : {}),
     ...(options.nextSyncState ? { nextSyncState: options.nextSyncState } : {}),
+    ...(editRequest ? { editRequest } : {}),
   }
   await writeFile(join(directory, AUTHORING_FILE), `${JSON.stringify(persisted, null, 2)}\n`, 'utf8')
 
@@ -270,23 +326,42 @@ export async function createSyncRun(options: CreateSyncRunOptions): Promise<Sync
       })
     }
     const revisionBaseline = revisionScope ? await collectFiles(workspace) : undefined
+    const scopedEditPrompt = editRequest ? editPrompt({
+      pages: editPages,
+      instruction: editRequest.instruction,
+      allowRelated: editRequest.allowRelated,
+      followUps: editRequest.followUps,
+    }) : undefined
+    let failureDetail: string | undefined
     const exitCode = await (options.author ?? runAuthor)({
+      onFailure: (detail) => { failureDetail = detail },
       root: workspace,
-      mode: persisted.mode,
+      mode: editRequest ? 'update' : persisted.mode,
       nonInteractive: true,
       recordHistory: false,
+      ...(editRequest ? { recordOperationalState: false } : {}),
       ...(changeSummary ? { changeSummary } : {}),
       ...(options.project.defaultAgent ? { agent: options.project.defaultAgent } : {}),
       ...(options.project.sync.budget?.maxMinutes
         ? { timeoutMinutes: options.project.sync.budget.maxMinutes }
         : {}),
+      ...(options.project.sync.budget?.maxUsd ? { maxBudgetUsd: options.project.sync.budget.maxUsd } : {}),
       ...options.authoring,
+      ...(persisted.timeoutMinutes ? { timeoutMinutes: persisted.timeoutMinutes } : {}),
+      ...(scopedEditPrompt ? { request: scopedEditPrompt } : {}),
+      ...(editRequest ? {
+        maxTurns: Math.max(EDIT_MIN_MAX_TURNS, 40 + EDIT_TURNS_PER_PAGE * editRequest.paths.length),
+        timeoutMinutes: options.project.sync.budget?.maxMinutes ?? 15,
+        tolerateValidationErrors: true,
+        plannedPages: editRequest.paths.length,
+        progressLabel: 'Editing selected pages',
+      } : options.revisionOf ? { progressLabel: 'Revising proposed pages' } : {}),
     })
     if (exitCode !== 0) {
-      throw new DoxloopError(agentExitMessage(exitCode))
+      throw new DoxloopError(agentExitMessage(exitCode, failureDetail))
     }
     if (revisionBaseline && revisionScope) {
-      await assertRevisionStayedInScope(workspace, revisionBaseline, revisionScope)
+      await assertRevisionStayedInScope(workspace, revisionBaseline, revisionScope, Boolean(editRequest))
     }
     const finalized = await finalizeProposalWorkspace({
       context: options,
@@ -338,6 +413,7 @@ export interface RunAuthoringRecord {
   changeSummary?: string
   authoringSources?: DoxloopProject['sources']
   nextSyncState?: SyncState
+  editRequest?: SyncRun['editRequest']
 }
 
 async function readPersistedAuthoring(root: string, id: string): Promise<RunAuthoringRecord | undefined> {
@@ -426,12 +502,41 @@ async function finalizeProposalWorkspace(input: {
     await writeFile(join(directory, 'screenshots.json'), `${JSON.stringify(screenshotResult.manifest, null, 2)}\n`, 'utf8')
   }
   const validation = await validateProject(workspace)
-  if (validation.errors > 0) {
+  if (validation.errors > 0 && !context.editRequest) {
     throw new DoxloopError(
       `The ${input.label} proposal did not pass validation:\n${formatValidation(validation)}`,
     )
   }
   const collected = await collectProposalChanges(context.root, workspace, directory, context.project)
+  if (context.plan) {
+    const limits = approvedBatchLimits(context.plan)
+    const outside: string[] = []
+    let counted = 0
+    for (const page of collected.filter((change) => change.category === 'page')) {
+      const planned = matchPlanPage(context.plan, page.path)
+      if (!planned) {
+        // Every brief tells the agent to replace generated starter pages, and
+        // the plan may put a starter's replacement at a new path. Removing the
+        // scaffold is part of the approved work, not an expansion of it.
+        if (page.kind === 'deleted' && await isStarterFile(join(directory, BEFORE, page.path))) continue
+        outside.push(`${page.path} (${page.kind}, not in the plan)`)
+        continue
+      }
+      if (planned.priority === 'later') outside.push(`${page.path} (deferred to Later)`)
+      else if (planned.action === 'preserve') outside.push(`${page.path} (planned to preserve)`)
+      else if (page.kind === 'deleted' && planned.action !== 'remove') outside.push(`${page.path} (deleted, but planned to ${planned.action})`)
+      counted += 1
+    }
+    if (outside.length > 0) {
+      throw new DoxloopError(`The agent exceeded the approved page batch. The workspace is preserved for recovery; no live pages were changed. Pages outside the approved plan: ${outside.join(', ')}.`)
+    }
+    if (counted > limits.maxPages) {
+      throw new DoxloopError(`The agent exceeded the approved page batch: ${counted} pages changed, but the approved batch allows ${limits.maxPages}. The workspace is preserved for recovery; no live pages were changed.`)
+    }
+    if (screenshotResult.summary.captured > limits.maxScreenshots) {
+      throw new DoxloopError(`The agent exceeded the approved screenshot batch: ${screenshotResult.summary.captured} screenshots captured, but the approved batch allows ${limits.maxScreenshots}. The workspace is preserved for recovery.`)
+    }
+  }
   await assertProposalSourceScopes(workspace, collected, context.project)
   const changes = await enrichProposalRationales(context.root, workspace, collected, context, validation)
   if (changes.length === 0) {
@@ -447,6 +552,7 @@ async function finalizeProposalWorkspace(input: {
       pages: validation.pages.length,
       errors: validation.errors,
       warnings: validation.warnings,
+      ...(context.editRequest && validation.issues.length > 0 ? { issues: validation.issues } : {}),
     },
     screenshots: screenshotResult.summary,
   }
@@ -468,6 +574,9 @@ export interface RecoverSyncRunOptions {
  * validation defect — without paying for another full agent run.
  */
 export async function recoverSyncRun(root: string, id: string, options: RecoverSyncRunOptions = {}): Promise<SyncRun> {
+  return withProjectLock(root, 'authoring', () => recoverSyncRunLocked(root, id, options), 0)
+}
+async function recoverSyncRunLocked(root: string, id: string, options: RecoverSyncRunOptions): Promise<SyncRun> {
   const run = await readSyncRun(root, id)
   if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be recovered.`)
   if (run.status !== 'failed' && run.status !== 'generating') {
@@ -484,7 +593,7 @@ export async function recoverSyncRun(root: string, id: string, options: RecoverS
   const currentSnapshot = await proposalSourceSnapshot(root, project)
   const sourcesChanged = Boolean(run.sourceSnapshot && currentSnapshot !== run.sourceSnapshot)
   const directory = runDirectory(root, id)
-  const plan = await recoveryPlan(workspace, run.planId)
+  const plan = await recoveryPlan(root, directory, run.planId)
   const authoring = await readPersistedAuthoring(root, id)
   const screenshotIntent = normalizeScreenshotIntent(authoring?.screenshots ?? run.screenshots?.intent ?? plan?.execution?.screenshots)
   const history = authoring ? historyContext(id, authoring, project) : {}
@@ -495,6 +604,7 @@ export async function recoverSyncRun(root: string, id: string, options: RecoverS
       project,
       drift: await computeDrift(root, project),
       sourceChanges: await collectSourceChanges(root, project.sources),
+      ...(run.editRequest ? { editRequest: run.editRequest } : {}),
       ...(plan ? { plan } : {}),
       ...(authoring?.nextSyncState ? { nextSyncState: authoring.nextSyncState } : {}),
       authoring: {
@@ -506,6 +616,15 @@ export async function recoverSyncRun(root: string, id: string, options: RecoverS
         ...(authoring?.effort ? { effort: authoring.effort } : {}),
         screenshots: screenshotIntent,
       },
+    }
+    if (run.editRequest) {
+      await restoreWorkspaceSources(workspace, project, originalProjectText)
+      await assertRevisionStayedInScope(
+        workspace,
+        await collectFiles(root),
+        await resolveEditScope(root, project, run.editRequest.paths, run.editRequest.allowRelated),
+        true,
+      )
     }
     const finalized = await finalizeProposalWorkspace({
       context,
@@ -587,6 +706,9 @@ export interface ResumeSyncRunOptions {
  * plan that started it and its review history stay attached.
  */
 export async function resumeSyncRun(root: string, id: string, options: ResumeSyncRunOptions = {}): Promise<SyncRun> {
+  return withProjectLock(root, 'authoring', () => resumeSyncRunLocked(root, id, options), 0)
+}
+async function resumeSyncRunLocked(root: string, id: string, options: ResumeSyncRunOptions): Promise<SyncRun> {
   const run = await readSyncRun(root, id)
   if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be resumed.`)
   if (run.status !== 'failed' && run.status !== 'generating') {
@@ -610,7 +732,7 @@ export async function resumeSyncRun(root: string, id: string, options: ResumeSyn
   const currentSnapshot = await proposalSourceSnapshot(root, project)
   const sourcesChanged = Boolean(run.sourceSnapshot && currentSnapshot !== run.sourceSnapshot)
   const directory = runDirectory(root, id)
-  const plan = await recoveryPlan(workspace, run.planId)
+  const plan = await recoveryPlan(root, directory, run.planId)
   const screenshotIntent = normalizeScreenshotIntent(authoring.screenshots)
   const expectedScreenshots = plan ? screenshotPlanSummary(plan) : { guides: 0, captures: 0 }
   const history = historyContext(id, authoring, project)
@@ -634,16 +756,32 @@ export async function resumeSyncRun(root: string, id: string, options: ResumeSyn
   await recordSyncRun(root, next, history)
   try {
     const originalProjectText = await readFile(join(root, '.doxloop', 'project.json'), 'utf8')
+    const editScope = authoring.editRequest
+      ? await resolveEditScope(root, project, authoring.editRequest.paths, authoring.editRequest.allowRelated)
+      : undefined
+    const editBaseline = editScope ? await collectFiles(root) : undefined
     await rewriteWorkspaceSources(workspace, root, {
       ...project,
       sources: authoring.authoringSources ?? project.sources,
     })
-    const continuation = await continuationBrief(workspace, plan, run, screenshotIntent, authoring.request, sourcesChanged)
+    const editPages = authoring.editRequest
+      ? (await listDocumentationPages(root)).filter((page) => authoring.editRequest!.paths.includes(page.path))
+      : []
+    const originalRequest = authoring.editRequest ? editPrompt({
+      pages: authoring.editRequest.paths.map((path) => ({ path, title: editPages.find((page) => page.path === path)?.title ?? path })),
+      instruction: authoring.editRequest.instruction,
+      allowRelated: authoring.editRequest.allowRelated,
+      followUps: authoring.editRequest.followUps,
+    }) : authoring.request
+    const continuation = await continuationBrief(workspace, plan, run, screenshotIntent, originalRequest, sourcesChanged)
+    let failureDetail: string | undefined
     const exitCode = await (options.author ?? runAuthor)({
+      onFailure: (detail) => { failureDetail = detail },
       root: workspace,
       mode: authoring.mode,
       nonInteractive: true,
       recordHistory: false,
+      ...(authoring.editRequest ? { recordOperationalState: false } : {}),
       request: continuation,
       screenshots: screenshotIntent,
       ...(authoring.changeSummary ? { changeSummary: authoring.changeSummary } : {}),
@@ -652,9 +790,21 @@ export async function resumeSyncRun(root: string, id: string, options: ResumeSyn
       ...(authoring.reasoning ? { reasoning: authoring.reasoning } : {}),
       ...(authoring.effort ? { effort: authoring.effort } : {}),
       ...(authoring.timeoutMinutes ? { timeoutMinutes: authoring.timeoutMinutes } : {}),
+      ...(project.sync.budget?.maxUsd ? { maxBudgetUsd: project.sync.budget.maxUsd } : {}),
+      progressLabel: 'Continuing the interrupted authoring run',
+      ...(authoring.editRequest ? {
+        maxTurns: Math.max(EDIT_MIN_MAX_TURNS, 40 + EDIT_TURNS_PER_PAGE * authoring.editRequest.paths.length),
+        timeoutMinutes: authoring.timeoutMinutes ?? project.sync.budget?.maxMinutes ?? 15,
+        tolerateValidationErrors: true,
+        plannedPages: authoring.editRequest.paths.length,
+      } : {}),
     })
     if (exitCode !== 0) {
-      throw new DoxloopError(agentExitMessage(exitCode))
+      throw new DoxloopError(agentExitMessage(exitCode, failureDetail))
+    }
+    if (editScope && editBaseline) {
+      await restoreWorkspaceSources(workspace, project, originalProjectText)
+      await assertRevisionStayedInScope(workspace, editBaseline, editScope, true)
     }
     const context: CreateSyncRunOptions = {
       root,
@@ -662,6 +812,7 @@ export async function resumeSyncRun(root: string, id: string, options: ResumeSyn
       drift: await computeDrift(root, project),
       sourceChanges: await collectSourceChanges(root, project.sources),
       trigger: authoring.trigger,
+      ...(authoring.editRequest ? { editRequest: authoring.editRequest } : {}),
       ...(plan ? { plan } : {}),
       ...(authoring.authoringSources ? { authoringSources: authoring.authoringSources } : {}),
       ...(authoring.nextSyncState ? { nextSyncState: authoring.nextSyncState } : {}),
@@ -724,14 +875,19 @@ async function continuationBrief(
 ): Promise<string> {
   const progress = await describeScreenshotManifestProgress(workspace, plan)
   let validationText = ''
+  let pageProgress = ''
   try {
     const validation = await validateProject(workspace)
     if (validation.errors > 0) validationText = formatValidation(validation)
+    const files = await listDocumentationPages(workspace)
+    const invalid = new Set(validation.issues.filter((issue) => issue.severity === 'error').map((issue) => issue.file))
+    pageProgress = `Existing pages (${files.length}; passing structural validation is not a factual verification):\n${files.map((page) => `${page.path}: ${invalid.has(page.path) ? 'needs validation fixes' : 'present; preserve unless incomplete'}`).join('\n')}`
   } catch {
     // Validation problems are reported again after the agent finishes.
   }
   const sections = [
     'This run continues an earlier authoring run in this same workspace that stopped before Doxloop could accept its output. The workspace already holds the pages, navigation, evidence map, and application screenshots that run produced. Keep that work: do not rewrite pages that are already complete, do not recapture, rename, or delete screenshots that .doxloop/screenshot-manifest.json records as verified and whose files exist, and do not rebuild that manifest from scratch. Finish only what is listed below as unfinished or wrong, bring any page you touch to full depth, then run validation and finish.',
+    pageProgress,
     run.error ? `Why the previous run stopped:\n${run.error}` : '',
     sourcesChanged
       ? 'The configured sources changed after the previous run stopped. Re-check the claims of every page you touch against the current source evidence, and update .doxloop/evidence-map.json for those pages; leave pages you do not touch as they are.'
@@ -749,17 +905,17 @@ async function continuationBrief(
 }
 
 /** The workspace's own plan copy, used when re-validating preserved agent output. */
-async function recoveryPlan(workspace: string, planId?: string): Promise<DocumentationPlan | undefined> {
-  const path = join(workspace, '.doxloop', 'documentation-plan.json')
-  if (!(await pathExists(path))) return undefined
-  try {
+async function recoveryPlan(root: string, directory: string, planId?: string): Promise<DocumentationPlan | undefined> {
+  if (!planId) return undefined
+  // Trust the snapshot saved outside the agent workspace, never an agent-edited plan.
+  const trusted = join(directory, 'approved-plan.json')
+  if (await pathExists(trusted)) return readJson<DocumentationPlan>(trusted)
+  const path = join(root, '.doxloop', 'documentation-plan.json')
+  if (await pathExists(path)) {
     const plan = await readJson<DocumentationPlan>(path)
-    if (!plan || !Array.isArray(plan.pages) || !plan.target) return undefined
-    if (planId && plan.id !== planId) return undefined
-    return plan
-  } catch {
-    return undefined
+    if (plan.id === planId && plan.approvedHash) return plan
   }
+  throw new DoxloopError('The approved plan snapshot is unavailable. Review and approve the plan again before retrying this run.')
 }
 
 export async function listSyncRuns(root: string): Promise<SyncRun[]> {
@@ -810,27 +966,40 @@ export async function readSyncRun(root: string, id: string): Promise<SyncRun> {
 }
 
 export async function rejectSyncRun(root: string, id: string): Promise<SyncRun> {
-  const run = await readSyncRun(root, id)
-  if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be changed.`)
-  if (!['awaiting-review', 'partially-applied', 'conflicted'].includes(run.status)) {
-    throw new DoxloopError(`Sync run ${id} cannot be rejected from status ${run.status}.`)
-  }
-  const now = new Date().toISOString()
-  const next: SyncRun = {
-    ...run,
-    status: 'rejected',
-    rejectedAt: now,
-    changes: run.changes.map((change) => ({
-      ...change,
-      hunks: change.hunks.map((hunk) =>
-        hunk.acceptedAt || hunk.rejectedAt ? hunk : { ...hunk, rejectedAt: now },
-      ),
-    })),
-  }
-  await writeRun(root, next)
-  await recordSyncRun(root, next)
-  await recordReviewPreference(root, { kind: 'rejection', paths: run.changes.map((change) => change.path), instruction: 'Do not repeat this complete proposal without new evidence or explicit reviewer direction.' }).catch(() => undefined)
-  return next
+  return rejectSyncChanges(root, id, undefined, 'Do not repeat this proposal without new evidence or explicit reviewer direction.')
+}
+
+export async function rejectSyncChanges(root: string, id: string, selections?: AcceptSelection[], reason = ''): Promise<SyncRun> {
+  return withProjectLock(root, 'write', async () => {
+    const run = await readSyncRun(root, id)
+    if (run.archivedAt || !['awaiting-review', 'partially-applied', 'conflicted'].includes(run.status)) throw new DoxloopError('This proposal is not open for review.')
+    const requested: AcceptSelection[] = selections ?? run.changes.map((change) => ({ changeId: change.id }))
+    const now = new Date().toISOString()
+    const changes = run.changes.map((change) => ({ ...change, hunks: change.hunks.map((hunk) => ({ ...hunk })) }))
+    const paths: string[] = []
+    for (const selection of requested) {
+      const change = changes.find((item) => item.id === selection.changeId)
+      if (!change) throw new DoxloopError(`Unknown change ${selection.changeId}.`)
+      const ids = selection.hunkIds?.length ? selection.hunkIds : change.hunks.filter((hunk) => !hunk.acceptedAt && !hunk.rejectedAt).map((hunk) => hunk.id)
+      for (const id of ids) {
+        const hunk = change.hunks.find((item) => item.id === id)
+        if (!hunk) throw new DoxloopError(`Unknown change hunk ${id}.`)
+        if (hunk.acceptedAt) throw new DoxloopError('An accepted change cannot be rejected. Use Undo to revert accepted work.')
+        hunk.rejectedAt = now
+        if (reason.trim()) hunk.rejectionReason = reason.trim().slice(0, 2000)
+      }
+      if (ids.length) paths.push(change.path)
+    }
+    if (!paths.length) throw new DoxloopError('Select at least one undecided change.')
+    const complete = changes.every((change) => change.hunks.every((hunk) => hunk.acceptedAt || hunk.rejectedAt))
+    const accepted = changes.some((change) => change.hunks.some((hunk) => hunk.acceptedAt))
+    if (complete && accepted) await snapshotChangeSet(root, join(runDirectory(root, id), APPLIED), changes.filter((change) => change.hunks.some((hunk) => hunk.acceptedAt)))
+    const next: SyncRun = { ...run, changes, status: complete ? accepted ? 'applied' : 'rejected' : accepted ? 'partially-applied' : 'awaiting-review', ...(complete && accepted ? { appliedAt: now, undo: { status: 'available' as const } } : {}), ...(complete && !accepted ? { rejectedAt: now } : {}) }
+    await writeRun(root, next)
+    await recordSyncRun(root, next)
+    await recordReviewPreference(root, { kind: 'rejection', paths, instruction: reason.trim() || 'The reviewer rejected these changes. Preserve the current wording unless new evidence or explicit direction calls for a change.' }).catch(() => undefined)
+    return next
+  })
 }
 
 export async function reviseSyncRun(root: string, id: string, input: ReviseSyncRunInput): Promise<SyncRun> {
@@ -864,7 +1033,17 @@ export async function reviseSyncRun(root: string, id: string, input: ReviseSyncR
     ? `\nSelected change hunks: ${hunkIds.join(', ')}. Keep unrelated parts of those files unchanged.`
     : ''
   const plan = await optionalApprovedPlan(root)
-  await recordReviewPreference(root, { kind: 'revision', paths: selected.map((change) => change.path), instruction }).catch(() => undefined)
+  if (!run.editRequest) {
+    await recordReviewPreference(root, { kind: 'revision', paths: selected.map((change) => change.path), instruction }).catch(() => undefined)
+  }
+  const editRequest = run.editRequest ? {
+    ...run.editRequest,
+    followUps: [...run.editRequest.followUps, {
+      id: `follow-up-${randomBytes(3).toString('hex')}`,
+      createdAt: new Date().toISOString(),
+      instruction,
+    }],
+  } : undefined
   return createSyncRun({
     root,
     project,
@@ -872,40 +1051,50 @@ export async function reviseSyncRun(root: string, id: string, input: ReviseSyncR
     sourceChanges,
     revisionOf: run.id,
     revisionRequest: { instruction, changeIds, hunkIds },
+    trigger: input.trigger ?? (run.editRequest ? 'edit' : run.trigger),
+    ...(editRequest ? { editRequest } : {}),
     ...(plan ? { plan } : {}),
     ...(input.author ? { author: input.author } : {}),
     authoring: {
       mode: run.authoringMode ?? 'update',
-      request: `Revise only the selected proposal scope below. Preserve every other proposed file exactly as it is.\n\nSelected files:\n${scope}${hunkScope}\n\nReviewer instruction:\n${instruction}`,
+      ...(editRequest ? { historyRequest: instruction } : {
+        request: `Revise only the selected proposal scope below. Preserve every other proposed file exactly as it is.\n\nSelected files:\n${scope}${hunkScope}\n\nReviewer instruction:\n${instruction}`,
+      }),
       ...(project.defaultAgent ? { agent: project.defaultAgent } : {}),
       screenshots: 'disabled',
     },
   })
 }
 
-export async function readSyncRunChangeContent(root: string, id: string, changeId: string): Promise<{ content: string; path: string; evidenceDisposition: 'preserved' | 'needs-review' }> {
+export async function readSyncRunChangeContent(root: string, id: string, changeId: string): Promise<{ content: string; path: string; fingerprint: string; evidenceDisposition: 'preserved' | 'needs-review' }> {
   const run = await readSyncRun(root, id)
   const change = run.changes.find((item) => item.id === changeId)
   if (!change) throw new DoxloopError(`Unknown proposal change ${changeId}.`)
   if (change.binary || change.kind === 'deleted') throw new DoxloopError('Only proposed text files can be edited inline.')
   const content = await readFile(assertInside(runWorkspace(root, id), resolve(runWorkspace(root, id), change.path)), 'utf8')
   const edit = [...run.humanEdits].reverse().find((item) => item.path === change.path)
-  return { content, path: change.path, evidenceDisposition: edit?.evidenceDisposition ?? 'preserved' }
+  return { content, path: change.path, fingerprint: hash(Buffer.from(content)), evidenceDisposition: edit?.evidenceDisposition ?? 'preserved' }
 }
 
-export async function editSyncRunChange(
+export async function editSyncRunChange(root: string, id: string, changeId: string, content: string, evidenceDisposition: 'preserved' | 'needs-review', fingerprint?: string): Promise<SyncRun> {
+  return withProjectLock(root, 'write', () => editSyncRunChangeLocked(root, id, changeId, content, evidenceDisposition, fingerprint))
+}
+
+async function editSyncRunChangeLocked(
   root: string,
   id: string,
   changeId: string,
   content: string,
   evidenceDisposition: 'preserved' | 'needs-review',
+  fingerprint?: string,
 ): Promise<SyncRun> {
   let run = await readSyncRun(root, id)
   if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be edited.`)
-  if (run.status !== 'awaiting-review') throw new DoxloopError('Inline edits require a proposal that has not been partially applied.')
+  if (!['awaiting-review', 'partially-applied'].includes(run.status)) throw new DoxloopError('Inline edits require an open proposal.')
   run = await refreshProposalSourceSnapshot(root, run)
   const change = run.changes.find((item) => item.id === changeId)
   if (!change) throw new DoxloopError(`Unknown proposal change ${changeId}.`)
+  if (change.hunks.some((hunk) => hunk.acceptedAt || hunk.rejectedAt)) throw new DoxloopError('This file already has review decisions. Edit an undecided file or request a new revision to preserve those decisions.')
   if (change.binary || change.kind === 'deleted' || change.category !== 'page') {
     throw new DoxloopError('Inline editing is available only for proposed text pages.')
   }
@@ -913,6 +1102,7 @@ export async function editSyncRunChange(
   const workspace = runWorkspace(root, id)
   const path = assertInside(workspace, resolve(workspace, change.path))
   const previous = await readFile(path)
+  if (fingerprint && hash(previous) !== fingerprint) throw new DoxloopError('The proposal changed while you were editing. Your draft is kept; reload and compare before saving.')
   const evidencePath = join(workspace, '.doxloop', 'evidence-map.json')
   const previousEvidence = (await pathExists(evidencePath)) ? await readFile(evidencePath) : undefined
   try {
@@ -947,7 +1137,7 @@ export async function editSyncRunChange(
     }, validation)
     changes = changes.map((item) => {
       const old = run.changes.find((candidate) => candidate.path === item.path)
-      if (item.path !== change.path) return old ? { ...item, rationale: old.rationale } : item
+      if (item.path !== change.path) return old ?? item
       const evidencePreserved = evidenceDisposition === 'preserved'
       return {
         ...item,
@@ -981,6 +1171,9 @@ export async function editSyncRunChange(
 }
 
 export async function undoSyncRun(root: string, id: string): Promise<SyncRun> {
+  return withProjectLock(root, 'write', () => undoSyncRunLocked(root, id))
+}
+async function undoSyncRunLocked(root: string, id: string): Promise<SyncRun> {
   const run = await readSyncRun(root, id)
   if (run.status !== 'applied' || run.undo?.status === 'undone') {
     throw new DoxloopError(`Proposal ${id} does not have an applied change set available to undo.`)
@@ -989,9 +1182,9 @@ export async function undoSyncRun(root: string, id: string): Promise<SyncRun> {
   const operationalPath = join(root, '.doxloop', 'sync-state.json')
   const operationalCurrent = (await pathExists(operationalPath)) ? await readFile(operationalPath) : undefined
   try {
-    for (const change of run.changes) {
+    for (const change of run.changes.filter((item) => item.hunks.some((hunk) => hunk.acceptedAt))) {
       const before = await proposalAcceptanceBefore(root, id, change.path)
-      const actualPath = safeRunPath(root, change.path)
+      const actualPath = await safePath(root, change.path)
       const current = (await pathExists(actualPath)) ? await readFile(actualPath) : undefined
       const appliedSnapshot = await readChangeSnapshot(join(runDirectory(root, id), APPLIED), change.path)
       const expected = appliedSnapshot.found
@@ -999,7 +1192,7 @@ export async function undoSyncRun(root: string, id: string): Promise<SyncRun> {
         : await materializeChange(
             await proposalBefore(root, id, change.path),
             change,
-            new Set(change.hunks.map((hunk) => hunk.id)),
+            acceptedIds(change),
             runWorkspace(root, id),
           )
       if (!buffersEqual(current, expected)) {
@@ -1008,7 +1201,7 @@ export async function undoSyncRun(root: string, id: string): Promise<SyncRun> {
       originals.set(change.path, current)
       await writeAtomic(actualPath, before)
     }
-    await restoreOperationalBefore(root, id)
+    if (run.changes.every((item) => item.hunks.every((hunk) => hunk.acceptedAt))) await restoreOperationalBefore(root, id)
     const validation = await validateProject(root)
     if (validation.errors > 0) throw new DoxloopError(`Undo would leave invalid documentation:\n${formatValidation(validation)}`)
     const undoneAt = new Date().toISOString()
@@ -1018,8 +1211,7 @@ export async function undoSyncRun(root: string, id: string): Promise<SyncRun> {
     await syncPageRegistry(root, undefined, next.id)
     return next
   } catch (error) {
-    for (const [path, content] of originals) await writeAtomic(safeRunPath(root, path), content)
-    await writeAtomic(operationalPath, operationalCurrent)
+    await rollbackAppliedFiles(root, originals, operationalPath, operationalCurrent)
     throw error
   }
 }
@@ -1044,11 +1236,16 @@ export async function pruneSyncRuns(root: string, now = new Date()): Promise<str
   return removed
 }
 
+export async function acceptSyncChanges(root: string, id: string, selections: AcceptSelection[], options: AcceptOptions = {}): Promise<SyncRun> {
+  return withProjectLock(root, 'write', () => acceptSyncChangesLocked(root, id, selections, options))
+}
+
 /** Apply selected hunks after proving the real files still match this proposal. */
-export async function acceptSyncChanges(
+async function acceptSyncChangesLocked(
   root: string,
   id: string,
   selections: AcceptSelection[],
+  options: AcceptOptions = {},
 ): Promise<SyncRun> {
   let run = await readSyncRun(root, id)
   if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be applied.`)
@@ -1066,9 +1263,15 @@ export async function acceptSyncChanges(
         : change.hunks.filter((hunk) => !hunk.acceptedAt && !hunk.rejectedAt).map((hunk) => hunk.id),
     )
     for (const hunkId of ids) {
+      if (change.hunks.some((hunk) => hunk.id === hunkId && hunk.rejectedAt)) throw new DoxloopError('A rejected change cannot be accepted. Request a new revision instead.')
       if (!change.hunks.some((hunk) => hunk.id === hunkId)) {
         throw new DoxloopError(`Unknown change hunk ${hunkId}.`)
       }
+    }
+    if (change.changedDuringRun && !options.confirmChangedDuringRun) {
+      throw new DoxloopError(
+        `${change.path} was edited in the project while the agent ran. Confirm that the proposal should replace that edit before applying it; no file was overwritten.`,
+      )
     }
     requested.set(change.id, ids)
   }
@@ -1080,6 +1283,8 @@ export async function acceptSyncChanges(
   }
 
   const originals = new Map<string, Buffer | undefined>()
+  const operationalPath = join(root, '.doxloop', 'sync-state.json')
+  const operationalCurrent = await pathExists(operationalPath) ? await readFile(operationalPath) : undefined
   const now = new Date().toISOString()
   let nextChanges = run.changes.map((change) => ({
     ...change,
@@ -1090,7 +1295,7 @@ export async function acceptSyncChanges(
     for (const change of nextChanges) {
       const ids = requested.get(change.id)
       if (!ids || ids.size === 0) continue
-      const actualPath = safeRunPath(root, change.path)
+      const actualPath = await safePath(root, change.path)
       const before = await proposalBefore(root, run.id, change.path)
       const current = (await pathExists(actualPath)) ? await readFile(actualPath) : undefined
       const expected = await materializeChange(
@@ -1131,9 +1336,10 @@ export async function acceptSyncChanges(
       )
     }
     const complete = nextChanges.every((change) =>
-      change.hunks.every((hunk) => hunk.acceptedAt !== undefined),
+      change.hunks.every((hunk) => hunk.acceptedAt !== undefined || hunk.rejectedAt !== undefined),
     )
-    if (complete) await applyStagedSyncState(root, id)
+    const allAccepted = nextChanges.every((change) => change.hunks.every((hunk) => hunk.acceptedAt))
+    if (complete && allAccepted && !run.editRequest) await applyStagedSyncState(root, id)
     if (complete) await snapshotChangeSet(root, join(runDirectory(root, id), APPLIED), nextChanges)
     const { error: _previousError, ...cleanRun } = run
     const next: SyncRun = {
@@ -1156,13 +1362,12 @@ export async function acceptSyncChanges(
     // and the external-edit check both start from what is actually on disk.
     await syncPageRegistry(root, undefined, next.id)
     if (complete) {
-      await recordSourceSyncs(root, await readOptionalSyncState(root), next.id)
+      if (allAccepted && !run.editRequest) await recordSourceSyncs(root, await readOptionalSyncState(root), next.id)
       await recordAppliedAuthoringReceipt(root, next).catch(() => undefined)
     }
     return next
   } catch (error) {
-    for (const [path, content] of originals) await writeAtomic(safeRunPath(root, path), content)
-    await restoreOperationalBefore(root, id)
+    await rollbackAppliedFiles(root, originals, operationalPath, operationalCurrent)
     const conflicted: SyncRun = {
       ...run,
       status: error instanceof DoxloopError && error.message.includes('changed after')
@@ -1176,6 +1381,15 @@ export async function acceptSyncChanges(
   }
 }
 
+async function rollbackAppliedFiles(root: string, originals: Map<string, Buffer | undefined>, operationalPath: string, operationalCurrent: Buffer | undefined): Promise<void> {
+  const results = await Promise.allSettled([
+    ...[...originals].map(async ([path, content]) => writeAtomic(await safePath(root, path), content)),
+    writeAtomic(operationalPath, operationalCurrent),
+  ])
+  const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (errors.length) throw new AggregateError(errors.map((result) => result.reason), 'Rollback needs recovery. Original page snapshots are preserved in the proposal run directory.')
+}
+
 async function readOptionalSyncState(root: string): Promise<SyncState | undefined> {
   const path = join(root, '.doxloop', 'sync-state.json')
   if (!(await pathExists(path))) return undefined
@@ -1187,7 +1401,7 @@ async function readOptionalSyncState(root: string): Promise<SyncState | undefine
 }
 
 async function recordAppliedAuthoringReceipt(root: string, run: SyncRun): Promise<void> {
-  if (!run.authoringMode || !run.validation) return
+  if (!run.authoringMode || !run.validation || run.editRequest) return
   await writeAtomic(join(root, '.doxloop', 'last-run.json'), Buffer.from(`${JSON.stringify({
     schemaVersion: 1,
     mode: run.authoringMode,
@@ -1289,6 +1503,10 @@ async function createWorkspace(
         return rel === '' || !isExcluded(rel)
       },
     })
+    // What the agent starts from. Review compares its output with this, not
+    // with whatever the project holds by the time the run finishes, so an
+    // edit made in the project during the run is never proposed as a revert.
+    await writeWorkspaceBaseline(runRoot, staged)
     await rewriteWorkspaceSources(staged, root, {
       ...project,
       sources: authoringSources ?? project.sources,
@@ -1369,9 +1587,10 @@ async function collectProposalChanges(
   runRoot: string,
   project: DoxloopProject,
 ): Promise<SyncFileChange[]> {
-  const [beforeFiles, afterFiles] = await Promise.all([
+  const [beforeFiles, afterFiles, baseline] = await Promise.all([
     collectFiles(root),
     collectFiles(workspace),
+    readWorkspaceBaseline(runRoot),
   ])
   const paths = [...new Set([...beforeFiles.keys(), ...afterFiles.keys()])].sort()
   const pageExtensions = await documentationPageExtensions(root, project)
@@ -1381,6 +1600,9 @@ async function collectProposalChanges(
     const before = beforeFiles.get(path)
     const after = afterFiles.get(path)
     if (buffersEqual(before, after)) continue
+    const relation = baseline ? compareWithBaseline(baseline.get(path), before, after) : 'agent-only'
+    // The agent left this file as it found it; only the project moved.
+    if (relation === 'project-only') continue
     if (before) {
       const target = join(runRoot, BEFORE, path)
       await mkdir(dirname(target), { recursive: true })
@@ -1410,9 +1632,48 @@ async function collectProposalChanges(
       ...(!binary && after ? { afterEndsWithNewline: after.toString('utf8').endsWith('\n') } : {}),
       hunks,
       rationale: emptyRationale(kind),
+      ...(relation === 'both' ? { changedDuringRun: true } : {}),
     })
   }
   return changes
+}
+
+/**
+ * Where a file moved since the run started: only in the agent's workspace,
+ * only in the project, or in both. Hashes are enough — the live content is
+ * the "before" side either way, and a file the agent never touched is not a
+ * proposal change no matter what happened to it in the project.
+ */
+export function compareWithBaseline(
+  baselineHash: string | undefined,
+  live: Buffer | undefined,
+  proposed: Buffer | undefined,
+): 'agent-only' | 'project-only' | 'both' {
+  const liveHash = live ? hash(live) : undefined
+  const proposedHash = proposed ? hash(proposed) : undefined
+  if (proposedHash === baselineHash) return 'project-only'
+  return liveHash === baselineHash ? 'agent-only' : 'both'
+}
+
+async function writeWorkspaceBaseline(runRoot: string, workspace: string): Promise<void> {
+  const files = await collectFiles(workspace)
+  const hashes: Record<string, string> = {}
+  for (const [path, content] of [...files].sort(([left], [right]) => left.localeCompare(right))) hashes[path] = hash(content)
+  await mkdir(runRoot, { recursive: true })
+  await writeFile(join(runRoot, BASELINE_FILE), `${JSON.stringify({ schemaVersion: 1, files: hashes }, null, 2)}\n`, 'utf8')
+}
+
+/** Absent for runs created before the baseline was recorded; those fall back to a live comparison. */
+async function readWorkspaceBaseline(runRoot: string): Promise<Map<string, string> | undefined> {
+  const path = join(runRoot, BASELINE_FILE)
+  if (!(await pathExists(path))) return undefined
+  try {
+    const value = await readJson<{ schemaVersion?: number; files?: Record<string, string> }>(path)
+    if (value.schemaVersion !== 1 || !value.files || typeof value.files !== 'object') return undefined
+    return new Map(Object.entries(value.files).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+  } catch {
+    return undefined
+  }
 }
 
 async function assertProposalSourceScopes(workspace: string, changes: SyncFileChange[], project: DoxloopProject): Promise<void> {
@@ -1656,9 +1917,13 @@ async function restoreOperationalBefore(root: string, id: string): Promise<void>
   if (await pathExists(join(snapshotRoot, 'sync-state.absent'))) await writeAtomic(target, undefined)
 }
 
-interface RevisionScope {
+export interface RevisionScope {
   selectedPaths: Set<string>
   supportingPaths: Set<string>
+  /** Related assets may be newly created below these page-slug prefixes. */
+  supportingPrefixes?: Set<string>
+  /** Page-shaped files never qualify as related assets. */
+  pageExtensions?: Set<string>
   wholeProposal: boolean
   hunkRanges: Map<string, Array<{ start: number; end: number }>>
 }
@@ -1700,10 +1965,11 @@ async function resolveRevisionScope(
   }
 }
 
-async function assertRevisionStayedInScope(
+export async function assertRevisionStayedInScope(
   workspace: string,
   baseline: Map<string, Buffer>,
   scope: RevisionScope,
+  edit = false,
 ): Promise<void> {
   const after = await collectFiles(workspace)
   const paths = new Set([...baseline.keys(), ...after.keys()])
@@ -1711,17 +1977,30 @@ async function assertRevisionStayedInScope(
     ? [...paths].some((path) => !buffersEqual(baseline.get(path), after.get(path)))
     : [...scope.selectedPaths].some((path) => !buffersEqual(baseline.get(path), after.get(path)))
   if (!selectedChanged) {
-    throw new DoxloopError('The agent did not revise the selected proposal scope. The original proposal remains available.')
+    throw new DoxloopError(edit
+      ? `The agent did not change ${scope.selectedPaths.size === 1 ? 'this page' : 'these pages'}. Nothing was applied.`
+      : 'The agent did not revise the selected proposal scope. The original proposal remains available.')
   }
   if (scope.wholeProposal) return
+  if (edit) {
+    const deleted = [...scope.selectedPaths].filter((path) => baseline.has(path) && !after.has(path))
+    if (deleted.length > 0) {
+      throw new DoxloopError(`The agent deleted ${deleted.join(', ')}. Page creation, deletion, and rename are not available in a scoped edit. Nothing was applied.`)
+    }
+  }
   const outOfScope = [...paths].filter((path) =>
     !buffersEqual(baseline.get(path), after.get(path))
       && !scope.selectedPaths.has(path)
-      && !scope.supportingPaths.has(path),
+      && !scope.supportingPaths.has(path)
+      && ![...(scope.supportingPrefixes ?? [])].some((prefix) =>
+        path.startsWith(prefix) && !scope.pageExtensions?.has(extname(path).toLowerCase()),
+      ),
   )
   if (outOfScope.length > 0) {
     throw new DoxloopError(
-      `The revision changed files outside the selected scope: ${outOfScope.slice(0, 8).join(', ')}${outOfScope.length > 8 ? ', …' : ''}. No proposal was replaced.`,
+      edit
+        ? `The agent changed files outside ${scope.selectedPaths.size === 1 ? 'this page' : 'these pages'}: ${outOfScope.slice(0, 8).join(', ')}${outOfScope.length > 8 ? ', …' : ''}. Nothing was applied. Turn on "Also allow related changes" if those files should be part of the edit.`
+        : `The revision changed files outside the selected scope: ${outOfScope.slice(0, 8).join(', ')}${outOfScope.length > 8 ? ', …' : ''}. No proposal was replaced.`,
     )
   }
   for (const [path, ranges] of scope.hunkRanges) {
@@ -1852,7 +2131,7 @@ function assertRunId(id: string): void {
   if (!/^[a-z0-9-]+$/.test(id)) throw new DoxloopError(`Invalid sync run id: ${id}`)
 }
 
-function runId(): string {
+export function createRunId(): string {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
   return `run-${stamp.toLowerCase()}-${randomBytes(3).toString('hex')}`
 }
@@ -1886,7 +2165,7 @@ function changeCategory(
   if (path === '.doxloop/evidence-map.json') return 'evidence'
   const extension = extname(path).toLowerCase()
   const content = portable(project.contentDir).replace(/\/+$/, '')
-  const insideContent = content === '' || path === content || path.startsWith(`${content}/`)
+  const insideContent = content === '' || path === content || path.startsWith(`${content}/`) || (project.generator === 'docusaurus' && /^(?:versioned_docs\/version-[\w.-]+\/|i18n\/[\w-]+\/docusaurus-plugin-content-docs\/(?:current|version-[\w.-]+)\/)/.test(path))
   if (insideContent) {
     if (pageExtensions.has(extension)) return 'page'
     if (BINARY_EXTENSIONS.has(extension)) return 'asset'
@@ -1951,12 +2230,23 @@ function changeReason(change: SyncFileChange): string {
   return `Update “${change.title}” to match the approved request and current evidence.`
 }
 
+/** Whether the live copy of a page the agent removed was generated starter scaffolding. */
+async function isStarterFile(path: string): Promise<boolean> {
+  try {
+    return isStarterContent(await readFile(path, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
 function matchPlanPage(plan: DocumentationPlan | undefined, path: string): DocumentationPlan['pages'][number] | undefined {
   if (!plan) return undefined
   const portablePath = portable(path).replace(/^\/+/, '')
   return plan.pages.find((page) => {
     const planned = portable(page.path).replace(/^\/+|\/+$/g, '')
-    return portablePath === planned || portablePath.startsWith(`${planned}.`) || portablePath.includes(`/${planned}.`)
+    const prefix = plan.target?.contentDir?.replace(/^\/+|\/+$/g, '')
+    const candidates = new Set([planned, ...(prefix && !planned.startsWith(`${prefix}/`) ? [`${prefix}/${planned}`] : [])])
+    return [...candidates].some((candidate) => portablePath === candidate || portablePath.replace(/\.(mdx?|rst|html?)$/, '') === candidate)
   })
 }
 

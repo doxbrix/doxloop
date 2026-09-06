@@ -100,9 +100,15 @@ Example execution is opt-in through `.doxloop/examples.json`:
 
 Node examples run from a temporary workspace with a minimal environment,
 explicit filesystem permissions, no network permission, a timeout, and no
-shell. Python examples use `runtime: "python"`, an isolated interpreter, a
-minimal environment, blocked socket creation, and reject subprocess/native
-process APIs. Apparent credentials are rejected. Use `runtime:
+shell. Python examples use `runtime: "python"` and require a locally installed,
+digest-pinned Docker image configured with `DOXLOOP_PYTHON_SANDBOX_IMAGE`
+(for example, `python@sha256:<the approved image digest>`). Doxloop never
+executes Python examples directly on the host. Without the configured image,
+the check is skipped and cannot earn executed-example credit. Containers use
+no network, a read-only filesystem and fixture mount, an unprivileged user,
+no Linux capabilities, and CPU, memory, PID and time limits. The image is
+never pulled automatically. A missing image or unavailable daemon fails the
+execution check; it does not fall back to host Python. Apparent credentials are rejected. Use `runtime:
 "shell-source-verified"` or `runtime: "source-verified"` when a command cannot
 be executed with a portable network/filesystem sandbox; the report keeps that
 distinction instead of overstating verification.

@@ -22,7 +22,7 @@ export async function checkRenderedQuality(root: string, project: DoxloopProject
     { code: QUALITY_CODES.visualSkipped, category: 'visual', status: 'skipped', message: 'Visual regression checks are disabled.' },
   ] }
   const pages = await renderedPages(root, project, config.rendered.routes ?? ['/'])
-  if (pages.length === 0) return { checks: [{ code: QUALITY_CODES.accessibilityIssue, category: 'accessibility', status: 'fail', message: 'No representative rendered pages were found.' }] }
+  if (pages.length === 0) return { checks: [{ code: QUALITY_CODES.accessibilityIssue, category: 'accessibility', status: 'fail', message: 'No representative rendered pages were found.' }, { code: QUALITY_CODES.visualSkipped, category: 'visual', status: 'skipped', message: 'No rendered pages are available for visual comparison.' }] }
   const outputRoot = join(root, '.doxloop', 'quality-artifacts')
   const currentRoot = join(outputRoot, 'visuals', project.generator)
   const baselineRoot = join(root, '.doxloop', 'visual-baselines', project.generator)

@@ -22,6 +22,8 @@ describe('coverage recovery actions', () => {
     const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [{ name: 'product', path: '../product' }] })
     const project = await loadProject(root)
     await saveProjectSettings(root, { documentation: { ...project.documentation, priorityOutcomes: ['Install the SDK', 'Send the first request'] } })
+    await mkdir(join(root, 'guides'), { recursive: true })
+    await writeFile(join(root, 'guides/quickstart.md'), '# Quickstart\n\nInstall the SDK.\n')
     await writeEvidenceMap(root, { schemaVersion: 1, pages: { 'guides/quickstart.md': { sources: [], confidence: 'inferred' } } })
 
     const initial = await buildSourceIntelligence(root)

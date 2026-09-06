@@ -34,6 +34,8 @@ async function files(directory) {
   for (const entry of entries) {
     if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue
     const path = join(directory, entry.name)
+    const local = relative(root, path).replaceAll('\\', '/')
+    if (['evals/results', 'test-results', 'playwright-report'].includes(local)) continue
     if (entry.isDirectory()) output.push(...(await files(path)))
     else if (entry.isFile() && readableExtensions.has(extname(entry.name))) output.push(path)
   }

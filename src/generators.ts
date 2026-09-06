@@ -8,6 +8,15 @@ import {
 } from './generator-api.js'
 import type { DoxloopProject, GeneratorName } from './types.js'
 
+/**
+ * How much of Doxloop's workflow a generator gets. The tier is a statement
+ * about the adapter, not the framework: it says what validation, preview, and
+ * authoring guidance Doxloop itself provides for that generator today.
+ */
+export type GeneratorTier = 'full' | 'supported' | 'basic'
+
+export type GeneratorToolchainId = 'node' | 'python' | 'hugo' | 'ruby'
+
 export interface GeneratorCatalogEntry {
   id: GeneratorName
   displayName: string
@@ -15,6 +24,31 @@ export interface GeneratorCatalogEntry {
   skillName: string
   buildCommand?: string
   outputDir?: string
+  tier: GeneratorTier
+  /** External runtimes the native build and preview need, beyond Doxloop itself. */
+  toolchain: readonly GeneratorToolchainId[]
+}
+
+export const GENERATOR_TIERS: Record<GeneratorTier, { label: string; description: string }> = {
+  full: {
+    label: 'Full',
+    description: 'Navigation, components, and diagrams are validated and documented; preview and strict build are exercised in CI.',
+  },
+  supported: {
+    label: 'Supported',
+    description: 'Nested navigation is validated where the configuration is readable and reported as unverified otherwise; authoring syntax is documented.',
+  },
+  basic: {
+    label: 'Basic',
+    description: 'Scaffold, preview, and file checks work; navigation checks are limited to what the scaffold owns.',
+  },
+}
+
+export const GENERATOR_TOOLCHAINS: Record<GeneratorToolchainId, { label: string; detail: string }> = {
+  node: { label: 'Node.js 20.12+', detail: 'Node.js with npm, pnpm, or yarn on the PATH.' },
+  python: { label: 'Python 3.9+', detail: 'python3 with the venv and pip modules; Doxloop creates .doxloop/venv on first preview.' },
+  hugo: { label: 'Hugo', detail: 'The hugo binary on the PATH (extended edition recommended).' },
+  ruby: { label: 'Ruby + Bundler', detail: 'ruby and bundle on the PATH; Doxloop installs gems under .doxloop/bundle on first preview.' },
 }
 
 export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
@@ -22,6 +56,10 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     id: 'doxbrix',
     displayName: 'Doxbrix',
     skillName: 'doxloop-doxbrix',
+    buildCommand: 'doxloop export --out build',
+    outputDir: 'build',
+    tier: 'full',
+    toolchain: [],
   },
   {
     id: 'docusaurus',
@@ -30,6 +68,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-docusaurus',
     buildCommand: 'npm run build',
     outputDir: 'build',
+    tier: 'full',
+    toolchain: ['node'],
   },
   {
     id: 'mkdocs',
@@ -38,6 +78,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-mkdocs',
     buildCommand: 'mkdocs build --strict',
     outputDir: 'site',
+    tier: 'full',
+    toolchain: ['python'],
   },
   {
     id: 'sphinx',
@@ -46,6 +88,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-sphinx',
     buildCommand: 'sphinx-build -W -b html docs _build/html',
     outputDir: '_build/html',
+    tier: 'supported',
+    toolchain: ['python'],
   },
   {
     id: 'hugo',
@@ -54,6 +98,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-hugo',
     buildCommand: 'hugo --minify',
     outputDir: 'public',
+    tier: 'supported',
+    toolchain: ['hugo'],
   },
   {
     id: 'vitepress',
@@ -62,6 +108,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-vitepress',
     buildCommand: 'npm run docs:build',
     outputDir: 'docs/.vitepress/dist',
+    tier: 'supported',
+    toolchain: ['node'],
   },
   {
     id: 'markdoc',
@@ -70,6 +118,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-markdoc',
     buildCommand: 'npm run build',
     outputDir: 'dist',
+    tier: 'basic',
+    toolchain: ['node'],
   },
   {
     id: 'nextra',
@@ -78,6 +128,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-nextra',
     buildCommand: 'npm run build',
     outputDir: 'out',
+    tier: 'basic',
+    toolchain: ['node'],
   },
   {
     id: 'starlight',
@@ -86,6 +138,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-starlight',
     buildCommand: 'npm run build',
     outputDir: 'dist',
+    tier: 'supported',
+    toolchain: ['node'],
   },
   {
     id: 'jekyll',
@@ -94,6 +148,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-jekyll',
     buildCommand: 'bundle exec jekyll build --strict_front_matter',
     outputDir: '_site',
+    tier: 'basic',
+    toolchain: ['ruby'],
   },
   {
     id: 'static',
@@ -102,6 +158,8 @@ export const GENERATOR_CATALOG: readonly GeneratorCatalogEntry[] = [
     skillName: 'doxloop-static',
     buildCommand: 'npm run build',
     outputDir: 'site',
+    tier: 'basic',
+    toolchain: ['node'],
   },
 ] as const
 
@@ -191,9 +249,16 @@ export function resolveGeneratorPackage(
   return undefined
 }
 
+export interface InstalledGeneratorEntry extends GeneratorCatalogEntry {
+  installed: boolean
+  tierLabel: string
+  tierDescription: string
+  toolchainLabels: string[]
+}
+
 export async function installedGeneratorEntries(
   root: string,
-): Promise<Array<GeneratorCatalogEntry & { installed: boolean }>> {
+): Promise<InstalledGeneratorEntry[]> {
   return Promise.all(
     GENERATOR_CATALOG.map(async (entry) => ({
       ...entry,
@@ -201,6 +266,9 @@ export async function installedGeneratorEntries(
         entry.id === 'doxbrix' ||
         (entry.packageName !== undefined &&
           resolveGeneratorPackage(root, entry.packageName) !== undefined),
+      tierLabel: GENERATOR_TIERS[entry.tier].label,
+      tierDescription: GENERATOR_TIERS[entry.tier].description,
+      toolchainLabels: entry.toolchain.map((id) => GENERATOR_TOOLCHAINS[id].label),
     })),
   )
 }
@@ -249,7 +317,10 @@ function validateAdapter(
     typeof adapter.validate !== 'function' ||
     (adapter.resolveLocalAsset !== undefined &&
       typeof adapter.resolveLocalAsset !== 'function') ||
-    (adapter.readPage !== undefined && typeof adapter.readPage !== 'function')
+    (adapter.readPage !== undefined && typeof adapter.readPage !== 'function') ||
+    (adapter.writeNavigation !== undefined &&
+      typeof adapter.writeNavigation !== 'function') ||
+    (adapter.renderPage !== undefined && typeof adapter.renderPage !== 'function')
   ) {
     throw incompatible(packageName, 'does not satisfy the generator adapter contract')
   }

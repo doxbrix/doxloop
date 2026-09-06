@@ -10,8 +10,10 @@ import {
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
 import {
+  contentRelativePages,
   ensureNodeDependencies,
   isRecord,
+  navigationUnverifiedIssue,
   openBrowser,
   pathExists,
   readPackageJson,
@@ -28,6 +30,7 @@ const PACKAGE_VERSION = (
     version: string
   }
 ).version
+const VITEPRESS_CONFIG_FILES = ['config.mts', 'config.ts', 'config.mjs', 'config.js']
 
 const adapter = defineGenerator({
   apiVersion: 1,
@@ -208,49 +211,117 @@ async function startVitePressPreview(options: GeneratorPreviewOptions): Promise<
   )
 }
 
+/**
+ * Reads the links a literal `nav` and `sidebar` declare, including the
+ * multi-sidebar object form and `base` prefixes. A sidebar returned by a
+ * function, imported from another module, or affected by `rewrites` is
+ * reported as unverified instead of producing false errors.
+ */
 async function validateVitePress(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  const configFile = join(context.project.contentDir, '.vitepress', 'config.mts')
-  for (const file of ['package.json', configFile]) {
-    if (!(await pathExists(join(context.root, file)))) {
-      issues.push({
-        severity: 'error',
-        code: 'missing-generator-file',
-        message: `VitePress project is missing ${file}.`,
-        file,
-      })
+  if (!(await pathExists(join(context.root, 'package.json')))) {
+    issues.push({
+      severity: 'error',
+      code: 'missing-generator-file',
+      message: 'VitePress project is missing package.json.',
+      file: 'package.json',
+    })
+  }
+  let configFile: string | undefined
+  for (const candidate of VITEPRESS_CONFIG_FILES) {
+    const file = join(context.project.contentDir, '.vitepress', candidate).split('\\').join('/')
+    if (await pathExists(join(context.root, file))) {
+      configFile = file
+      break
     }
   }
-  const configPath = join(context.root, configFile)
-  if (!(await pathExists(configPath))) return issues
-  const source = await readFile(configPath, 'utf8')
-  const navigation = new Set<string>()
-  for (const match of source.matchAll(/\blink\s*:\s*["']([^"']+)["']/g)) {
-    const link = match[1]
-    if (!link || /^[a-z]+:\/\//i.test(link)) continue
-    navigation.add(link === '/' ? 'index' : link.replace(/^\/|\/$/g, ''))
+  if (!configFile) {
+    const expected = join(context.project.contentDir, '.vitepress', 'config.mts').split('\\').join('/')
+    issues.push({
+      severity: 'error',
+      code: 'missing-generator-file',
+      message: `VitePress project is missing ${expected}.`,
+      file: expected,
+    })
+    return issues
   }
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
+  const source = await readFile(join(context.root, configFile), 'utf8')
+  const navigation = readVitePressNavigation(source)
+  if (navigation.unverified) {
+    issues.push(navigationUnverifiedIssue('VitePress', configFile, navigation.unverified))
+    return issues
+  }
+  const pages = contentRelativePages(context.contentRoot, context.pages)
+  const pageIds = new Map(pages.map((page) => [page.replace(/\.md$/i, ''), page]))
+  const routeToPage = (route: string): string | undefined => {
+    const clean = route.replace(/^\/+|\/+$/g, '').replace(/\.(?:html|md)$/i, '')
+    if (clean === '') return pageIds.has('index') ? 'index' : undefined
+    if (pageIds.has(clean)) return clean
+    if (pageIds.has(`${clean}/index`)) return `${clean}/index`
+    return undefined
+  }
+  const navigated = new Set<string>()
+  for (const link of navigation.links) {
+    const id = routeToPage(link)
+    if (id) {
+      navigated.add(id)
+    } else {
       issues.push({
         severity: 'error',
         code: 'missing-page',
-        message: `VitePress navigation references missing page "${id}".`,
+        message: `VitePress navigation references missing page "${link}".`,
         file: configFile,
       })
     }
   }
-  for (const id of context.pageIds) {
-    if (!navigation.has(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'unnavigated-page',
-        message: `Page "${id}" is not in VitePress navigation.`,
-        file: `${id}.md`,
-      })
-    }
+  if (!navigation.hasSidebar) return issues
+  for (const [id, page] of pageIds) {
+    if (navigated.has(id) || /\[[^\]]+\]/.test(id)) continue
+    issues.push({
+      severity: 'error',
+      code: 'unnavigated-page',
+      message: `Page "${id}" is not in VitePress navigation.`,
+      file: `${context.project.contentDir}/${page}`,
+    })
   }
   return issues
+}
+
+export function readVitePressNavigation(source: string): {
+  links: string[]
+  hasSidebar: boolean
+  unverified?: string
+} {
+  const body = source.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm, '$1')
+  if (/\brewrites\s*:/.test(body)) {
+    return { links: [], hasSidebar: false, unverified: 'the configuration rewrites routes.' }
+  }
+  if (/\bsrcDir\s*:/.test(body)) {
+    return { links: [], hasSidebar: false, unverified: 'the configuration sets srcDir.' }
+  }
+  if (/[{,]\s*(?:nav|sidebar)\s*(?:[,}]|$)/m.test(body)) {
+    return { links: [], hasSidebar: true, unverified: 'the navigation is built by code rather than listed in the configuration.' }
+  }
+  const sidebarMatch = body.match(/\bsidebar\s*:\s*([^\s,])/)
+  const hasSidebar = sidebarMatch !== null
+  if (hasSidebar && !['[', '{'].includes(sidebarMatch![1]!)) {
+    return { links: [], hasSidebar, unverified: 'the sidebar is built by code rather than listed in the configuration.' }
+  }
+  if (/\b(?:nav|sidebar)\s*:\s*(?:await\s+)?[A-Za-z_$][\w$]*\s*\(/.test(body) || /\.\.\.[A-Za-z_$]/.test(body)) {
+    return { links: [], hasSidebar, unverified: 'the navigation is built by code rather than listed in the configuration.' }
+  }
+  const links: string[] = []
+  let base = ''
+  for (const match of body.matchAll(/\b(base|link)\s*:\s*["']([^"']+)["']/g)) {
+    const [, key, value] = match
+    if (key === 'base') {
+      base = value ?? ''
+      continue
+    }
+    if (!value || /^[a-z]+:\/\//i.test(value) || value.startsWith('#')) continue
+    links.push(value.startsWith('/') ? value : `${base.replace(/\/+$/, '')}/${value}`)
+  }
+  return { links, hasSidebar }
 }

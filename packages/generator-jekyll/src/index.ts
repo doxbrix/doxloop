@@ -13,6 +13,7 @@ import {
 import {
   findExecutable,
   isRecord,
+  navigationUnverifiedIssue,
   openBrowser,
   pathExists,
   readPackageJson,
@@ -176,6 +177,7 @@ exclude:
       <aside>{% include nav.html %}</aside>
       <main class="page-content"><article class="post-content"><h1>{{ page.title }}</h1>{{ content }}</article></main>
     </div>
+    {% if content contains 'class="language-mermaid"' %}<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; document.querySelectorAll('.language-mermaid').forEach((block) => { const pre = block.closest('pre') || block; const target = document.createElement('pre'); target.className = 'mermaid'; target.textContent = block.textContent; pre.replaceWith(target) }); mermaid.initialize({ startOnLoad: true });</script>{% endif %}
   </body>
 </html>
 `,
@@ -183,7 +185,13 @@ exclude:
   )
   await writeFile(
     join(root, '_includes', 'nav.html'),
-    `<nav aria-label="Documentation"><ul>{% for item in site.navigation %}<li><a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title }}</a></li>{% endfor %}</ul></nav>
+    `<nav aria-label="Documentation"><ul>{% for item in site.navigation %}<li><a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title }}</a>{% if item.children %}<ul>{% for child in item.children %}<li><a href="{{ child.url | relative_url }}"{% if page.url == child.url %} aria-current="page"{% endif %}>{{ child.title }}</a></li>{% endfor %}</ul>{% endif %}</li>{% endfor %}</ul></nav>
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await writeFile(
+    join(root, '_includes', 'callout.html'),
+    `<aside class="callout callout-{{ include.type | default: 'note' }}" role="note">{% if include.title %}<strong>{{ include.title }}</strong>{% endif %}{{ include.content | markdownify }}</aside>
 `,
     { encoding: 'utf8', flag: 'wx' },
   )
@@ -193,8 +201,11 @@ exclude:
 body { margin: 0; color: #1f2937; } header { border-bottom: 1px solid #e5e7eb; padding: 1rem 2rem; }
 .brand { color: var(--primary); font-weight: 700; text-decoration: none; }
 .layout { display: grid; grid-template-columns: 16rem minmax(0, 48rem); gap: 3rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
-nav ul { list-style: none; padding: 0; } nav a { display: block; padding: .5rem; }
+nav ul { list-style: none; padding: 0; } nav a { display: block; padding: .5rem; } nav ul ul { padding-left: 1rem; }
 .page-content { line-height: 1.7; min-width: 0; }
+.callout { border-left: 4px solid var(--primary); padding: .75rem 1rem; margin: 1rem 0; background: #eef2ff; }
+.callout-warning { border-color: #d97706; background: #fffbeb; } .callout-danger { border-color: #dc2626; background: #fef2f2; }
+details.tab { border: 1px solid #e5e7eb; border-radius: .5rem; margin: .5rem 0; } details.tab summary { cursor: pointer; padding: .5rem 1rem; font-weight: 600; } details.tab > :not(summary) { padding: 0 1rem 1rem; }
 @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } }
 `,
     { encoding: 'utf8', flag: 'wx' },
@@ -263,17 +274,16 @@ async function startJekyllPreview(options: GeneratorPreviewOptions): Promise<voi
   await runPreviewProcess(invocation.command, invocation.args, options.root, 'Jekyll')
 }
 
+/**
+ * Navigation comes from the `navigation` list in `_config.yml` or from
+ * `_data/navigation.yml`, nested to any depth. A site whose theme derives
+ * navigation from front matter has neither, and is reported as unverified.
+ */
 async function validateJekyll(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  for (const file of [
-    'package.json',
-    'Gemfile',
-    '_config.yml',
-    '_layouts/default.html',
-    '_includes/nav.html',
-  ]) {
+  for (const file of ['package.json', 'Gemfile', '_config.yml']) {
     if (!(await pathExists(join(context.root, file)))) {
       issues.push({
         severity: 'error',
@@ -285,20 +295,58 @@ async function validateJekyll(
   }
   const configPath = join(context.root, '_config.yml')
   if (!(await pathExists(configPath))) return issues
-  const source = await readFile(configPath, 'utf8')
-  const navigation = new Set(
-    [...source.matchAll(/^\s+page:\s*["']?([A-Za-z0-9_/-]+)["']?\s*$/gm)]
-      .map((match) => match[1])
-      .filter((value): value is string => Boolean(value)),
-  )
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'missing-page',
-        message: `Jekyll navigation references missing page "${id}".`,
-        file: '_config.yml',
-      })
+  const config = await readFile(configPath, 'utf8')
+  const usesTheme = /^\s*(?:theme|remote_theme)\s*:/m.test(config)
+  if (!usesTheme) {
+    for (const file of ['_layouts/default.html', '_includes/nav.html']) {
+      if (!(await pathExists(join(context.root, file)))) {
+        issues.push({
+          severity: 'error',
+          code: 'missing-generator-file',
+          message: `Jekyll project is missing ${file}.`,
+          file,
+        })
+      }
+    }
+  }
+  const sources: Array<{ file: string; text: string }> = []
+  if (/^navigation\s*:/m.test(config)) {
+    sources.push({ file: '_config.yml', text: config.slice(config.search(/^navigation\s*:/m)).split(/\n(?=\S)/)[0] ?? '' })
+  }
+  const dataFile = join(context.root, '_data', 'navigation.yml')
+  if (await pathExists(dataFile)) {
+    sources.push({ file: '_data/navigation.yml', text: await readFile(dataFile, 'utf8') })
+  }
+  if (sources.length === 0) {
+    issues.push(
+      navigationUnverifiedIssue(
+        'Jekyll',
+        '_config.yml',
+        usesTheme
+          ? 'the theme derives navigation from front matter.'
+          : 'no navigation list exists in _config.yml or _data/navigation.yml.',
+      ),
+    )
+    return issues
+  }
+  const pageIds = new Set(context.pageIds)
+  const navigation = new Set<string>()
+  for (const { file, text } of sources) {
+    for (const match of text.matchAll(/^\s+(?:-\s+)?page\s*:\s*["']?([A-Za-z0-9_./-]+?)["']?\s*$/gm)) {
+      const id = (match[1] ?? '').replace(/\.md$/i, '')
+      navigation.add(id)
+      if (!pageIds.has(id)) {
+        issues.push({
+          severity: 'error',
+          code: 'missing-page',
+          message: `Jekyll navigation references missing page "${id}".`,
+          file,
+        })
+      }
+    }
+    for (const match of text.matchAll(/^\s+(?:-\s+)?url\s*:\s*["']?\/([^"'\s]*?)\/?["']?\s*$/gm)) {
+      const route = match[1] ?? ''
+      navigation.add(route === '' ? 'index' : route.replace(/\.html$/i, ''))
     }
   }
   for (const id of context.pageIds) {
@@ -307,7 +355,7 @@ async function validateJekyll(
         severity: 'error',
         code: 'unnavigated-page',
         message: `Page "${id}" is not in Jekyll navigation.`,
-        file: `${id}.md`,
+        file: `${context.project.contentDir}/${id}.md`,
       })
     }
   }

@@ -55,6 +55,28 @@ External generators need their adapter package and native toolchain. Run a
 without uploading and reports the failing command. Native generators may
 require Python, Ruby, Hugo, or Node dependencies in addition to the adapter.
 
+## Validation warns that navigation was not verified
+
+`navigation-unverified` means the generator's sidebar or menu is produced by
+something Doxloop cannot read statically: a Hugo or Jekyll theme, a MkDocs
+navigation plugin, a Starlight plugin, a VitePress or Starlight sidebar built
+by a function or imported from another file, or a Sphinx `autosummary`
+toctree. It is a warning, not an error, and it replaces the false
+"unnavigated page" errors those sites used to get. Run **Dry run** on the
+Deploy page, which performs the generator's strict build, to confirm every
+page is reachable. To turn the warning into real checks, list the navigation
+in the generator's own configuration file instead of building it in code.
+
+## The wizard says a generator's tools are missing
+
+The **Tools** step checks the runtime the selected generator needs: Node.js
+20.12 or later with npm, pnpm, or yarn; Python 3.9 or later with the `venv`
+module; the `hugo` binary; or Ruby with Bundler. The project can still be
+created, because the adapter package installs with npm, but **Preview docs**
+and the strict build fail until the tool is installed. Install it, then choose
+**Check again**. The check runs on the machine where `doxloop ui` runs, not on
+the machine whose browser shows the control center.
+
 ## A plan cannot be approved
 
 **Approve & generate** stays disabled while questions remain under **Needs
@@ -76,6 +98,25 @@ reports that the server did not respond. If that happens, check the terminal
 where `doxloop ui` is running: a stopped or crashed server needs to be started
 again, and a run that was interrupted can be retried from its last durable
 stage under **Recent activity**.
+
+## Planning stopped after 20 minutes
+
+The planner has a time budget so a run that never answers becomes a named
+failure rather than a silent hang. The plan shows **Planning stopped after
+20 minutes without a plan reply** and can be retried. Raise **Maximum agent
+minutes** under **Monitoring → Advanced watch scope and budgets** when the
+product genuinely needs longer research, or set `DOXLOOP_PLAN_TIMEOUT_MINUTES`
+in the environment that starts `doxloop ui` to change the planning budget
+alone. A planning run that is stopped is ended together with any capture
+browser it opened.
+
+## Stop leaves the workspace changing
+
+Stopping a run ends the agent and the capture browser it started within ten
+seconds. If files still change in the run workspace afterwards, the agent
+process was started outside Doxloop's control, for example from a terminal
+where `doxloop create` was run interactively; close that terminal session to
+end it.
 
 ## A run fails after the agent already did most of the work
 
@@ -107,6 +148,27 @@ continuation. The proposal carries a note that sources changed, a resumed agent
 re-checks the pages it touches against the current sources, and the proposal's
 evidence snapshot is refreshed so it can be accepted.
 
+## The run reports a Claude API error
+
+Claude's own API request can break off mid-response: the log shows a line such
+as `API Error: Server error mid-response`, `overloaded`, or a rate limit, and
+Claude exits. Nothing in the documentation task caused this, and the agent's
+session is intact, so Doxloop resumes that session in the same workspace after
+a short pause, up to twice per run. The log shows **Resuming the same session
+(attempt 1 of 2)**, and the agent continues with its context, keeping every
+page and screenshot it already produced.
+
+The run fails only when every resume fails too. The message then names the
+API error and how many resumes were tried. Use **Resume the run** under
+**Continue without starting over** once the API is available again; it
+starts the agent in the same workspace with a brief of what is finished, so
+completed pages and verified screenshots are not paid for twice. Do not use
+**Retry generating**, which starts a new run from the plan and captures
+everything again.
+
+Set `DOXLOOP_AGENT_API_RESUMES` in the environment Doxloop runs in to change
+how many automatic resumes a run gets; `0` disables them.
+
 ## Generation finishes but nothing changed
 
 Generation never edits the documentation directly. Open **Review** to inspect
@@ -130,19 +192,33 @@ set the policy under **Settings → Visual evidence**. Configure the
 route**, then choose **Test application** to confirm the page is reachable.
 
 If the selected assistant has no browser capability, the application is
-unreachable, or authentication and safe test data are unavailable, Doxloop
-keeps the text guide complete and omits broken image links. Establish a
-non-production browser session or local fixture and run the update again.
-Never provide production credentials or customer data for screenshot capture.
+unreachable, or safe test data is unavailable, Doxloop keeps the text guide
+complete and omits broken image links.
+
+When **Test application** reports **Sign-in needed**, open **Application
+sign-in** on the same page. **Sign in with browser** opens a Chrome window where
+you sign in by hand, including MFA or SSO; choose **Save session** once the
+signed-in screen is showing, and every capture run starts with that session
+loaded. For a plain username and password form you can instead save a test
+account's credentials; the agent fills the form by secret name and never sees
+the values. A **saved browser session has expired** message means the
+application no longer accepts the recorded session: sign in with the browser
+again. Both are stored on your computer outside the project, never in the
+repository. Never provide production credentials or customer data for
+screenshot capture.
 
 ## Monitoring does not run
 
-Open **Sources → Monitoring**. Scheduled monitoring needs a Git repository
-source; a local folder cannot be polled without a checkout. On macOS, Doxloop
+Open **Sources → Monitoring**. Every source type can be scheduled: a Git
+repository through its provider, a local folder in place. On macOS, Doxloop
 tests the scheduled job in the real scheduler context when you choose **Save
 and install** and reports whether the background process can find the coding
-assistant. Choose **Check now** to run one cycle immediately and read its
-result under **Recent activity** on the Overview page.
+assistant. Choose **Check now** to run one cycle immediately; a notice reports
+its result and the full log is under **Recent activity** on the Overview page.
+
+A local folder without Git history reports "no sync baseline" until the first
+accepted update records one. Run **Update** once so later checks can compare
+the folder's files against that baseline.
 
 ## Deployment fails
 

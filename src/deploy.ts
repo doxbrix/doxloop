@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import {
   apiUrl,
   authenticatedRequest,
@@ -9,6 +10,8 @@ import { DoxloopError } from './errors.js'
 import { listFiles, resolveContainedDirectory } from './fs.js'
 import { recordDeployment } from './history.js'
 import { deployGeneratedSite } from './artifact-deploy.js'
+import { packageStaticOutput, writeDryRunArchive } from './artifact-deploy.js'
+import { buildDoxbrixStaticSite } from './doxbrix-build.js'
 import {
   deploymentVisibility,
   updateDeploymentVisibility,
@@ -26,6 +29,8 @@ import { validateProject } from './validation.js'
 import { loadQualityConfig } from './quality-config.js'
 import { readVerificationMetadata } from './quality-claims.js'
 import type { ReaderVerificationMetadata } from './types.js'
+import type { DeploymentTargetSetting } from './types.js'
+import { publishStaticTarget } from './deploy-targets/index.js'
 
 const MEDIA_EXTENSIONS = new Set([
   '.avif',
@@ -81,15 +86,37 @@ interface PushReport {
 
 export async function deploy(options: {
   root: string
+  target?: DeploymentTargetSetting
   name?: string
   slug?: string
   dryRun?: boolean
   public?: boolean
   apiUrl?: string
+  siteId?: string
+  projectId?: string
+  teamId?: string
+  branch?: string
+  basePath?: string
 }): Promise<void> {
   const project = await loadProject(options.root)
   const name = options.name?.trim() || project.title
   const slug = options.slug?.trim() || slugify(project.title)
+  const target = options.target ?? project.deployment?.target ?? 'doxbrix'
+  if (target !== 'doxbrix') {
+    await publishStaticTarget(target, {
+      root: options.root,
+      name,
+      slug,
+      ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+      ...(options.apiUrl ? { apiUrl: options.apiUrl } : {}),
+      ...(options.siteId ? { siteId: options.siteId } : {}),
+      ...(options.projectId ? { projectId: options.projectId } : {}),
+      ...(options.teamId ? { teamId: options.teamId } : {}),
+      ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.basePath ? { basePath: options.basePath } : {}),
+    })
+    return
+  }
   const visibility = deploymentVisibility(options.public)
   process.stdout.write(
     `Documentation project:\n  ${options.root}\nProduct sources excluded from deployment: ${project.sources.length}\n\n`,
@@ -122,9 +149,19 @@ export async function deploy(options: {
     )
 
     if (options.dryRun) {
+      const temporary = await mkdtemp(join(tmpdir(), 'doxloop-dry-run-'))
+      try {
+      const staticBuild = await buildDoxbrixStaticSite({
+        root: options.root,
+        outDir: join(temporary, 'build'),
+        ...(process.env.DOXLOOP_SITE_URL ? { siteUrl: process.env.DOXLOOP_SITE_URL } : {}),
+      })
+      const packaged = await packageStaticOutput(staticBuild.outputDir)
+      const archivePath = await writeDryRunArchive(options.root, packaged.archive)
       process.stdout.write(
-        `\nDeployment is valid.\nProject: ${name}\nSlug: ${slug}\nVisibility: ${visibility}\nPages: ${bundle.pages.length}\nMedia files: ${bundle.media.length}\nPayload: ${formatBytes(bytes)}\nNo data was uploaded.\n`,
+        `\nDeployment is valid.\nProject: ${name}\nSlug: ${slug}\nVisibility: ${visibility}\nPages: ${bundle.pages.length}\nMedia files: ${bundle.media.length}\nPayload: ${formatBytes(bytes)}\nArchive: ${archivePath}\nNo data was uploaded.\n`,
       )
+      } finally { await rm(temporary, { recursive: true, force: true }) }
       return
     }
 

@@ -147,11 +147,11 @@ function unresolvedNote(change: SourceChange): string | undefined {
     case 'not-git':
       return `Source "${change.name}" is not a Git repository, so changes cannot be compared.`
     case 'no-baseline':
-      return `Source "${change.name}" has no sync baseline yet. Run \`doxloop update\` to record one.`
+      return `Source "${change.name}" has no sync baseline yet. Accepting the next update records one.`
     case 'baseline-lost':
       return `The recorded baseline for source "${change.name}" no longer exists, so changes cannot be compared.`
     case 'spec-remote':
-      return `The API specification "${change.name}" is remote and is not compared locally. Run \`doxloop update\` to check it.`
+      return `The API specification "${change.name}" is remote and is not compared locally. The next update checks it.`
     default:
       return undefined
   }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { PNG } from 'pngjs'
+import { sessionCookieHeader, type CaptureAuthContext } from './capture-auth.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
 import type {
@@ -20,6 +21,12 @@ export interface ApplicationReadiness {
   status: 'not-configured' | 'ready' | 'authentication-required' | 'unreachable'
   url?: string
   message: string
+  /**
+   * How sign-in will be handled during capture: the recorded browser session,
+   * saved credentials the agent types, an expired session with nothing to
+   * fall back on, or no sign-in material at all.
+   */
+  authentication?: 'none' | 'session' | 'credentials' | 'expired'
 }
 
 interface ScreenshotManifest {
@@ -420,9 +427,10 @@ export function normalizeScreenshotIntent(value: unknown): ScreenshotIntent {
 export async function assertScreenshotPlanningReadiness(
   application: ApplicationConfig | undefined,
   rawIntent: unknown,
+  auth?: CaptureAuthContext,
 ): Promise<void> {
   if (normalizeScreenshotIntent(rawIntent) !== 'enabled') return
-  const readiness = await checkApplicationReadiness(application)
+  const readiness = await checkApplicationReadiness(application, auth)
   if (readiness.status === 'ready') return
   throw new DoxloopError(`Screenshots are selected, but capture cannot start. ${readiness.message} Start or configure a safe non-production application page, then check it again before planning.`)
 }
@@ -435,7 +443,9 @@ export function screenshotPlanSummary(plan: Pick<DocumentationPlan, 'pages'>): {
   }
 }
 
-export async function checkApplicationReadiness(application?: ApplicationConfig): Promise<ApplicationReadiness> {
+const MAX_READINESS_REDIRECTS = 5
+
+export async function checkApplicationReadiness(application?: ApplicationConfig, auth?: CaptureAuthContext): Promise<ApplicationReadiness> {
   if (!application) {
     return {
       configured: false,
@@ -446,61 +456,97 @@ export async function checkApplicationReadiness(application?: ApplicationConfig)
   }
   const readinessPath = application.readyPath ?? application.screenshots?.startPath
   const url = readinessPath ? new URL(readinessPath, application.baseUrl).toString() : application.baseUrl
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(5_000),
-      headers: { accept: 'text/html,application/json;q=0.9,*/*;q=0.1' },
-    })
-    if (response.status === 401 || response.status === 403) {
+  const cookie = sessionCookieHeader(auth?.session, url)
+  const signInRequired = (): ApplicationReadiness => {
+    if (auth?.credentials) {
       return {
         configured: true,
         reachable: true,
-        status: 'authentication-required',
+        status: 'ready',
         url,
-        message: 'The application is reachable but needs an authenticated browser session before capture.',
-      }
-    }
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location')
-      let redirect: URL | undefined
-      try { if (location) redirect = new URL(location, url) } catch { /* Report the invalid redirect below. */ }
-      const authenticationRedirect = redirect && redirect.origin === new URL(url).origin && /(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$|\?)/i.test(`${redirect.pathname}${redirect.search}`)
-      if (authenticationRedirect) {
-        return {
-          configured: true,
-          reachable: true,
-          status: 'authentication-required',
-          url,
-          message: 'The application is reachable but needs an authenticated browser session before capture.',
-        }
-      }
-      return {
-        configured: true,
-        reachable: false,
-        status: 'unreachable',
-        url,
-        message: location
-          ? `The application readiness check redirected to ${location}; configure the final safe application URL or an authentication route.`
-          : 'The application readiness check returned a redirect without a destination.',
-      }
-    }
-    if (!response.ok) {
-      return {
-        configured: true,
-        reachable: false,
-        status: 'unreachable',
-        url,
-        message: `The application readiness check returned HTTP ${response.status}.`,
+        authentication: 'credentials',
+        message: auth.session
+          ? 'The saved browser session no longer signs in, so Doxloop will sign in with the saved credentials during capture.'
+          : 'The application asks for sign-in. Doxloop will sign in with the saved credentials during capture.',
       }
     }
     return {
       configured: true,
       reachable: true,
+      status: 'authentication-required',
+      url,
+      authentication: auth?.session ? 'expired' : 'none',
+      message: auth?.session
+        ? 'The saved browser session has expired. Sign in with the browser again under Settings → Visual evidence before capturing.'
+        : 'The application is reachable but needs sign-in. Sign in with the browser or save sign-in credentials under Settings → Visual evidence.',
+    }
+  }
+  const origin = new URL(url).origin
+  const ready = (redirectedTo?: string): ApplicationReadiness => {
+    const landing = redirectedTo ? ` It redirects to ${redirectedTo}, which is where the capture browser will land.` : ''
+    return {
+      configured: true,
+      reachable: true,
       status: 'ready',
       url,
-      message: 'The application page is reachable. Doxloop will start its capture browser during documentation generation.',
+      authentication: cookie ? 'session' : 'none',
+      message: cookie
+        ? `The application page is reachable with the saved browser session.${landing} Doxloop will start its capture browser signed in.`
+        : `The application page is reachable.${landing} Doxloop will start its capture browser during documentation generation.`,
+    }
+  }
+  try {
+    // Follow same-origin redirects: a signed-in session bounced from a
+    // sign-up or landing route to the app shell is still a reachable page.
+    // Only a sign-in route, a cross-origin destination, or a loop is a problem.
+    let current = url
+    let redirectedTo: string | undefined
+    for (let hop = 0; hop < MAX_READINESS_REDIRECTS; hop += 1) {
+      const hopCookie = current === url ? cookie : sessionCookieHeader(auth?.session, current)
+      const response = await fetch(current, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(5_000),
+        headers: { accept: 'text/html,application/json;q=0.9,*/*;q=0.1', ...(hopCookie ? { cookie: hopCookie } : {}) },
+      })
+      if (response.status === 401 || response.status === 403) return signInRequired()
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location')
+        let redirect: URL | undefined
+        try { if (location) redirect = new URL(location, current) } catch { /* Report the invalid redirect below. */ }
+        if (redirect && redirect.origin === origin) {
+          if (/(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$|\?)/i.test(`${redirect.pathname}${redirect.search}`)) return signInRequired()
+          redirectedTo = `${redirect.pathname}${redirect.search}`
+          current = redirect.toString()
+          continue
+        }
+        return {
+          configured: true,
+          reachable: false,
+          status: 'unreachable',
+          url,
+          message: location
+            ? `The application readiness check redirected to ${location}, outside the configured application; configure the final safe application URL or an authentication route.`
+            : 'The application readiness check returned a redirect without a destination.',
+        }
+      }
+      if (!response.ok) {
+        return {
+          configured: true,
+          reachable: false,
+          status: 'unreachable',
+          url,
+          message: `The application readiness check returned HTTP ${response.status}${redirectedTo ? ` after redirecting to ${redirectedTo}` : ''}.`,
+        }
+      }
+      return ready(redirectedTo)
+    }
+    return {
+      configured: true,
+      reachable: false,
+      status: 'unreachable',
+      url,
+      message: `The application readiness check followed ${MAX_READINESS_REDIRECTS} redirects without reaching a page; configure the final safe application URL.`,
     }
   } catch (cause) {
     return {

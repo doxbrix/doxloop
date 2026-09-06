@@ -759,10 +759,39 @@ describe('screenshot workflow', () => {
     }
   })
 
-  test('accepts only authentication redirects as capture-ready', async () => {
+  test('reports how sign-in will be handled from the saved session and credentials', async () => {
     const server = createServer((request, response) => {
+      if (request.headers.cookie?.includes('sid=valid')) { response.statusCode = 200; response.end('signed in'); return }
       response.statusCode = 302
-      response.setHeader('location', request.url === '/auth-check' ? '/login' : '/moved')
+      response.setHeader('location', '/login')
+      response.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    try {
+      if (!address || typeof address === 'string') throw new Error('Missing test server address')
+      const application = { baseUrl: `http://127.0.0.1:${address.port}`, readyPath: '/app' }
+      const session = (value: string) => ({ cookies: [{ name: 'sid', value, domain: '127.0.0.1', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' as const }], origins: [] })
+
+      await expect(checkApplicationReadiness(application, { credentials: false })).resolves.toMatchObject({ status: 'authentication-required', authentication: 'none' })
+      await expect(checkApplicationReadiness(application, { session: session('valid'), credentials: false })).resolves.toMatchObject({ status: 'ready', authentication: 'session' })
+      await expect(checkApplicationReadiness(application, { session: session('stale'), credentials: false })).resolves.toMatchObject({ status: 'authentication-required', authentication: 'expired' })
+      await expect(checkApplicationReadiness(application, { session: session('stale'), credentials: true })).resolves.toMatchObject({ status: 'ready', authentication: 'credentials' })
+      await expect(checkApplicationReadiness(application, { credentials: true })).resolves.toMatchObject({ status: 'ready', authentication: 'credentials' })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    }
+  })
+
+  test('follows same-origin redirects and treats only sign-in, external, and looping redirects as blockers', async () => {
+    const server = createServer((request, response) => {
+      if (request.url === '/dashboard') { response.statusCode = 200; response.end('app shell'); return }
+      response.statusCode = 302
+      const location = request.url === '/auth-check' ? '/login'
+        : request.url === '/signup' ? '/dashboard'
+        : request.url === '/external' ? 'https://example.com/elsewhere'
+        : '/moved'
+      response.setHeader('location', location)
       response.end()
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -770,8 +799,17 @@ describe('screenshot workflow', () => {
     try {
       if (!address || typeof address === 'string') throw new Error('Missing test server address')
       const baseUrl = `http://127.0.0.1:${address.port}`
+      const session = { cookies: [{ name: 'sid', value: 'valid', domain: '127.0.0.1', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' as const }], origins: [] }
       await expect(checkApplicationReadiness({ baseUrl, readyPath: '/auth-check' })).resolves.toMatchObject({ status: 'authentication-required', reachable: true })
-      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/redirect-check' })).resolves.toMatchObject({ status: 'unreachable', reachable: false })
+      // A signed-in session bounced from the sign-up route to the app shell is still a reachable page.
+      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/signup' }, { session, credentials: false })).resolves.toMatchObject({
+        status: 'ready',
+        reachable: true,
+        authentication: 'session',
+        message: expect.stringContaining('redirects to /dashboard'),
+      })
+      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/external' })).resolves.toMatchObject({ status: 'unreachable', reachable: false, message: expect.stringContaining('outside the configured application') })
+      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/redirect-check' })).resolves.toMatchObject({ status: 'unreachable', reachable: false, message: expect.stringContaining('redirects without reaching a page') })
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
     }

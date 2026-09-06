@@ -1,11 +1,12 @@
 import { lstat } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { assertPublicContract } from './contract-validation.js'
-import { coverageJourneyId, coverageSignalId, readCoverageResolutions, type CoverageResolutions } from './coverage-resolutions.js'
+import { coverageJourneyId, coverageSignalId, coveragePageId, readCoverageResolutions, type CoverageResolutions } from './coverage-resolutions.js'
 import { listDocumentationPlans } from './documentation-plan.js'
 import { readEvidenceMap } from './evidence.js'
 import { matchesGlob } from './globs.js'
-import { loadProject } from './project.js'
+import { computeDrift } from './drift.js'
+import { loadPages, relativePath, loadProject } from './project.js'
 import { sourceHealth } from './source-connectors.js'
 import { discoverDocumentationSources, type DiscoveryEvidence } from './source-discovery.js'
 import type {
@@ -28,19 +29,30 @@ const SURFACES: Array<{ id: CoverageSurface; label: string; kinds?: DiscoveryEvi
   { id: 'errors', label: 'Errors & recovery', kinds: ['error'], denominator: 'Public errors and failure contracts discovered in configured sources, less explicit plan exclusions.' },
   { id: 'events-integrations', label: 'Events & integrations', kinds: ['event', 'integration'], denominator: 'Events, webhooks, connectors, providers, and integrations discovered in configured sources, less explicit plan exclusions.' },
   { id: 'reader-journeys', label: 'Reader journeys', denominator: 'Priority reader outcomes configured in the documentation brief.' },
-  { id: 'verified-pages', label: 'Verified pages', denominator: 'Documentation pages with evidence-map entries; verified means confidence=verified with a verification timestamp or revision.' },
+  { id: 'verified-pages', label: 'Verified pages', denominator: 'All existing documentation pages; verified requires current source evidence and no detected drift.' },
 ]
 
 /** Deterministic source health, coverage, and evidence precision report. */
 export async function buildSourceIntelligence(root: string): Promise<SourceIntelligenceReport> {
   const project = await loadProject(root)
-  const [{ inventory }, map, plans, health, resolutions] = await Promise.all([
+  const [{ inventory }, rawMap, plans, health, resolutions, files, drift] = await Promise.all([
     discoverDocumentationSources(root),
     readEvidenceMap(root),
     listDocumentationPlans(root),
     sourceHealth(root, project.sources),
     readCoverageResolutions(root),
+    loadPages(root, project),
+    computeDrift(root, project),
   ])
+  const live = new Set(files.map((file) => relativePath(root, file)))
+  const map = rawMap ? { ...rawMap, pages: Object.fromEntries(Object.entries(rawMap.pages).filter(([page]) => live.has(page))) } : undefined
+  const stale = new Set(drift.pages.map((page) => page.page))
+  const currentVerification = (page: string, evidence: NonNullable<typeof map>['pages'][string]): boolean => evidence.confidence === 'verified' && evidence.sources.length > 0 && drift.status !== 'unknown' && !stale.has(page) && evidence.sources.every((entry) => {
+    const source = health.find((item) => item.name === entry.source)
+    const date = evidence.verifiedOn?.[entry.source]
+    const revision = evidence.verifiedAt?.[entry.source]
+    return source?.status !== 'error' && Boolean(source) && (Boolean(revision && source?.revision === revision) || Boolean(!source?.revision && date && Number.isFinite(Date.parse(date)) && (!project.sync.maxVerificationAgeDays || Date.now() - Date.parse(date) <= project.sync.maxVerificationAgeDays * 86_400_000)))
+  })
   const plan = plans.find((item) => ['generated', 'generating', 'approved'].includes(item.status))
   const signals = inventory.sources.flatMap((source) => source.evidence)
   const exclusions = new Set(plan?.capabilities.filter((item) => item.disposition === 'excluded').flatMap((item) => [item.id, item.title, ...item.evidence.map((entry) => entry.label ?? entry.path)]) ?? [])
@@ -53,36 +65,36 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
     const id = coverageJourneyId(journey)
     const resolution = resolutions.items[id]
     const linkedPage = resolution?.page && pagePaths.includes(resolution.page) ? resolution.page : undefined
-    const documented = plannedOutcomes.has(normalize(journey)) || resolution?.disposition === 'documented' && linkedPage
+    const documented = resolution?.disposition === 'documented' && linkedPage
     const suggestion = linkedPage ? undefined : suggestedPage(journey, pagePaths, plan?.pages ?? [])
     return {
       id,
       surface: 'reader-journeys',
       label: journey,
-      state: documented ? 'documented' : resolution?.disposition === 'needs-human' ? 'needs-human' : 'uncovered',
+      state: documented ? 'documented' : resolution?.disposition === 'needs-human' ? 'needs-human' : plannedOutcomes.has(normalize(journey)) ? 'planned' : 'uncovered',
       ...(linkedPage ? { page: linkedPage } : {}),
       ...(suggestion ? { suggestedPage: suggestion } : {}),
       ...(resolution?.reason ? { reason: resolution.reason } : {}),
     }
   })
   const journeyDocumented = journeyItems.filter((item) => item.state === 'documented').length
-  const verifiedPages = mappedPages.filter((page) => page.confidence === 'verified' && (Object.keys(page.verifiedAt ?? {}).length > 0 || Object.keys(page.verifiedOn ?? {}).length > 0)).length
-  const verifiedItems = Object.entries(map?.pages ?? {}).map(([page, evidence]): CoverageItem => ({
-    id: `page-${page}`,
+  const verifiedItems = [...live].map((page): CoverageItem => ({
+    id: coveragePageId(page),
     surface: 'verified-pages',
     label: page,
-    state: evidence.confidence === 'verified' && (Object.keys(evidence.verifiedAt ?? {}).length > 0 || Object.keys(evidence.verifiedOn ?? {}).length > 0) ? 'documented' : 'uncovered',
+    state: resolutions.items[coveragePageId(page)]?.disposition === 'needs-human' ? 'needs-human' : map?.pages[page] && currentVerification(page, map.pages[page]!) ? 'documented' : stale.has(page) ? 'stale' : 'uncovered',
     page,
   }))
+  const verifiedPages = verifiedItems.filter((item) => item.state === 'documented').length
   const metrics: CoverageMetric[] = [
     ...signalMetrics,
     metric(SURFACES[7]!, journeyDocumented, journeys.length, 0, journeyItems),
-    metric(SURFACES[8]!, verifiedPages, mappedPages.length, 0, verifiedItems),
+    metric(SURFACES[8]!, verifiedPages, live.size, 0, verifiedItems),
   ]
   const groups = inventory.sources.map((source): CoverageGroup => {
     const relevant = source.evidence.filter((item) => ['command', 'export', 'operation', 'route', 'configuration', 'authentication', 'authorization', 'error', 'event', 'integration'].includes(item.kind))
     const included = relevant.filter((item) => !isSignalExcluded(item, exclusions, resolutions))
-    const documented = included.filter((item) => isSignalDocumented(item, map, plan?.capabilities ?? [])).length
+    const documented = included.filter((item) => isSignalDocumented(item, map)).length
     return { source: source.name, ...(source.scope ? { scope: source.scope } : {}), documented, total: included.length, percent: percentage(documented, included.length), status: included.length === 0 ? 'unknown' : 'measured' }
   })
   const report: SourceIntelligenceReport = {
@@ -92,9 +104,9 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
       metrics,
       groups,
       pages: pagePaths,
-      disclaimer: 'Coverage measures discovered surfaces linked to documentation evidence. It does not prove that prose, examples, or behavior are correct.',
+      disclaimer: 'Coverage counts existing pages linked to source evidence. Planned pages are shown separately and do not count as documented; verified pages require current evidence. It does not prove that prose, examples, or behavior are correct.',
     },
-    evidenceDiagnostics: await evidenceDiagnostics(root, project, map, inventory.sources.flatMap((source) => source.evidence)),
+    evidenceDiagnostics: await evidenceDiagnostics(root, project, rawMap, inventory.sources.flatMap((source) => source.evidence)),
   }
   await assertPublicContract('coverage-v1', report)
   return report
@@ -119,12 +131,12 @@ function coverageForSignals(surface: typeof SURFACES[number], signals: Discovery
   const candidates = signals.filter((item) => surface.kinds?.includes(item.kind))
   const excluded = candidates.filter((item) => isSignalExcluded(item, exclusions, resolutions))
   const included = candidates.filter((item) => !excluded.includes(item))
-  const documented = included.filter((item) => isSignalDocumented(item, map, capabilities)).length
+  const documented = included.filter((item) => isSignalDocumented(item, map)).length
   const items = candidates.map((item): CoverageItem => {
     const id = coverageSignalId(item.source, item.kind, item.path, item.label)
     const resolution = resolutions.items[id]
     const isExcluded = excluded.includes(item)
-    const isDocumented = !isExcluded && isSignalDocumented(item, map, capabilities)
+    const isDocumented = !isExcluded && isSignalDocumented(item, map)
     return {
       id,
       surface: surface.id,
@@ -132,7 +144,7 @@ function coverageForSignals(surface: typeof SURFACES[number], signals: Discovery
       source: item.source,
       path: item.path,
       kind: item.kind,
-      state: isExcluded ? 'excluded' : isDocumented ? 'documented' : resolution?.disposition === 'needs-human' ? 'needs-human' : 'uncovered',
+      state: isExcluded ? 'excluded' : isDocumented ? 'documented' : resolution?.disposition === 'needs-human' ? 'needs-human' : isSignalPlanned(item, capabilities) ? 'planned' : 'uncovered',
       ...(resolution?.page ? { page: resolution.page } : {}),
       ...(resolution?.reason ? { reason: resolution.reason } : {}),
     }
@@ -144,9 +156,11 @@ function isSignalExcluded(signal: DiscoveryEvidence, exclusions: Set<string>, re
   return exclusions.has(signal.label) || exclusions.has(signal.path) || resolutions.items[coverageSignalId(signal.source, signal.kind, signal.path, signal.label)]?.disposition === 'excluded'
 }
 
-function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefined, capabilities: NonNullable<Awaited<ReturnType<typeof listDocumentationPlans>>>[number]['capabilities']): boolean {
-  const inPlan = capabilities.some((capability) => (capability.disposition === 'planned' || capability.disposition === 'existing') && capability.pageIds.length > 0 && capability.evidence.some((item) => item.source === signal.source && (item.label === signal.label || item.path === signal.path)))
-  if (inPlan) return true
+function isSignalPlanned(signal: DiscoveryEvidence, capabilities: NonNullable<Awaited<ReturnType<typeof listDocumentationPlans>>>[number]['capabilities']): boolean {
+  return capabilities.some((capability) => capability.disposition === 'planned' && capability.pageIds.length > 0 && capability.evidence.some((item) => item.source === signal.source && (item.label === signal.label || item.path === signal.path)))
+}
+
+function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefined): boolean {
   return Object.values(map?.pages ?? {}).some((page) => page.sources.some((entry) => entry.source === signal.source && [...(entry.paths ?? []), ...(entry.operations ?? [])].some((identifier) => evidenceMatches(signal, identifier))))
 }
 

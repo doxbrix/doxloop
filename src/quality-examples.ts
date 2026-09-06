@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { pathExists } from './fs.js'
@@ -69,6 +70,10 @@ async function verifyOpenApiRequest(root: string, example: ExampleDefinition): P
 function objectRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 
 async function executePythonExample(root: string, example: ExampleDefinition): Promise<QualityCheck> {
+  const image = process.env.DOXLOOP_PYTHON_SANDBOX_IMAGE
+  if (!image || !/^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(image)) {
+    return { code: QUALITY_CODES.exampleSourceVerified, category: 'examples', status: 'skipped', file: example.file, message: `${example.id} was not executed. Python requires a locally installed, digest-pinned container image in DOXLOOP_PYTHON_SANDBOX_IMAGE; host Python is never used as a sandbox.` }
+  }
   const workingRoot = contained(root, example.workingDirectory)
   const source = contained(workingRoot, example.file)
   if (!(await pathExists(source))) return failure(example, 'The declared Python example file does not exist.')
@@ -77,6 +82,7 @@ async function executePythonExample(root: string, example: ExampleDefinition): P
   if (containsProductionTarget(content)) return failure(example, 'Execution was refused because the example names a non-example network destination.')
   if (/\b(?:ctypes|os\.system|subprocess|pty|multiprocessing)\b/.test(content)) return failure(example, 'Python examples may not start subprocesses or load native process APIs.')
   const parent = await mkdtemp(join(tmpdir(), 'doxloop-python-example-'))
+  const container = `doxloop-example-${randomUUID()}`
   try {
     const sandbox = join(parent, 'workspace'); await mkdir(sandbox)
     const script = join(sandbox, basename(source)); await cp(source, script)
@@ -87,16 +93,33 @@ async function executePythonExample(root: string, example: ExampleDefinition): P
       if (unsafe) return failure(example, `Fixture ${fixture} ${unsafe}.`)
       await cp(fixtureSource, join(sandbox, basename(fixtureSource)), { recursive: true })
     }
-    const wrapper = `import runpy,socket,sys\nclass BlockedSocket:\n def __init__(self,*a,**k): raise RuntimeError('network disabled by Doxloop')\nsocket.socket=BlockedSocket\nrunpy.run_path(sys.argv[1],run_name='__main__')\n`
-    const result = await run('python3', ['-I', '-c', wrapper, script], sandbox, 20_000)
+    await readableFixtures(sandbox)
+    const result = await run('docker', [
+      'run', '--rm', '--pull=never', '--name', container,
+      '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+      '--pids-limit=32', '--memory=256m', '--cpus=1', '--user=65534:65534',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+      '--mount', `type=bind,src=${sandbox},dst=/workspace,readonly`,
+      '--workdir=/workspace', '--env=HOME=/tmp', '--entrypoint=python3', image,
+      '-I', `/workspace/${basename(source)}`,
+    ], sandbox, 20_000)
     const matches = result.code === example.expected.exitCode &&
       (example.expected.stdoutIncludes === undefined || result.stdout.includes(example.expected.stdoutIncludes)) &&
       (example.expected.stderrIncludes === undefined || result.stderr.includes(example.expected.stderrIncludes))
     return matches
-      ? { code: QUALITY_CODES.examplePassed, category: 'examples', status: 'pass', message: `${example.id} produced the declared result in an isolated Python process with socket access disabled.`, file: example.file }
+      ? { code: QUALITY_CODES.examplePassed, category: 'examples', status: 'pass', message: `${example.id} produced the declared result in a container with no network, a read-only filesystem, and only the declared example fixtures mounted.`, file: example.file }
       : failure(example, `Expected exit ${example.expected.exitCode}; received ${result.code}.`, `stdout: ${clip(result.stdout)}\nstderr: ${clip(result.stderr)}`)
   } catch (error) { return failure(example, error instanceof Error ? error.message : String(error)) }
-  finally { await rm(parent, { recursive: true, force: true }) }
+  finally {
+    await run('docker', ['rm', '-f', container], parent, 5_000).catch(() => undefined)
+    await rm(parent, { recursive: true, force: true })
+  }
+}
+
+async function readableFixtures(path: string): Promise<void> {
+  const info = await stat(path)
+  await chmod(path, info.isDirectory() ? 0o755 : 0o644)
+  if (info.isDirectory()) for (const name of await readdir(path)) await readableFixtures(join(path, name))
 }
 
 async function executeNodeExample(root: string, example: ExampleDefinition): Promise<QualityCheck> {
@@ -148,7 +171,7 @@ function run(command: string, args: string[], cwd: string, timeout: number): Pro
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeout)
     child.stdout.on('data', (chunk) => { if (stdout.length < 64_000) stdout += chunk })
     child.stderr.on('data', (chunk) => { if (stderr.length < 64_000) stderr += chunk })
-    child.once('error', reject)
+    child.once('error', (error) => { clearTimeout(timer); reject(error) })
     child.once('exit', (code) => { clearTimeout(timer); resolveRun({ code: timedOut ? 124 : (code ?? 1), stdout, stderr }) })
   })
 }

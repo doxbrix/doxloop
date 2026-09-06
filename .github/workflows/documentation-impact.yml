@@ -1,0 +1,31 @@
+name: Documentation impact
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    steps:
+      # Always execute trusted base code. Never check out or run the PR head.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { loadImpact, impactComment } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/docs-impact.mjs`).href);
+            const files = await github.paginate(github.rest.pulls.listFiles, { ...context.repo, pull_number: context.issue.number, per_page: 100 });
+            if (context.payload.pull_request.changed_files > files.length) throw new Error('The pull request file list was truncated; documentation impact is incomplete.');
+            let result;
+            try { result = await loadImpact(process.env.DOXLOOP_DOCS_ROOT || '.', files.flatMap(f => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])])); }
+            catch (error) { if (error.code === 'ENOENT') { core.notice('No committed Doxloop project/evidence map at the configured documentation root.'); return; } throw error; }
+            const body = impactComment(result);
+            const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: context.issue.number });
+            const previous = comments.find(c => c.user.login === 'github-actions[bot]' && c.body.startsWith('<!-- doxloop-docs-impact -->'));
+            if (previous) await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });

@@ -46,6 +46,8 @@ if len(match.group("body").splitlines()) > 500:
 
 for markdown_file in root.rglob("*.md"):
     markdown = markdown_file.read_text(encoding="utf-8")
+    # Fenced code holds syntax examples, not cross-references.
+    markdown = re.sub(r"^(`{3,4}).*?^\1[ \t]*$", "", markdown, flags=re.DOTALL | re.MULTILINE)
     for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", markdown):
         path = target.split("#", 1)[0]
         if not path or "://" in path or path.startswith("/"):

@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline/promises'
+import { Writable } from 'node:stream'
 import { styleText } from 'node:util'
 import { booleanFlag } from './args.js'
 import { DoxloopError } from './errors.js'
@@ -149,6 +150,30 @@ export async function promptText(options: {
       }
       return value
     }
+  } finally {
+    reader.close()
+  }
+}
+
+/**
+ * Read one line without echoing it, for passwords. The readline interface
+ * writes its echo to a sink, so a terminal shows nothing while typing; piped
+ * input is read as a plain line.
+ */
+export async function promptSecret(options: { message: string; io?: PromptIo }): Promise<string> {
+  const io = options.io ?? defaultIo()
+  io.output.write(`${color(io, 'cyan', '◆')} ${options.message} ${color(io, 'dim', '(typing is hidden)')}\n`)
+  io.output.write(`${color(io, 'dim', '│')}  `)
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback() } })
+  const reader = createInterface({ input: io.input, output: sink, terminal: io.input.isTTY === true })
+  try {
+    const line = await new Promise<string>((resolve, reject) => {
+      reader.once('line', resolve)
+      reader.once('SIGINT', () => reject(promptCanceled()))
+      reader.once('close', () => reject(promptCanceled()))
+    })
+    io.output.write('\n')
+    return line
   } finally {
     reader.close()
   }

@@ -28,7 +28,7 @@ import type {
 
 export interface StartRequestInput {
   kind: RequestKind
-  trigger?: 'manual' | 'schedule' | 'watch'
+  trigger?: SyncRun['trigger'] | 'watch'
   requestText?: string | undefined
   agent?: string | undefined
   model?: string | undefined
@@ -266,14 +266,14 @@ export async function recordSyncRun(
         run.createdAt,
         finishedAt,
         finishedAt ? elapsed(run.createdAt, finishedAt) : null,
-        run.authoringMode ?? 'update',
+        run.editRequest ? 'edit' : run.authoringMode ?? 'update',
         run.trigger,
-        text(context.requestText),
+        text(run.editRequest?.followUps.at(-1)?.instruction ?? run.editRequest?.instruction ?? context.requestText),
         text(context.agent),
         text(context.model),
         text(context.reasoningEffort),
         run.status,
-        run.changes.length,
+        run.changes.filter((change) => change.category === 'page').length,
         counts.added,
         counts.removed,
         run.validation?.pages ?? null,
@@ -290,11 +290,20 @@ export async function recordSyncRun(
          decided_at, lines_added, lines_removed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (request_id, path) DO UPDATE SET
+         title = COALESCE(excluded.title, request_pages.title),
+         change_kind = excluded.change_kind,
+         category = excluded.category,
          decision = excluded.decision,
          decided_at = excluded.decided_at,
          lines_added = excluded.lines_added,
          lines_removed = excluded.lines_removed`,
     )
+    if (run.editRequest) {
+      for (const path of run.editRequest.paths) {
+        if (run.changes.some((change) => change.path === path)) continue
+        upsertPage.run(run.id, path, null, 'modified', 'page', 'pending', null, 0, 0)
+      }
+    }
     for (const change of run.changes) {
       const decision = changeDecision(change)
       const changeCounts = lineCounts([change])
@@ -490,8 +499,9 @@ export async function requestPages(
     database
       .prepare(
         `SELECT request_id, path, title, change_kind, decision, lines_added, lines_removed
-           FROM request_pages
-          WHERE request_id IN (${requestIds.map(() => '?').join(', ')})
+         FROM request_pages
+          WHERE category = 'page'
+            AND request_id IN (${requestIds.map(() => '?').join(', ')})
           ORDER BY path`,
       )
       .all(...requestIds),

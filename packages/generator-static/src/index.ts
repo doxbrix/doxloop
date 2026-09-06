@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   defineGenerator,
   type GeneratorPage,
+  type GeneratorRenderContext,
+  type GeneratorRenderedPage,
   type GeneratorScaffoldContext,
   type GeneratorValidationContext,
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
 import {
+  contentRelativePages,
   isRecord,
   pathExists,
   readPackageJson,
@@ -35,7 +38,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-static',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-static', import.meta.url)),
   },
-  planning: { navigationFiles: ['scripts/build.mjs'] },
+  planning: { navigationFiles: ['site/index.html'] },
   project: {
     defaultContentDir: 'site',
     pageExtensions: ['.html'],
@@ -47,6 +50,7 @@ const adapter = defineGenerator({
   preview: (options) => serveStaticDirectory(options, 'site', 'Static HTML'),
   validate: validateStatic,
   readPage: readHtmlPage,
+  renderPage: renderHtmlPage,
 })
 
 export default adapter
@@ -95,8 +99,12 @@ console.log('Static HTML is ready in site/')
 body { margin: 0; color: #1f2937; } header { border-bottom: 1px solid #e5e7eb; padding: 1rem 2rem; }
 .brand { color: var(--primary); font-weight: 700; text-decoration: none; }
 .layout { display: grid; grid-template-columns: 16rem minmax(0, 48rem); gap: 3rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
-nav ul { list-style: none; padding: 0; } nav a { display: block; padding: .5rem; }
+nav ul { list-style: none; padding: 0; } nav a { display: block; padding: .5rem; } nav ul ul { padding-left: 1rem; }
 main { line-height: 1.7; min-width: 0; }
+.callout { border-left: 4px solid var(--primary); padding: .75rem 1rem; margin: 1rem 0; background: #eef2ff; }
+.callout-warning { border-color: #d97706; background: #fffbeb; } .callout-danger { border-color: #dc2626; background: #fef2f2; }
+.tabs details { border: 1px solid #e5e7eb; border-radius: .5rem; margin: .5rem 0; } .tabs summary { cursor: pointer; padding: .5rem 1rem; font-weight: 600; } .tabs details > :not(summary) { padding: 0 1rem 1rem; }
+pre { overflow: auto; padding: 1rem; background: #111827; color: #f9fafb; border-radius: .5rem; } pre.mermaid { background: transparent; color: inherit; }
 @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } }
 `,
     { encoding: 'utf8', flag: 'wx' },
@@ -155,11 +163,17 @@ main { line-height: 1.7; min-width: 0; }
   )
 }
 
+/**
+ * A static page is navigated when the home page reaches it through internal
+ * links, directly or through a section page. Links are followed page by page,
+ * so a section index that lists its own children is enough.
+ */
 async function validateStatic(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  for (const file of ['package.json', 'scripts/build.mjs', 'site/index.html']) {
+  const contentDir = context.project.contentDir.split('\\').join('/').replace(/\/+$/, '')
+  for (const file of ['package.json', 'scripts/build.mjs', `${contentDir}/index.html`]) {
     if (!(await pathExists(join(context.root, file)))) {
       issues.push({
         severity: 'error',
@@ -169,33 +183,59 @@ async function validateStatic(
       })
     }
   }
-  const indexPath = join(context.contentRoot, 'index.html')
-  if (!(await pathExists(indexPath))) return issues
-  const source = await readFile(indexPath, 'utf8')
-  const navigation = new Set<string>()
-  for (const match of source.matchAll(/<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>/gi)) {
-    const href = match[1]
-    if (!href || /^[a-z]+:\/\//i.test(href) || href.startsWith('#')) continue
-    const clean = href.split(/[?#]/)[0]?.replace(/^\/|\/$/g, '') ?? ''
-    navigation.add(clean === '' ? 'index' : `${clean}/index`)
+  if (!(await pathExists(join(context.contentRoot, 'index.html')))) return issues
+  const pages = contentRelativePages(context.contentRoot, context.pages)
+  const pageIds = new Set(pages.map((page) => page.replace(/\.html?$/i, '')))
+  const resolvePage = (route: string): string | undefined => {
+    const clean = route.replace(/^\/+|\/+$/g, '').replace(/\.html?$/i, '')
+    if (clean === '') return pageIds.has('index') ? 'index' : undefined
+    if (pageIds.has(clean)) return clean
+    if (pageIds.has(`${clean}/index`)) return `${clean}/index`
+    return undefined
   }
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'missing-page',
-        message: `Static navigation references missing page "${id}".`,
-        file: 'site/index.html',
-      })
+  const reached = new Set<string>(['index'])
+  const queue = ['index']
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    const file = pages.find((page) => page.replace(/\.html?$/i, '') === id)
+    if (!file) continue
+    const source = await readFile(join(context.contentRoot, file), 'utf8')
+    const base = `http://doxloop.local/${posix.dirname(file) === '.' ? '' : `${posix.dirname(file)}/`}`
+    for (const match of source.matchAll(/<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>/gi)) {
+      const href = match[1]
+      if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('#') || href.startsWith('//')) continue
+      let route: string
+      try {
+        route = new URL(href, base).pathname
+      } catch {
+        continue
+      }
+      const target = resolvePage(route)
+      if (!target) {
+        if (!/\.[a-z0-9]+$/i.test(route) || /\.html?$/i.test(route)) {
+          issues.push({
+            severity: 'error',
+            code: 'missing-page',
+            message: `Static navigation references missing page "${route}".`,
+            file: `${contentDir}/${file}`,
+          })
+        }
+        continue
+      }
+      if (!reached.has(target)) {
+        reached.add(target)
+        queue.push(target)
+      }
     }
   }
-  for (const id of context.pageIds) {
-    if (!navigation.has(id)) {
+  for (const page of pages) {
+    const id = page.replace(/\.html?$/i, '')
+    if (!reached.has(id)) {
       issues.push({
         severity: 'error',
         code: 'unnavigated-page',
-        message: `Page "${id}" is not in static navigation.`,
-        file: `${id}.html`,
+        message: `Page "${id}" is not reachable from the static site's home page.`,
+        file: `${contentDir}/${page}`,
       })
     }
   }
@@ -215,6 +255,14 @@ async function readHtmlPage(path: string): Promise<GeneratorPage> {
   return description
     ? { title, description, body: raw }
     : { title, body: raw }
+}
+
+/** The page is already HTML; the preview shows its main landmark without the site chrome. */
+async function renderHtmlPage(context: GeneratorRenderContext): Promise<GeneratorRenderedPage> {
+  const raw = context.page.body
+  const main = raw.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
+  const body = main ?? raw.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? raw
+  return { html: body.replace(/<script\b[\s\S]*?<\/script>/gi, '').trim() }
 }
 
 function escapeHtml(value: string): string {

@@ -14,10 +14,19 @@ import {
   heading,
   note,
   promptConfirm,
+  promptSecret,
   promptSelect,
   promptText,
   type PromptIo,
 } from './prompts.js'
+import {
+  captureAuthStatus,
+  removeCaptureCredentials,
+  removeCaptureSession,
+  saveCaptureCredentials,
+  saveCaptureSession,
+} from './capture-auth.js'
+import { startCaptureSignIn } from './screen-capture-provider.js'
 import type {
   AgentName,
   ApplicationConfig,
@@ -99,18 +108,24 @@ export function formatProjectSettings(root: string, project: DoxloopProject): st
           )
           .join('\n  ')
   const deployment = effectiveDeployment(project)
-  return `Project\n  Root: ${root}\n  Title: ${project.title}\n  Generator: ${generator}\n  Agent: ${project.defaultAgent ?? 'Choose at authoring time'}\n\nEvidence\n  ${evidence}\n\nDocumentation\n  Audience: ${project.documentation.primaryAudience ?? 'Agent will determine'}\n  Locale: ${project.documentation.locale}\n  Tone: ${project.documentation.tone.join(', ')}\n\nApplication screenshots\n  ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} at ${project.application.baseUrl}` : 'Not configured'}\n\nDeployment\n  Name: ${deployment.name}\n  Slug: ${deployment.slug}\n  Visibility: ${deployment.visibility}\n  Destination: ${deployment.apiUrl}`
+  return `Project\n  Root: ${root}\n  Title: ${project.title}\n  Generator: ${generator}\n  Agent: ${project.defaultAgent ?? 'Choose at authoring time'}\n\nEvidence\n  ${evidence}\n\nDocumentation\n  Audience: ${project.documentation.primaryAudience ?? 'Agent will determine'}\n  Locale: ${project.documentation.locale}\n  Tone: ${project.documentation.tone.join(', ')}\n\nApplication screenshots\n  ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} at ${project.application.baseUrl}` : 'Not configured'}\n\nDeployment\n  Target: ${deployment.target}\n  Name: ${deployment.name}\n  Slug: ${deployment.slug}\n  Visibility: ${deployment.visibility}\n  Destination: ${deployment.apiUrl}`
 }
 
 export function effectiveDeployment(
   project: DoxloopProject,
   fallbackApiUrl?: string,
-): Required<DeploymentConfig> {
+): Required<Pick<DeploymentConfig, 'target' | 'name' | 'slug' | 'visibility' | 'apiUrl'>> & Omit<DeploymentConfig, 'target' | 'name' | 'slug' | 'visibility' | 'apiUrl'> {
   return {
+    target: project.deployment?.target ?? 'doxbrix',
     name: project.deployment?.name?.trim() || project.title,
     slug: project.deployment?.slug?.trim() || slugify(project.title),
     visibility: project.deployment?.visibility ?? 'private',
     apiUrl: apiUrl(project.deployment?.apiUrl ?? fallbackApiUrl),
+    ...(project.deployment?.siteId ? { siteId: project.deployment.siteId } : {}),
+    ...(project.deployment?.projectId ? { projectId: project.deployment.projectId } : {}),
+    ...(project.deployment?.teamId ? { teamId: project.deployment.teamId } : {}),
+    ...(project.deployment?.branch ? { branch: project.deployment.branch } : {}),
+    ...(project.deployment?.basePath ? { basePath: project.deployment.basePath } : {}),
   }
 }
 
@@ -394,7 +409,7 @@ async function editScreenshots(
   project: DoxloopProject,
   io: PromptIo,
 ): Promise<void> {
-  const action = await promptSelect<'configure' | 'policy' | 'remove' | 'back'>({
+  const action = await promptSelect<'configure' | 'policy' | 'signin' | 'remove' | 'back'>({
     message: 'Application screenshots',
     choices: [
       {
@@ -407,6 +422,12 @@ async function editScreenshots(
         ...(!project.application ? { disabled: 'configure an application first' } : {}),
       },
       {
+        value: 'signin',
+        label: 'Application sign-in',
+        hint: 'browser session or test-account credentials for login pages',
+        ...(!project.application ? { disabled: 'configure an application first' } : {}),
+      },
+      {
         value: 'remove',
         label: 'Remove application configuration',
         ...(!project.application ? { disabled: 'nothing configured' } : {}),
@@ -416,6 +437,10 @@ async function editScreenshots(
     io,
   })
   if (action === 'back') return
+  if (action === 'signin') {
+    await editCaptureSignIn(root, project, io)
+    return
+  }
   if (action === 'remove') {
     await saveProjectSettings(root, { application: undefined })
     note(io, '✓ Application screenshot configuration removed.')
@@ -459,6 +484,73 @@ async function editScreenshots(
     },
   })
   note(io, `✓ Screenshot policy changed to ${policy}.`)
+}
+
+/**
+ * Sign-in for the capture browser. Both options are stored in the user's
+ * Doxloop config home against this project, never in `.doxloop/project.json`.
+ */
+async function editCaptureSignIn(
+  root: string,
+  project: DoxloopProject,
+  io: PromptIo,
+): Promise<void> {
+  const application = project.application!
+  const status = await captureAuthStatus(root)
+  note(io, `Browser session: ${status.session ? `saved ${status.session.savedAt} for ${status.session.origin} (${status.session.cookies} cookies)` : 'none'}`)
+  note(io, `Credentials: ${status.credentials ? `saved for ${status.credentials.username}` : 'none'}`)
+  const action = await promptSelect<'browser' | 'credentials' | 'login-path' | 'forget-session' | 'forget-credentials' | 'back'>({
+    message: 'Application sign-in',
+    choices: [
+      { value: 'browser', label: 'Sign in with browser', hint: 'opens Chrome; sign in by hand, including MFA or SSO' },
+      { value: 'credentials', label: 'Save test-account credentials', hint: 'typed by the capture server, never shown to the agent' },
+      { value: 'login-path', label: 'Set the sign-in route', hint: application.authentication?.loginPath ?? 'not set' },
+      { value: 'forget-session', label: 'Forget the browser session', ...(!status.session ? { disabled: 'none saved' } : {}) },
+      { value: 'forget-credentials', label: 'Remove the credentials', ...(!status.credentials ? { disabled: 'none saved' } : {}) },
+      { value: 'back', label: 'Back' },
+    ],
+    io,
+  })
+  if (action === 'back') return
+  if (action === 'browser') {
+    const session = await startCaptureSignIn(application)
+    note(io, `Chrome opened at ${session.url}. Complete the sign-in there and wait for the signed-in screen.`)
+    const save = await promptConfirm({ message: 'Save the signed-in session now?', initial: true, io })
+    if (!save) {
+      await session.cancel()
+      note(io, 'Sign-in discarded.')
+      return
+    }
+    const state = await session.finish()
+    const stored = await saveCaptureSession(root, new URL(application.baseUrl).origin, state)
+    note(io, `✓ Browser session saved with ${stored.state.cookies.length} cookies. Capture runs start signed in.`)
+    return
+  }
+  if (action === 'credentials') {
+    const username = await promptText({ message: 'Test account username or email', ...(status.credentials ? { initial: status.credentials.username } : {}), io })
+    const password = await promptSecret({ message: 'Test account password', io })
+    await saveCaptureCredentials(root, { username, password })
+    note(io, `✓ Credentials saved for ${username}. The agent fills the sign-in form by secret name during capture.`)
+    return
+  }
+  if (action === 'login-path') {
+    const loginPath = await promptText({
+      message: 'Sign-in route (relative to the application URL)',
+      initial: application.authentication?.loginPath ?? '/login',
+      validate: (value) => value.startsWith('/') && !value.startsWith('//') ? undefined : 'Start with one slash.',
+      io,
+    })
+    await saveProjectSettings(root, { application: { ...application, authentication: { ...application.authentication, loginPath } } })
+    note(io, `✓ Sign-in route set to ${loginPath}.`)
+    return
+  }
+  if (action === 'forget-session') {
+    await removeCaptureSession(root)
+    note(io, '✓ Browser session removed.')
+    return
+  }
+  await removeCaptureCredentials(root)
+  note(io, '✓ Credentials removed.')
 }
 
 async function editDeployment(

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { access, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { delimiter, extname, join, normalize, resolve, sep } from 'node:path'
+import { delimiter, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import { DoxloopError } from './errors.js'
 import type {
   GeneratorPreviewOptions,
@@ -265,6 +265,31 @@ export async function openBrowser(url: string): Promise<void> {
       resolveOpen()
     })
   })
+}
+
+/**
+ * A validator that cannot tell which pages the native site links reports one
+ * warning instead of guessing. The native strict build remains the authority.
+ */
+export function navigationUnverifiedIssue(
+  label: string,
+  file: string,
+  reason: string,
+): ValidationIssue {
+  return {
+    severity: 'warning',
+    code: 'navigation-unverified',
+    message: `${label} navigation was not verified: ${reason} Run the native build to confirm every page is reachable.`,
+    file,
+  }
+}
+
+/** Content-relative, forward-slash page paths for the validation context. */
+export function contentRelativePages(
+  contentRoot: string,
+  pages: readonly string[],
+): string[] {
+  return pages.map((page) => relative(contentRoot, page).split('\\').join('/'))
 }
 
 export function requiredFileIssues(

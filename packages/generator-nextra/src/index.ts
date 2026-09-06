@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   defineGenerator,
@@ -10,6 +10,7 @@ import {
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
 import {
+  contentRelativePages,
   ensureNodeDependencies,
   isRecord,
   openBrowser,
@@ -28,6 +29,7 @@ const PACKAGE_VERSION = (
     version: string
   }
 ).version
+const META_FILES = ['_meta.js', '_meta.jsx', '_meta.ts', '_meta.tsx', '_meta.json']
 
 const adapter = defineGenerator({
   apiVersion: 1,
@@ -39,7 +41,7 @@ const adapter = defineGenerator({
     skillName: 'doxloop-nextra',
     skillDirectory: fileURLToPath(new URL('../skills/doxloop-nextra', import.meta.url)),
   },
-  planning: { navigationFiles: ['theme.config.tsx', 'pages/_meta.json'] },
+  planning: { navigationFiles: ['content/_meta.js', 'app/layout.jsx'] },
   project: {
     defaultContentDir: 'content',
     pageExtensions: ['.md', '.mdx'],
@@ -273,57 +275,141 @@ async function startNextraPreview(options: GeneratorPreviewOptions): Promise<voi
   await runPreviewProcess(invocation.command, invocation.args, options.root, 'Nextra')
 }
 
+/**
+ * Nextra builds its page map from every file under the content directory, so
+ * no page can be "unnavigated". What can go wrong is a `_meta` file naming a
+ * page or folder that does not exist beside it, in any directory.
+ */
 async function validateNextra(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  const metaFile = join(context.project.contentDir, '_meta.js')
-  for (const file of [
-    'package.json',
-    'next.config.mjs',
-    'mdx-components.jsx',
-    'app/layout.jsx',
-    'app/not-found.jsx',
-    'app/[[...mdxPath]]/page.jsx',
-    metaFile,
-  ]) {
-    if (!(await pathExists(join(context.root, file)))) {
+  for (const [label, candidates] of [
+    ['package.json', ['package.json']],
+    ['next.config.mjs', ['next.config.mjs', 'next.config.js', 'next.config.ts', 'next.config.mts']],
+    ['mdx-components.jsx', ['mdx-components.jsx', 'mdx-components.js', 'mdx-components.tsx', 'mdx-components.ts']],
+    ['app/layout.jsx', ['app/layout.jsx', 'app/layout.js', 'app/layout.tsx', 'src/app/layout.jsx', 'src/app/layout.tsx']],
+    ['app/[[...mdxPath]]/page.jsx', ['app/[[...mdxPath]]/page.jsx', 'app/[[...mdxPath]]/page.js', 'app/[[...mdxPath]]/page.tsx', 'src/app/[[...mdxPath]]/page.jsx', 'src/app/[[...mdxPath]]/page.tsx']],
+  ] as const) {
+    let found = false
+    for (const candidate of candidates) {
+      if (await pathExists(join(context.root, candidate))) {
+        found = true
+        break
+      }
+    }
+    if (!found) {
       issues.push({
         severity: 'error',
         code: 'missing-generator-file',
-        message: `Nextra project is missing ${file}.`,
-        file,
+        message: `Nextra project is missing ${label}.`,
+        file: label,
       })
     }
   }
-  const metaPath = join(context.root, metaFile)
-  if (!(await pathExists(metaPath))) return issues
-  const source = await readFile(metaPath, 'utf8')
-  const navigation = new Set<string>()
-  for (const match of source.matchAll(/^\s*([A-Za-z][\w-]*)\s*:/gm)) {
-    if (match[1]) navigation.add(match[1])
+  const pages = contentRelativePages(context.contentRoot, context.pages)
+  const pageIds = new Set(pages.map((page) => page.replace(/\.(?:md|mdx)$/i, '')))
+  const directories = new Set<string>(['.'])
+  for (const id of pageIds) {
+    let directory = posix.dirname(id)
+    while (directory !== '.') {
+      directories.add(directory)
+      directory = posix.dirname(directory)
+    }
   }
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
+  for (const directory of directories) {
+    const absoluteDirectory = directory === '.' ? context.contentRoot : join(context.contentRoot, directory)
+    const metaFile = await findMetaFile(absoluteDirectory)
+    if (!metaFile) continue
+    const metaPath = posix.join(context.project.contentDir.split('\\').join('/'), directory === '.' ? metaFile : `${directory}/${metaFile}`)
+    const source = await readFile(join(absoluteDirectory, metaFile), 'utf8')
+    for (const key of readNextraMetaKeys(source, metaFile.endsWith('.json'))) {
+      const target = directory === '.' ? key : `${directory}/${key}`
+      if (pageIds.has(target) || directories.has(target)) continue
       issues.push({
         severity: 'error',
         code: 'missing-page',
-        message: `Nextra _meta.js references missing page "${id}".`,
-        file: metaFile,
-      })
-    }
-  }
-  for (const id of context.pageIds) {
-    if (!navigation.has(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'unnavigated-page',
-        message: `Page "${id}" is not in Nextra _meta.js.`,
-        file: `${id}.mdx`,
+        message: `Nextra ${metaFile} references missing page "${target}".`,
+        file: metaPath,
       })
     }
   }
   return issues
+}
+
+async function findMetaFile(directory: string): Promise<string | undefined> {
+  let entries: string[]
+  try {
+    entries = await readdir(directory)
+  } catch {
+    return undefined
+  }
+  return META_FILES.find((name) => entries.includes(name))
+}
+
+/**
+ * Top-level keys of a `_meta` object that name pages or folders. Entries with
+ * an `href`, separators, and menus are navigation chrome and are skipped, as
+ * is the `*` default entry.
+ */
+export function readNextraMetaKeys(source: string, json: boolean): string[] {
+  const keys: string[] = []
+  const body = json ? source : source.replace(/\/\*[\s\S]*?\*\/|(^|[^:'"])\/\/.*$/gm, '$1')
+  const start = body.indexOf('{')
+  if (start === -1) return keys
+  let depth = 0
+  let quote: string | undefined
+  let current: { key: string; from: number } | undefined
+  const finish = (end: number): void => {
+    if (!current) return
+    const value = body.slice(current.from, end)
+    const chrome = /\bhref\s*:|["']?type["']?\s*:\s*["'](?:separator|menu)["']/.test(value)
+    if (!chrome && current.key !== '*' && /^[A-Za-z0-9][\w.-]*$/.test(current.key)) keys.push(current.key)
+    current = undefined
+  }
+  for (let index = start; index < body.length; index += 1) {
+    const character = body[index]!
+    if (quote) {
+      if (character === '\\') index += 1
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      if (depth === 1 && !current) {
+        const end = body.indexOf(character, index + 1)
+        const rest = body.slice(end + 1).match(/^\s*:/)
+        if (end !== -1 && rest) {
+          current = { key: body.slice(index + 1, end), from: end + 1 + rest[0].length }
+          index = end + rest[0].length
+          continue
+        }
+      }
+      quote = character
+      continue
+    }
+    if (character === '{' || character === '[' || character === '(') {
+      depth += 1
+      continue
+    }
+    if (character === '}' || character === ']' || character === ')') {
+      if (depth === 1) finish(index)
+      depth -= 1
+      if (depth === 0) break
+      continue
+    }
+    if (depth === 1 && character === ',') {
+      finish(index)
+      continue
+    }
+    if (depth === 1 && !current && /[A-Za-z_$]/.test(character)) {
+      const match = body.slice(index).match(/^([A-Za-z_$][\w$-]*)\s*:/)
+      if (match) {
+        current = { key: match[1]!, from: index + match[0].length }
+        index += match[0].length - 1
+      }
+    }
+  }
+  return keys
 }
 
 function escapeJsx(value: string): string {

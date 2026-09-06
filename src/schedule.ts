@@ -1,6 +1,7 @@
+import { withProjectLock } from './project-lock.js'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,6 +51,7 @@ export function dailyTime(triggers: readonly SyncTrigger[]): DailyTime | undefin
 export function scheduleFrequency(
   triggers: readonly SyncTrigger[],
 ): ScheduleFrequency | undefined {
+  if (triggers.length > 1) throw new DoxloopError('Choose one schedule per project.')
   for (const trigger of triggers) {
     const interval = /^every@(\d+)([mh])$/.exec(trigger)
     if (interval) {
@@ -113,7 +115,7 @@ function launchCalendar(frequency: Exclude<ScheduleFrequency, { kind: 'interval'
 
 function cronExpression(frequency: ScheduleFrequency): string {
   if (frequency.kind === 'interval') {
-    return frequency.minutes < 60 ? `*/${frequency.minutes} * * * *` : `0 */${frequency.minutes / 60} * * *`
+    return '* * * * *' // The locked elapsed-time gate in runSyncNow handles intervals.
   }
   const time = `${frequency.time.minute} ${frequency.time.hour}`
   if (frequency.kind === 'weekdays') return `${time} * * 1-5`
@@ -255,9 +257,11 @@ export function cronLine(options: {
   root: string
   frequency: ScheduleFrequency
 }): string {
+  if (/[\r\n]/.test(options.root)) throw new DoxloopError('Scheduled project paths cannot contain line breaks.')
   const log = join(options.root, SYNC_LOG_FILE)
   const expression = cronExpression(options.frequency)
-  return `${expression} ${process.execPath} ${cliPath()} sync now --trigger schedule --cwd ${options.root} >> ${log} 2>&1 # ${options.label}`
+  const quote = (value: string) => `'${value.replace(/'/g, `\'\"\'\"\'`).replace(/%/g, '\\%')}'`
+  return `${expression} ${quote(process.execPath)} ${quote(cliPath())} sync now --trigger schedule --cwd ${quote(options.root)} >> ${quote(log)} 2>&1 # ${options.label}`
 }
 
 export async function installSchedule(
@@ -533,7 +537,10 @@ export async function readSyncLog(root: string, lines = 20): Promise<string[]> {
 }
 
 export async function appendSyncLog(root: string, message: string): Promise<void> {
-  const path = join(root, SYNC_LOG_FILE)
-  const existing = (await pathExists(path)) ? await readFile(path, 'utf8') : ''
-  await writeFile(path, `${existing}${new Date().toISOString()}  ${message}\n`, 'utf8')
+  await withProjectLock(root, 'monitor-log', async () => {
+    const path = join(root, SYNC_LOG_FILE)
+    const size = await stat(path).then((info) => info.size).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return 0; throw error })
+    if (size >= 1_048_576) await rename(path, `${path}.1`)
+    await appendFile(path, `${new Date().toISOString()}  ${message.replace(/[\r\n]+/g, ' ').slice(0, 8000)}\n`, { mode: 0o600 })
+  })
 }

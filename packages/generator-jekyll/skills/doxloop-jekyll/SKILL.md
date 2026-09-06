@@ -12,10 +12,12 @@ collections, layouts, and data.
 
 1. Confirm `.doxloop/project.json` selects `jekyll`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect `_config.yml`, the `_docs` collection, layouts, includes, data, and
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect `_config.yml`, the `_docs` collection, layouts, includes, data, and
    assets before editing.
-4. Give every page `title` and outcome-focused `description` frontmatter.
-5. Maintain navigation in `_config.yml` and preserve permalinks.
+5. Give every page `title` and outcome-focused `description` frontmatter.
+6. Maintain navigation in `_config.yml` and preserve permalinks.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` using
 the project's `_config.yml`, navigation data, collections, and layout includes.

@@ -1,7 +1,15 @@
+import { documentationCollections, createDocumentationCollection } from './documentation-collections.js'
+import { pageComments, savePageComment, searchPageText, auditDocumentation, backfillEvidence, readerVerification, authoringEstimate } from './workspace-tools.js'
+import { updateBulkPageMetadata } from './page-metadata.js'
+import { batchLimits } from './batch-limits.js'
+import { readPageContent, savePageContent, previewPageContent, changePageLifecycle } from './page-operations.js'
+import { listDirectEdits, undoDirectEdit } from './direct-edit.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { AGENT_STOP_GRACE_MS, signalTree } from './agent-process.js'
 import { access, appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
 import { extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
@@ -25,7 +33,8 @@ import {
   retryDocumentationPlan,
 } from './documentation-plan.js'
 import { DoxloopError } from './errors.js'
-import { applyWorkflowStageLine, finishWorkflowStages, parseWorkflowStage, type WorkflowStage } from './job-events.js'
+import { deployCredentialState, saveDeployCredential } from './deploy-credentials.js'
+import { applyWorkflowStageLine, finishWorkflowStages, parseJobOutcome, parseJobOutcomeLine, parseWorkflowStage, type JobOutcome, type WorkflowStage } from './job-events.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { addGenerator } from './generator-manager.js'
 import {
@@ -35,6 +44,7 @@ import {
   pageHistory,
   requestPages,
 } from './history.js'
+import { generatorPreflight } from './generator-preflight.js'
 import { installedGeneratorEntries, parseGenerator } from './generators.js'
 import { runDoctor } from './doctor.js'
 import {
@@ -50,15 +60,33 @@ import {
   scaffoldProject,
   validateProjectSourceBoundaries,
 } from './project.js'
+import { importExistingDocumentation, inspectExistingDocumentation } from './project-import.js'
+import { forgetProject, listRecentProjects, rememberProject } from './project-registry.js'
 import { effectiveDeployment } from './settings.js'
 import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent } from './screenshot-workflow.js'
-import { checkScreenCaptureBrowser } from './screen-capture-provider.js'
+import { checkScreenCaptureBrowser, startCaptureSignIn, type CaptureSignInSession } from './screen-capture-provider.js'
+import {
+  captureAuthContext,
+  captureAuthStatus,
+  removeCaptureCredentials,
+  removeCaptureSession,
+  saveCaptureCredentials,
+  saveCaptureSession,
+  type CaptureStorageState,
+} from './capture-auth.js'
 import { discoverDocumentationSources } from './source-discovery.js'
 import { buildSourceIntelligence } from './source-intelligence.js'
 import { resolveCoverageItem, type CoverageResolutionAction } from './coverage-actions.js'
 import { connectorForSource } from './source-connectors.js'
 import { assertInside, ensureGitignoreEntries, pathExists } from './fs.js'
 import { loadOpenApiSource, parseOpenApi } from './openapi.js'
+import { listPages as listDocumentationPages, resolveEditScope } from './pages.js'
+import { readNavigation, writeNavigation } from './navigation.js'
+import { readBranding, writeBranding } from './branding.js'
+import { ASSET_FILE_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, deleteAsset, readAssetLibrary, replaceRunCapture, updateAssetAlt, uploadAsset } from './assets.js'
+import { readPageMetadata, updatePageMetadata } from './page-metadata.js'
+import { generateGlossaryPage, readGlossary } from './glossary.js'
+import { gitBackedSources, listSourceRefs, type ReleaseTemplateInput } from './release-notes.js'
 import { testRemoteSource } from './remote-monitor.js'
 import {
   listRemoteBranches,
@@ -73,6 +101,7 @@ import {
 import {
   acceptSyncChanges,
   archiveSyncRun,
+  createRunId,
   editSyncRunChange,
   listSyncRuns,
   pruneSyncRuns,
@@ -81,11 +110,13 @@ import {
   runWorkspace,
   readSyncRunChangeContent,
   rejectSyncRun,
+  rejectSyncChanges,
   undoSyncRun,
 } from './sync-runs.js'
 import {
   requireSyncReviewChange,
   syncReviewComparisonDocument,
+  syncReviewAcceptOptions,
   syncReviewSelectionsFromBody,
   syncReviewSourceDiff,
 } from './sync-review.js'
@@ -95,9 +126,11 @@ import type {
   DeploymentConfig,
   DocumentationBrief,
   DoxloopProject,
+  GeneratorName,
   RemoteSource,
   SourceBinding,
   SyncConfig,
+  SyncRun,
 } from './types.js'
 import { validateProject } from './validation.js'
 
@@ -107,6 +140,8 @@ export interface UiServerOptions {
   port?: number
   open?: boolean
   page?: string
+  /** Open this project instead of the one found from `cwd`. */
+  project?: string
 }
 
 interface UiJob {
@@ -124,20 +159,29 @@ interface UiJob {
   child?: ChildProcess | undefined
   retry?: { args: string[]; cwd: string; agent?: AgentName; planId?: string }
   recovered?: boolean
+  /** What the job concluded, once its CLI reported it. */
+  outcome?: JobOutcome
 }
 
 interface UiRuntime {
+  controlCenterUrl?: string
   cwd: string
   root?: string | undefined
   jobs: Map<string, UiJob>
   previewJobId?: string | undefined
+  previewUrl?: string | undefined
   proposalPreviewJobId?: string | undefined
   proposalPreviewRunId?: string | undefined
+  proposalPreviewUrl?: string | undefined
   jobSubscribers: Set<ServerResponse>
   jobBroadcastTimer?: ReturnType<typeof setTimeout> | undefined
   jobPersistTimer?: ReturnType<typeof setTimeout> | undefined
   jobPersistQueue: Promise<void>
   jobLogQueues: Map<string, Promise<void>>
+  /** The visible Chrome window a person is signing in to for screenshot capture. */
+  captureSignIn?: { session: CaptureSignInSession; scope: 'project' | 'setup'; origin: string } | undefined
+  /** A session recorded during setup, persisted once the project exists. */
+  pendingCaptureSession?: { origin: string; savedAt: string; state: CaptureStorageState } | undefined
 }
 
 const UI_ROOT = resolve(fileURLToPath(new URL('./ui', import.meta.url)))
@@ -145,6 +189,8 @@ const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url))
 const DOXBRIX_CSS = resolve(PACKAGE_ROOT, 'assets', 'doxbrix-preview.css')
 const MAX_BODY_BYTES = 1_000_000
+/** Base64 image uploads: a 10 MB asset plus JSON framing. */
+const MAX_ASSET_BODY_BYTES = 15_000_000
 const MAX_PERSISTED_JOBS = 50
 // Agents stream one JSON line per token delta, so a single planning run leaves
 // megabytes of output behind. The full log stays on disk under
@@ -158,6 +204,8 @@ const MAX_JOB_LINE_LENGTH = 4_000
 const JOB_BROADCAST_INTERVAL_MS = 150
 const UI_JOBS_FILE = join('.doxloop', 'ui-jobs.json')
 const UI_JOB_LOG_DIRECTORY = join('.doxloop', 'ui-job-logs')
+// The CLI gets the agent's own grace period plus a margin to write its exit.
+const JOB_STOP_GRACE_MS = AGENT_STOP_GRACE_MS + 5_000
 
 export async function startUiServer(options: UiServerOptions): Promise<void> {
   const host = options.host ?? '127.0.0.1'
@@ -166,18 +214,12 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
   }
   const port = options.port ?? 4317
   const page = normalizeInitialPage(options.page)
-  const root = await optionalProjectRoot(options.cwd)
-  const jobs = root ? await loadUiJobs(root) : new Map<string, UiJob>()
-  let recoveredJobs = false
-  for (const job of jobs.values()) {
-    if (job.status !== 'running') continue
-    job.status = 'failed'
-    job.finishedAt = new Date().toISOString()
-    job.recovered = true
-    job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.')
-    recoveredJobs = true
-  }
+  const root = options.project
+    ? await findProjectRoot(resolve(options.cwd, options.project))
+    : await optionalProjectRoot(options.cwd)
+  const { jobs, recovered: recoveredJobs } = root ? await loadRuntimeJobs(root) : { jobs: new Map<string, UiJob>(), recovered: false }
   const runtime: UiRuntime = {
+    controlCenterUrl: `http://127.0.0.1:${port}`,
     cwd: resolve(options.cwd),
     root,
     jobs,
@@ -186,6 +228,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     jobLogQueues: new Map(),
   }
   if (recoveredJobs) await persistUiJobs(runtime)
+  if (root) await rememberOpenProject(root)
   const session = randomBytes(32).toString('hex')
   const server = createServer((request, response) => {
     void handleUiRequest(request, response, runtime, session, port)
@@ -211,7 +254,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
       job.finishedAt = new Date().toISOString()
       job.lines.push('The Doxloop UI server stopped and cancelled this run.')
       queueUiJobLog(runtime, job.id, '\nThe Doxloop UI server stopped and cancelled this run.\n')
-      job.child?.kill('SIGTERM')
+      stopJobChild(job.child)
       if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId).catch(() => undefined)
     }
     broadcastJobs(runtime)
@@ -261,7 +304,7 @@ async function handleUiRequest(
     response.setHeader('Set-Cookie', `${uiSessionCookieName(port)}=${session}; HttpOnly; SameSite=Strict; Path=/`)
     await serveFile(response, join(UI_ROOT, 'index.html'), true)
   } catch (error) {
-    const status = error instanceof DoxloopError ? 409 : 500
+    const status = uiErrorStatus(error)
     sendJson(response, status, { error: error instanceof Error ? error.message : String(error) })
   }
 }
@@ -277,7 +320,57 @@ async function handleApi(
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/setup/browse-directory') {
-    sendJson(response, 200, { path: await chooseLocalDirectory() ?? null })
+    sendJson(response, 200, { path: await chooseLocalDirectory('Choose product source directory') ?? null })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/projects') {
+    sendJson(response, 200, {
+      current: runtime.root ?? null,
+      recent: await listRecentProjects(),
+      // The full catalog, not the open project's generator, so the import dialog can correct a wrong guess.
+      generators: await installedGeneratorEntries(runtime.cwd),
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/browse') {
+    sendJson(response, 200, { path: await chooseLocalDirectory('Choose a documentation folder') ?? null })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/open') {
+    const body = recordBody(await readJsonBody(request))
+    await switchProject(runtime, await resolveProjectToOpen(runtime, stringValue(body.path)))
+    sendJson(response, 200, await buildUiState(runtime))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/forget') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, { recent: await forgetProject(resolve(runtime.cwd, stringValue(body.path))) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/inspect') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await inspectExistingDocumentation(resolve(runtime.cwd, stringValue(body.path)), importOverrides(body)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/import') {
+    const body = recordBody(await readJsonBody(request))
+    assertProjectSwitchAllowed(runtime.jobs.values())
+    const directory = resolve(runtime.cwd, stringValue(body.path))
+    const overrides = importOverrides(body)
+    if (body.installGenerator === true) {
+      const inspection = await inspectExistingDocumentation(directory, overrides)
+      if (inspection.generator && !inspection.generatorInstalled) await addGenerator(directory, inspection.generator)
+    }
+    const agent = parseAgent(optionalString(body.agent))
+    const imported = await importExistingDocumentation({
+      directory,
+      ...overrides,
+      ...(optionalString(body.title) ? { title: optionalString(body.title)! } : {}),
+      ...(agent ? { agent } : {}),
+    })
+    if (agent) await saveProjectSettings(imported.root, { defaultAgent: agent })
+    await switchProject(runtime, imported.root)
+    sendJson(response, 201, { ...(await buildUiState(runtime)), imported })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/setup/validate') {
@@ -352,7 +445,7 @@ async function handleApi(
       job.finishedAt = new Date().toISOString()
       job.lines.push('The run was cancelled from the Doxloop UI.')
       queueUiJobLog(runtime, job.id, '\nThe run was cancelled from the Doxloop UI.\n')
-      job.child?.kill('SIGTERM')
+      stopJobChild(job.child)
       if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId)
       delete job.child
       publishJobs(runtime)
@@ -434,6 +527,169 @@ async function handleApi(
     sendJson(response, 202, publicJob(startCliJob(runtime, 'sync', ['sync', 'now', '--trigger', 'manual', '--cwd', root], root)))
     return
   }
+  if (request.method === 'GET' && url.pathname === '/api/collections') { const root = requireProject(runtime); sendJson(response, 200, await documentationCollections(root, await loadProject(root))); return }
+  if (request.method === 'POST' && url.pathname === '/api/collections') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await createDocumentationCollection(requireProject(runtime), { sourceDirectory: rawText(body.sourceDirectory), version: stringValue(body.version), locale: stringValue(body.locale) })); return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/pages/search') {
+    sendJson(response, 200, await searchPageText(requireProject(runtime), url.searchParams.get('q') ?? '')); return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/comments') {
+    sendJson(response, 200, await pageComments(requireProject(runtime))); return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/comments') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await savePageComment(requireProject(runtime), { path: typeof body.resolveId === 'string' ? '' : stringValue(body.path), text: typeof body.resolveId === 'string' ? '' : stringValue(body.text), ...(typeof body.proposalId === 'string' ? { proposalId: body.proposalId } : {}), ...(typeof body.changeId === 'string' ? { changeId: body.changeId } : {}), ...(typeof body.hunkId === 'string' ? { hunkId: body.hunkId } : {}), ...(typeof body.resolveId === 'string' ? { resolveId: body.resolveId } : {}) })); return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/pages/bulk-metadata') {
+    const body = recordBody(await readJsonBody(request))
+    if (!Array.isArray(body.writes)) throw new DoxloopError('Supply metadata writes for the selected pages.')
+    sendJson(response, 200, await updateBulkPageMetadata(requireProject(runtime), body.writes)); return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/audit') { sendJson(response, 200, await auditDocumentation(requireProject(runtime))); return }
+  if (request.method === 'POST' && url.pathname === '/api/audit/backfill') { sendJson(response, 200, await backfillEvidence(requireProject(runtime))); return }
+  if (url.pathname === '/api/reader-verification' && (request.method === 'GET' || request.method === 'PUT')) {
+    const body = request.method === 'PUT' ? recordBody(await readJsonBody(request)) : undefined
+    if (body && typeof body.enabled !== 'boolean') throw new DoxloopError('Choose whether to show reader verification.')
+    sendJson(response, 200, await readerVerification(requireProject(runtime), body?.enabled as boolean | undefined)); return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/authoring-estimate') {
+    sendJson(response, 200, await authoringEstimate(requireProject(runtime), Math.max(1, Math.min(500, Number(url.searchParams.get('pages')) || 1)), url.searchParams.get('agent') ?? undefined, url.searchParams.get('model') ?? undefined)); return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/pages') {
+    sendJson(response, 200, await listDocumentationPages(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/pages/content') {
+    const root = requireProject(runtime)
+    const path = url.searchParams.get('path')?.trim()
+    if (!path) throw new DoxloopError('A page content request needs a path.', 2)
+    sendJson(response, 200, await readPageContent(root, path))
+    return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/pages/content') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await savePageContent(requireProject(runtime), { path: stringValue(body.path), content: rawText(body.content), fingerprint: stringValue(body.fingerprint), evidenceDisposition: body.evidenceDisposition === 'preserved' ? 'preserved' : 'needs-review' }))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pages/preview') {
+    sendJson(response, 200, previewPageContent(rawText(recordBody(await readJsonBody(request)).content)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pages/lifecycle') {
+    const body = recordBody(await readJsonBody(request))
+    if (!['create', 'rename', 'delete'].includes(String(body.action))) throw new DoxloopError('Choose create, rename, or delete.')
+    sendJson(response, 200, await changePageLifecycle(requireProject(runtime), {
+      action: body.action as 'create' | 'rename' | 'delete', path: stringValue(body.path),
+      ...(typeof body.fingerprint === 'string' ? { fingerprint: body.fingerprint } : {}),
+      ...(typeof body.to === 'string' ? { to: body.to } : {}),
+      ...(typeof body.title === 'string' ? { title: body.title } : {}),
+      ...(typeof body.content === 'string' ? { content: body.content } : {}),
+      ...(typeof body.replacement === 'string' && body.replacement ? { replacement: body.replacement } : {}),
+    }))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/direct-edits') {
+    sendJson(response, 200, await listDirectEdits(requireProject(runtime)))
+    return
+  }
+  const directUndo = /^\/api\/direct-edits\/([a-f0-9-]{36})\/undo$/.exec(url.pathname)
+  if (request.method === 'POST' && directUndo) {
+    sendJson(response, 200, await undoDirectEdit(requireProject(runtime), directUndo[1]!))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pages/edit') {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const project = await loadProject(root)
+    const runId = createRunId()
+    const spec = pageEditJobSpec(root, project, runId, await readJsonBody(request))
+    await resolveEditScope(root, project, spec.paths, spec.allowRelated)
+    const job = startCliJob(runtime, spec.type, spec.args, root, spec.agent)
+    sendJson(response, 202, { job: publicJob(job) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/pages/metadata') {
+    sendJson(response, 200, await readPageMetadata(requireProject(runtime), url.searchParams.get('path')))
+    return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/pages/metadata') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await updatePageMetadata(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/navigation') {
+    sendJson(response, 200, await readNavigation(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/navigation') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await writeNavigation(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/branding') {
+    sendJson(response, 200, await readBranding(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/branding') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await writeBranding(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/assets') {
+    sendJson(response, 200, await readAssetLibrary(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/assets/file') {
+    const root = requireProject(runtime)
+    const path = url.searchParams.get('path') ?? ''
+    const file = assertInside(root, resolve(root, path))
+    const extension = extname(file).toLowerCase()
+    if (!path || path.split('/').some((part) => part === '..' || part === '.doxloop' || part === 'node_modules') || (!ASSET_IMAGE_EXTENSIONS.has(extension) && !ASSET_FILE_EXTENSIONS.has(extension)) || !(await pathExists(file))) {
+      sendJson(response, 404, { error: 'That asset does not exist.' })
+      return
+    }
+    send(response, 200, mimeType(file), await readFile(file), { ...baseHeaders(), 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/assets') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 201, await uploadAsset(requireProject(runtime), await readJsonBody(request, MAX_ASSET_BODY_BYTES)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/assets/delete') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await deleteAsset(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/assets/alt') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await updateAssetAlt(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/captures/replace') {
+    sendJson(response, 200, await replaceRunCapture(requireProject(runtime), await readJsonBody(request, MAX_ASSET_BODY_BYTES)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/glossary') {
+    sendJson(response, 200, await readGlossary(requireProject(runtime)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/glossary/generate') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await generateGlossaryPage(requireProject(runtime), await readJsonBody(request)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/sources/git') {
+    const root = requireProject(runtime)
+    sendJson(response, 200, { sources: (await gitBackedSources(root, await loadProject(root))).map((source) => source.name) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/sources/refs') {
+    sendJson(response, 200, await listSourceRefs(requireProject(runtime), url.searchParams.get('source') ?? ''))
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/history') {
     const root = requireProject(runtime)
     await backfillHistory(root)
@@ -465,6 +721,18 @@ async function handleApi(
     sendJson(response, 200, { url: await deployedSiteUrl(requireProject(runtime)) })
     return
   }
+  if (request.method === 'GET' && url.pathname === '/api/deployment/credentials') {
+    sendJson(response, 200, await deployCredentialState())
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/deployment/credentials') {
+    const body = recordBody(await readJsonBody(request))
+    const target = stringValue(body.target)
+    if (target !== 'netlify' && target !== 'vercel') throw new DoxloopError('Credentials can be saved for Netlify or Vercel.')
+    await saveDeployCredential(target, stringValue(body.token))
+    sendJson(response, 200, { saved: true, target })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/proposals') {
     sendJson(response, 200, await listSyncRuns(requireProject(runtime)))
     return
@@ -480,19 +748,117 @@ async function handleApi(
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/application/readiness') {
-    const project = await loadProject(requireProject(runtime))
-    sendJson(response, 200, await checkApplicationReadiness(project.application))
+    const root = requireProject(runtime)
+    const project = await loadProject(root)
+    sendJson(response, 200, await checkApplicationReadiness(project.application, await captureAuthContext(root)))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/application/readiness') {
-    const project = await loadProject(requireProject(runtime))
+    const root = requireProject(runtime)
+    const project = await loadProject(root)
     const application = applicationFromBody(await readJsonBody(request), project)
-    sendJson(response, 200, await checkApplicationReadiness(application))
+    sendJson(response, 200, await checkApplicationReadiness(application, await captureAuthContext(root)))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/setup/application/readiness') {
+    const body = recordBody(await readJsonBody(request))
+    const application = applicationFromBody(body)
+    // Setup has no project yet: the session recorded in this wizard and the
+    // credentials typed into it stand in for the stored ones.
+    sendJson(response, 200, await checkApplicationReadiness(application, {
+      ...(runtime.pendingCaptureSession ? { session: runtime.pendingCaptureSession.state } : {}),
+      credentials: body.hasCredentials === true,
+    }))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/application/auth') {
+    sendJson(response, 200, await captureAuthState(runtime, requireProject(runtime)))
+    return
+  }
+  if (request.method === 'PUT' && url.pathname === '/api/application/credentials') {
+    const root = requireProject(runtime)
+    const body = recordBody(await readJsonBody(request))
+    await saveCaptureCredentials(root, { username: stringValue(body.username), password: typeof body.password === 'string' ? body.password : '' })
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'DELETE' && url.pathname === '/api/application/credentials') {
+    const root = requireProject(runtime)
+    await removeCaptureCredentials(root)
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'DELETE' && url.pathname === '/api/application/session') {
+    const root = requireProject(runtime)
+    await removeCaptureSession(root)
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/application/sign-in') {
+    const root = requireProject(runtime)
+    const project = await loadProject(root)
+    const body = await readJsonBody(request)
+    // The form may hold an unsaved URL; signing in against it is still useful.
+    const application = body && typeof body === 'object' && 'baseUrl' in (body as Record<string, unknown>)
+      ? applicationFromBody(body, project)
+      : project.application
+    if (!application) throw new DoxloopError('Configure the application base URL before signing in.')
+    await beginCaptureSignIn(runtime, application, 'project')
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/application/sign-in/finish') {
+    const root = requireProject(runtime)
+    const active = runtime.captureSignIn
+    if (!active || active.scope !== 'project') throw new DoxloopError('No browser sign-in is in progress. Choose "Sign in with browser" first.')
+    const state = await active.session.finish()
+    runtime.captureSignIn = undefined
+    await saveCaptureSession(root, active.origin, state)
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/application/sign-in/cancel') {
+    const root = requireProject(runtime)
+    await cancelCaptureSignIn(runtime)
+    sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/setup/application/auth') {
+    sendJson(response, 200, setupCaptureAuthState(runtime))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/application/sign-in') {
     const application = applicationFromBody(await readJsonBody(request))
-    sendJson(response, 200, await checkApplicationReadiness(application))
+    await beginCaptureSignIn(runtime, application, 'setup')
+    sendJson(response, 200, setupCaptureAuthState(runtime))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/application/sign-in/finish') {
+    const active = runtime.captureSignIn
+    if (!active || active.scope !== 'setup') throw new DoxloopError('No browser sign-in is in progress. Choose "Sign in with browser" first.')
+    const state = await active.session.finish()
+    runtime.captureSignIn = undefined
+    if (state.cookies.length === 0 && state.origins.every((item) => item.localStorage.length === 0)) {
+      throw new DoxloopError('The browser session holds no cookies or local storage yet. Complete the sign-in in the Chrome window before saving.')
+    }
+    runtime.pendingCaptureSession = { origin: active.origin, savedAt: new Date().toISOString(), state }
+    sendJson(response, 200, setupCaptureAuthState(runtime))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/application/sign-in/cancel') {
+    await cancelCaptureSignIn(runtime)
+    sendJson(response, 200, setupCaptureAuthState(runtime))
+    return
+  }
+  if (request.method === 'DELETE' && url.pathname === '/api/setup/application/session') {
+    runtime.pendingCaptureSession = undefined
+    sendJson(response, 200, setupCaptureAuthState(runtime))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/generator/preflight') {
+    const body = recordBody(await readJsonBody(request))
+    const generator = parseGenerator(optionalString(body.generator)) ?? 'doxbrix'
+    sendJson(response, 200, await generatorPreflight(generator))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/plans') {
@@ -506,11 +872,12 @@ async function handleApi(
       throw new DoxloopError('Plan scope must be starter, standard, comprehensive, or custom.')
     }
     const project = await loadProject(root)
+    const template = releaseTemplateFromBody(body.template)
     const requestedAgent = parseAgent(optionalString(body.agent))
     const clarificationMode = optionalString(body.clarificationMode) ?? 'review'
     if (!['review', 'defaults', 'stop'].includes(clarificationMode)) throw new DoxloopError('Clarification mode must be review, defaults, or stop.')
     const screenshotIntent = normalizeScreenshotIntent(body.screenshots)
-    await assertScreenshotPlanningReadiness(project.application, screenshotIntent)
+    await assertScreenshotPlanningReadiness(project.application, screenshotIntent, await captureAuthContext(root))
     if (screenshotIntent === 'enabled') {
       const browserReadiness = await checkScreenCaptureBrowser()
       if (!browserReadiness.available) throw new DoxloopError(`Screenshots are selected, but the capture browser cannot start. ${browserReadiness.message}`)
@@ -523,6 +890,7 @@ async function handleApi(
       mode,
       scope: scope as 'starter' | 'standard' | 'comprehensive' | 'custom',
       ...(targetPages !== undefined ? { targetPages } : {}),
+      ...(template ? { template } : {}),
       ...(optionalString(body.request) ? { request: optionalString(body.request)! } : {}),
       clarificationMode: clarificationMode as 'review' | 'defaults' | 'stop',
       execution: {
@@ -531,6 +899,7 @@ async function handleApi(
         ...(optionalString(body.reasoning) ? { reasoning: parseReasoning(optionalString(body.reasoning))! } : {}),
         ...(optionalString(body.effort) ? { effort: parseClaudeEffort(optionalString(body.effort))! } : {}),
         screenshots: screenshotIntent,
+        limits: batchLimits(body.limits, { maxPages: 5, maxScreenshots: screenshotIntent === 'disabled' ? 0 : 8, maxMinutes: 15 }),
       },
     })
     const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', plan.id, '--cwd', root], root, requestedAgent ?? project.defaultAgent, plan.id)
@@ -634,14 +1003,15 @@ async function handleApi(
     const body = recordBody(await readJsonBody(request))
     const open = body.open === true
     const root = requireProject(runtime)
+    const project = await loadProject(root)
     const run = await readSyncRun(root, proposalPreview[1]!)
     const existing = runtime.proposalPreviewJobId
       ? runtime.jobs.get(runtime.proposalPreviewJobId)
       : undefined
-    if (existing?.status === 'running' && runtime.proposalPreviewRunId === run.id) {
-      await waitForPreviewServer('http://127.0.0.1:4322', existing)
-      if (open) openBrowser('http://127.0.0.1:4322')
-      sendJson(response, 200, { job: publicJob(existing), url: 'http://127.0.0.1:4322' })
+    if (existing?.status === 'running' && runtime.proposalPreviewRunId === run.id && runtime.proposalPreviewUrl) {
+      await waitForPreviewServer(runtime.proposalPreviewUrl, existing, projectPreviewIdentity(project.generator, join(root, '.doxloop', 'runs', run.id, 'workspace')))
+      if (open) openBrowser(runtime.proposalPreviewUrl)
+      sendJson(response, 200, { job: publicJob(existing), url: runtime.proposalPreviewUrl })
       return
     }
     if (existing?.status === 'running') {
@@ -652,13 +1022,16 @@ async function handleApi(
       if (child) await new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()))
     }
     const workspace = join(root, '.doxloop', 'runs', run.id, 'workspace')
-    const args = ['preview', '--host', '127.0.0.1', '--port', '4322', '--cwd', workspace]
+    const previewPort = await availableLocalPort()
+    const previewUrl = `http://127.0.0.1:${previewPort}`
+    const args = ['preview', '--host', '127.0.0.1', '--port', String(previewPort), '--cwd', workspace]
     const job = startCliJob(runtime, `proposal-preview:${run.id}`, args, workspace)
     runtime.proposalPreviewJobId = job.id
     runtime.proposalPreviewRunId = run.id
-    await waitForPreviewServer('http://127.0.0.1:4322', job)
-    if (open) openBrowser('http://127.0.0.1:4322')
-    sendJson(response, 202, { job: publicJob(job), url: 'http://127.0.0.1:4322' })
+    runtime.proposalPreviewUrl = previewUrl
+    await waitForPreviewServer(previewUrl, job, projectPreviewIdentity(project.generator, workspace))
+    if (open) openBrowser(previewUrl)
+    sendJson(response, 202, { job: publicJob(job), url: previewUrl })
     return
   }
   const proposalDiff = /^\/api\/proposals\/([a-z0-9-]+)\/changes\/(change-\d+)\/diff$/.exec(url.pathname)
@@ -675,13 +1048,15 @@ async function handleApi(
   }
   if (request.method === 'PATCH' && proposalContent) {
     const body = recordBody(await readJsonBody(request))
-    const disposition = body.evidenceDisposition === 'needs-review' ? 'needs-review' : 'preserved'
+    if (typeof body.fingerprint !== 'string' || !body.fingerprint) throw new DoxloopError('Reload the proposal before editing; a fingerprint is required.')
+    const disposition = body.evidenceDisposition === 'preserved' ? 'preserved' : 'needs-review'
     sendJson(response, 200, await editSyncRunChange(
       requireProject(runtime),
       proposalContent[1]!,
       proposalContent[2]!,
       stringValue(body.content),
       disposition,
+      body.fingerprint,
     ))
     return
   }
@@ -704,6 +1079,16 @@ async function handleApi(
     for (const hunkId of stringArray(body.hunkIds)) args.push('--hunk', hunkId)
     const job = startCliJob(runtime, `proposal:revise:${run.id}`, args, root)
     sendJson(response, 202, publicJob(job))
+    return
+  }
+  const proposalRefine = /^\/api\/proposals\/([a-z0-9-]+)\/refine$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalRefine) {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const run = await readSyncRun(root, proposalRefine[1]!)
+    const spec = pageRefineJobSpec(root, run, await readJsonBody(request))
+    const job = startCliJob(runtime, spec.type, spec.args, root)
+    sendJson(response, 202, { job: publicJob(job) })
     return
   }
   const proposalLifecycle = /^\/api\/proposals\/([a-z0-9-]+)\/(undo|archive|recover)$/.exec(url.pathname)
@@ -754,6 +1139,13 @@ async function handleApi(
     sendJson(response, 200, { removed: await pruneSyncRuns(requireProject(runtime)) })
     return
   }
+  const proposalRejectChanges = /^\/api\/proposals\/([a-z0-9-]+)\/reject-changes$/.exec(url.pathname)
+  if (request.method === 'POST' && proposalRejectChanges) {
+    const body = recordBody(await readJsonBody(request))
+    const selections = body.scope === 'folder' ? syncReviewSelectionsFromBody(await readSyncRun(requireProject(runtime), proposalRejectChanges[1]!), body) : [{ changeId: stringValue(body.changeId), ...(Array.isArray(body.hunkIds) ? { hunkIds: body.hunkIds.map(stringValue) } : {}) }]
+    sendJson(response, 200, await rejectSyncChanges(requireProject(runtime), proposalRejectChanges[1]!, selections, optionalString(body.reason) ?? ''))
+    return
+  }
   const proposalDecision = /^\/api\/proposals\/([a-z0-9-]+)\/(accept|reject)$/.exec(url.pathname)
   if (request.method === 'POST' && proposalDecision) {
     const root = requireProject(runtime)
@@ -762,9 +1154,10 @@ async function handleApi(
       return
     }
     const run = await readSyncRun(root, proposalDecision[1]!)
-    const selections = syncReviewSelectionsFromBody(run, await readJsonBody(request))
-    const result = await acceptSyncChanges(root, run.id, selections)
-    if (result.status === 'applied') await clearPendingSourceChangesInReceipt(root)
+    const body = await readJsonBody(request)
+    const selections = syncReviewSelectionsFromBody(run, body)
+    const result = await acceptSyncChanges(root, run.id, selections, syncReviewAcceptOptions(body))
+    if (result.status === 'applied' && !run.editRequest) await clearPendingSourceChangesInReceipt(root)
     sendJson(response, 200, result)
     return
   }
@@ -835,22 +1228,28 @@ async function handleApi(
   if (request.method === 'POST' && url.pathname === '/api/preview/start') {
     const body = recordBody(await readJsonBody(request))
     const open = body.open === true
-    if (runtime.previewJobId) {
+    if (runtime.previewJobId && runtime.previewUrl) {
       const existing = runtime.jobs.get(runtime.previewJobId)
       if (existing?.status === 'running') {
-        await waitForPreviewServer('http://127.0.0.1:4321', existing)
-        if (open) openBrowser('http://127.0.0.1:4321')
-        sendJson(response, 200, publicJob(existing))
+        const root = requireProject(runtime)
+        const project = await loadProject(root)
+        await waitForPreviewServer(runtime.previewUrl, existing, projectPreviewIdentity(project.generator, root))
+        if (open) openBrowser(runtime.previewUrl)
+        sendJson(response, 200, { job: publicJob(existing), url: runtime.previewUrl })
         return
       }
     }
     const root = requireProject(runtime)
-    const args = ['preview', '--host', '127.0.0.1', '--port', '4321', '--cwd', root]
+    const project = await loadProject(root)
+    const previewPort = await availableLocalPort()
+    const previewUrl = `http://127.0.0.1:${previewPort}`
+    const args = ['preview', '--host', '127.0.0.1', '--port', String(previewPort), '--cwd', root]
     if (open) args.push('--open')
     const job = startCliJob(runtime, 'preview', args, root)
     runtime.previewJobId = job.id
-    await waitForPreviewServer('http://127.0.0.1:4321', job)
-    sendJson(response, 202, publicJob(job))
+    runtime.previewUrl = previewUrl
+    await waitForPreviewServer(previewUrl, job, projectPreviewIdentity(project.generator, root))
+    sendJson(response, 202, { job: publicJob(job), url: previewUrl })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
@@ -861,6 +1260,7 @@ async function handleApi(
       job.child?.kill('SIGTERM')
     }
     delete runtime.previewJobId
+    delete runtime.previewUrl
     sendJson(response, 200, { stopped: true })
     return
   }
@@ -914,7 +1314,25 @@ async function handleApi(
     appendOption(args, 'name', optionalString(body.name))
     appendOption(args, 'slug', optionalString(body.slug))
     appendOption(args, 'api-url', optionalString(body.apiUrl))
+    appendOption(args, 'target', optionalString(body.target))
+    appendOption(args, 'site-id', optionalString(body.siteId))
+    appendOption(args, 'project-id', optionalString(body.projectId))
+    appendOption(args, 'team-id', optionalString(body.teamId))
+    appendOption(args, 'branch', optionalString(body.branch))
+    appendOption(args, 'base-path', optionalString(body.basePath))
     sendJson(response, 202, publicJob(startCliJob(runtime, body.dryRun === true ? 'deploy:dry-run' : 'deploy', args, root)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/export') {
+    const root = requireProject(runtime)
+    await ensureGitignoreEntries(root, ['.doxloop/exports/'])
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const output = join(root, '.doxloop', 'exports', `site-${stamp}`)
+    const args = ['export', '--cwd', root, '--out', output, '--zip']
+    const body = recordBody(await readJsonBody(request))
+    appendOption(args, 'base-path', optionalString(body.basePath))
+    appendOption(args, 'site-url', optionalString(body.siteUrl))
+    sendJson(response, 202, publicJob(startCliJob(runtime, 'export', args, root)))
     return
   }
   sendJson(response, 404, { error: 'Not found' })
@@ -930,10 +1348,11 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
       agents,
       generators: await installedGeneratorEntries(runtime.cwd),
       jobs: [...runtime.jobs.values()].map(publicJob).reverse(),
+      recentProjects: await listRecentProjects(),
     }
   }
   const project = await loadProject(root)
-  const [validation, doctor, runs, syncStatus, drift, agents, account, receipt] = await Promise.all([
+  const [validation, doctor, runs, syncStatus, drift, agents, account, receipt, recentProjects, deployments] = await Promise.all([
     safe(() => validateProject(root)),
     safe(() => runDoctor({ cwd: root })),
     safe(() => listSyncRuns(root)),
@@ -942,13 +1361,23 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     agentState(root, project.defaultAgent),
     accountState(project),
     readOptionalJson(join(root, '.doxloop', 'last-run.json')),
+    listRecentProjects(),
+    listDeployments(root, 20),
   ])
+  // Onboarding placeholders remain blocking in CLI validation and publication.
+  // Before any accepted proposal, present them as setup guidance in the UI.
+  if (!('error' in validation) && Array.isArray(runs) && !runs.some((run) => run.status === 'applied' || run.status === 'partially-applied' || run.changes.some((change) => change.hunks.some((hunk) => hunk.acceptedAt)))) {
+    validation.issues = validation.issues.map((issue) => issue.code === 'starter-content' ? { ...issue, severity: 'warning' as const, message: 'Starter page: approve your first documentation proposal to replace this placeholder.' } : issue)
+    validation.errors = validation.issues.filter((issue) => issue.severity === 'error').length
+    validation.warnings = validation.issues.filter((issue) => issue.severity === 'warning').length
+  }
   return {
     projectFound: true,
     cwd: runtime.cwd,
     root,
     project,
     effectiveDeployment: effectiveDeployment(project),
+    latestDeployment: deployments.find((entry) => entry.status === 'succeeded' && entry.target === effectiveDeployment(project).target && (!effectiveDeployment(project).slug || entry.slug === effectiveDeployment(project).slug)),
     validation,
     doctor,
     runs,
@@ -962,11 +1391,12 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
       (generator) => generator.id === project.generator,
     ),
     jobs: [...runtime.jobs.values()].map(publicJob).reverse(),
+    recentProjects,
     preview: {
       running: runtime.previewJobId
         ? runtime.jobs.get(runtime.previewJobId)?.status === 'running'
         : false,
-      url: 'http://127.0.0.1:4321',
+      ...(runtime.previewUrl ? { url: runtime.previewUrl } : {}),
     },
   }
 }
@@ -984,7 +1414,9 @@ async function agentState(root: string | undefined, preferred: AgentName | undef
 async function accountState(project: DoxloopProject): Promise<Record<string, unknown>> {
   try {
     const config = await loadUserConfig()
-    const destination = project.deployment?.apiUrl ?? config.apiUrl
+    const destination = (project.deployment?.target ?? 'doxbrix') === 'doxbrix'
+      ? project.deployment?.apiUrl ?? config.apiUrl
+      : config.apiUrl
     const user = await authenticatedRequest<{ id: string; email: string; name: string | null }>(
       '/api/v1/me',
       { method: 'GET' },
@@ -1009,6 +1441,7 @@ async function accountState(project: DoxloopProject): Promise<Record<string, unk
 async function deployedSiteUrl(root: string): Promise<string | null> {
   try {
     const project = await loadProject(root)
+    if ((project.deployment?.target ?? 'doxbrix') !== 'doxbrix') return null
     const deployment = effectiveDeployment(project)
     const found = await authenticatedRequestOptional<{ project: { hostedUrl?: string | null } }>(
       `/api/v1/projects/${encodeURIComponent(deployment.slug)}`,
@@ -1022,12 +1455,13 @@ async function deployedSiteUrl(root: string): Promise<string | null> {
 }
 
 async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<void> {
-  if (runtime.root) throw new DoxloopError('A Doxloop project is already open.')
   const body = recordBody(raw)
+  // Creating a project opens it, which is a switch for an already-open workspace.
+  assertProjectSwitchAllowed(runtime.jobs.values())
   const title = optionalString(body.title)
   const generator = parseGenerator(optionalString(body.generator)) ?? 'doxbrix'
   const application = body.application !== undefined ? applicationFromBody(body.application) : undefined
-  const root = resolveUiDocumentationDirectory(runtime.cwd, stringValue(body.directory))
+  const root = resolveUiDocumentationDirectory(await newProjectParent(runtime, body), stringValue(body.directory))
   await assertUiProjectDirectoryAvailable(root)
   await assertNewProjectDirectory(root)
   const sourceKind = optionalString(body.sourceKind)
@@ -1085,7 +1519,164 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
     documentation,
     ...(application ? { application } : {}),
   })
+  // Sign-in material gathered by the wizard is stored against the new root,
+  // outside the project, now that the root exists.
+  if (application) {
+    const credentials = body.applicationCredentials === undefined || body.applicationCredentials === null ? undefined : recordBody(body.applicationCredentials)
+    const username = credentials ? optionalString(credentials.username) : undefined
+    const password = credentials && typeof credentials.password === 'string' ? credentials.password : ''
+    if (username && password) await saveCaptureCredentials(root, { username, password })
+    if (runtime.pendingCaptureSession) await saveCaptureSession(root, runtime.pendingCaptureSession.origin, runtime.pendingCaptureSession.state)
+  }
+  runtime.pendingCaptureSession = undefined
+  await switchProject(runtime, root)
+}
+
+async function captureAuthState(runtime: UiRuntime, root: string): Promise<Record<string, unknown>> {
+  return { ...(await captureAuthStatus(root)), signIn: captureSignInState(runtime, 'project') }
+}
+
+function setupCaptureAuthState(runtime: UiRuntime): Record<string, unknown> {
+  const pending = runtime.pendingCaptureSession
+  return {
+    ...(pending ? { session: { savedAt: pending.savedAt, origin: pending.origin, cookies: pending.state.cookies.length, origins: pending.state.origins.length } } : {}),
+    signIn: captureSignInState(runtime, 'setup'),
+  }
+}
+
+function captureSignInState(runtime: UiRuntime, scope: 'project' | 'setup'): { active: boolean; open?: boolean; url?: string; currentUrl?: string } {
+  const active = runtime.captureSignIn
+  if (!active || active.scope !== scope) return { active: false }
+  return { active: true, open: active.session.open(), url: active.session.url, currentUrl: active.session.currentUrl() }
+}
+
+async function beginCaptureSignIn(runtime: UiRuntime, application: ApplicationConfig, scope: 'project' | 'setup'): Promise<void> {
+  // One visible window at a time: a forgotten earlier window is closed first.
+  await cancelCaptureSignIn(runtime)
+  const session = await startCaptureSignIn(application)
+  runtime.captureSignIn = { session, scope, origin: new URL(application.baseUrl).origin }
+}
+
+async function cancelCaptureSignIn(runtime: UiRuntime): Promise<void> {
+  const active = runtime.captureSignIn
+  runtime.captureSignIn = undefined
+  if (active) await active.session.cancel()
+}
+
+/**
+ * New projects are created next to the folder the control center was opened
+ * from unless the wizard names another parent, which lets a second project
+ * start from an open workspace without restarting `doxloop ui`.
+ */
+async function newProjectParent(runtime: UiRuntime, body: Record<string, unknown>): Promise<string> {
+  const requested = optionalString(body.parentDirectory)
+  if (!requested) return runtime.cwd
+  const parent = resolve(runtime.cwd, requested)
+  let stats
+  try {
+    stats = await stat(parent)
+  } catch {
+    throw new DoxloopError(`The location does not exist: ${parent}`, 2)
+  }
+  if (!stats.isDirectory()) throw new DoxloopError(`The location is not a directory: ${parent}`, 2)
+  return parent
+}
+
+async function resolveProjectToOpen(runtime: UiRuntime, raw: string): Promise<string> {
+  const candidate = resolve(runtime.cwd, raw)
+  try {
+    if (!(await stat(candidate)).isDirectory()) throw new DoxloopError(`The folder is not a directory: ${candidate}`, 2)
+  } catch (error) {
+    if (error instanceof DoxloopError) throw error
+    throw new DoxloopError(`The folder does not exist: ${candidate}`, 2)
+  }
+  try {
+    return await findProjectRoot(candidate)
+  } catch {
+    throw new DoxloopError(`${candidate} is not a Doxloop project. Import its existing documentation, or start a new project.`, 2)
+  }
+}
+
+function importOverrides(body: Record<string, unknown>): { generator?: GeneratorName; contentDir?: string } {
+  const generator = parseGenerator(optionalString(body.generator))
+  const contentDir = typeof body.contentDir === 'string' ? body.contentDir : undefined
+  return { ...(generator ? { generator } : {}), ...(contentDir !== undefined ? { contentDir } : {}) }
+}
+
+/**
+ * Only one project is open at a time. Switching ends the previews, which
+ * serve the project that started them, and refuses while anything else runs
+ * so a job never finishes into a workspace that is no longer shown.
+ */
+async function switchProject(runtime: UiRuntime, root: string): Promise<void> {
+  assertProjectSwitchAllowed(runtime.jobs.values())
+  if (runtime.root === root) {
+    await rememberOpenProject(root)
+    return
+  }
+  // A sign-in window belongs to the project it was opened for.
+  await cancelCaptureSignIn(runtime)
+  for (const job of runtime.jobs.values()) {
+    if (job.status !== 'running') continue
+    job.status = 'cancelled'
+    job.finishedAt = new Date().toISOString()
+    job.lines.push('The preview stopped because another project was opened.')
+    queueUiJobLog(runtime, job.id, '\nThe preview stopped because another project was opened.\n')
+    job.child?.stdout?.removeAllListeners('data')
+    job.child?.stderr?.removeAllListeners('data')
+    stopJobChild(job.child)
+    delete job.child
+  }
+  if (runtime.root) {
+    await flushUiJobLogs(runtime)
+    await flushUiJobs(runtime)
+  }
+  const { jobs, recovered } = await loadRuntimeJobs(root)
   runtime.root = root
+  runtime.jobs = jobs
+  runtime.previewJobId = undefined
+  runtime.previewUrl = undefined
+  runtime.proposalPreviewJobId = undefined
+  runtime.proposalPreviewRunId = undefined
+  runtime.proposalPreviewUrl = undefined
+  if (recovered) await persistUiJobs(runtime)
+  broadcastJobs(runtime)
+  await rememberOpenProject(root)
+}
+
+export function assertProjectSwitchAllowed(jobs: Iterable<Pick<UiJob, 'status' | 'type'>>): void {
+  const active = [...jobs].find((job) => job.status === 'running' && !isPreviewJobType(job.type))
+  if (active) {
+    throw new DoxloopError('A run is still in progress. Wait for it to finish or stop it before opening another project.')
+  }
+}
+
+function isPreviewJobType(type: string): boolean {
+  return type === 'preview' || type.startsWith('proposal-preview:')
+}
+
+async function loadRuntimeJobs(root: string): Promise<{ jobs: Map<string, UiJob>; recovered: boolean }> {
+  const jobs = await loadUiJobs(root)
+  let recovered = false
+  for (const job of jobs.values()) {
+    if (job.status !== 'running') continue
+    job.status = 'failed'
+    job.finishedAt = new Date().toISOString()
+    job.recovered = true
+    job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.')
+    recovered = true
+  }
+  return { jobs, recovered }
+}
+
+async function rememberOpenProject(root: string): Promise<void> {
+  try {
+    const project = await loadProject(root)
+    await rememberProject({ path: root, title: project.title, generator: project.generator })
+  } catch {
+    // The recent list is a convenience. A project that cannot be read still
+    // opens so its problem is shown in the workspace.
+  }
 }
 
 async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Record<string, unknown>> {
@@ -1097,7 +1688,7 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
     directoryError = 'Enter a documentation directory.'
   } else {
     try {
-      root = resolveUiDocumentationDirectory(runtime.cwd, directory)
+      root = resolveUiDocumentationDirectory(await newProjectParent(runtime, body), directory)
       await assertUiProjectDirectoryAvailable(root)
     } catch (error) {
       directoryError = error instanceof Error ? error.message : String(error)
@@ -1405,7 +1996,10 @@ function syncConfigFromBody(raw: unknown, current: SyncConfig): SyncConfig {
   const budgetBody = body.budget === undefined ? undefined : recordBody(body.budget)
   const maxRunsPerDay = budgetBody ? optionalPositiveNumber(budgetBody.maxRunsPerDay) : current.budget?.maxRunsPerDay
   const maxMinutes = budgetBody ? optionalPositiveNumber(budgetBody.maxMinutes) : current.budget?.maxMinutes
-  const budget = maxRunsPerDay || maxMinutes ? { ...(maxRunsPerDay ? { maxRunsPerDay } : {}), ...(maxMinutes ? { maxMinutes } : {}) } : undefined
+  const maxUsd = budgetBody ? optionalPositiveAmount(budgetBody.maxUsd) : current.budget?.maxUsd
+  const budget = maxRunsPerDay || maxMinutes || maxUsd
+    ? { ...(maxRunsPerDay ? { maxRunsPerDay } : {}), ...(maxMinutes ? { maxMinutes } : {}), ...(maxUsd ? { maxUsd } : {}) }
+    : undefined
   const maxVerificationAgeDays = body.maxVerificationAgeDays === undefined ? current.maxVerificationAgeDays : optionalPositiveNumber(body.maxVerificationAgeDays)
   const rawSeverity = optionalString(body.maxVerificationAgeSeverity) ?? current.maxVerificationAgeSeverity
   if (rawSeverity && rawSeverity !== 'warn' && rawSeverity !== 'fail') throw new DoxloopError('Verification age severity must be warn or fail.')
@@ -1479,11 +2073,17 @@ function applicationFromBody(raw: unknown, project?: DoxloopProject): Applicatio
   }
   const workflow = optionalString(screenshots?.workflow)
   if (workflow && workflow.length < 12) throw new DoxloopError('Screenshot workflow guidance must describe the safe state and capture process.')
+  const authentication = body.authentication === undefined || body.authentication === null ? undefined : recordBody(body.authentication)
+  const loginPath = optionalString(authentication?.loginPath)
+  if (loginPath && !validApplicationRelativePath(loginPath)) {
+    throw new DoxloopError('Sign-in route must begin with one slash and must not include a fragment.')
+  }
   return {
     baseUrl: parsed.toString().replace(/\/$/, ''),
     ...(source ? { source } : {}),
     ...(startCommand ? { startCommand } : {}),
     ...(readyPath ? { readyPath } : {}),
+    ...(loginPath ? { authentication: { loginPath } } : {}),
     ...(screenshots ? {
       screenshots: {
         policy: policy as 'requested' | 'auto' | 'off',
@@ -1508,6 +2108,9 @@ function validApplicationRelativePath(value: string): boolean {
 
 function deploymentFromBody(raw: unknown): DeploymentConfig {
   const body = recordBody(raw)
+  const target = optionalString(body.target)
+  if (target && !['doxbrix', 'github-pages', 'netlify', 'vercel'].includes(target)) throw new DoxloopError('Choose Doxbrix, GitHub Pages, Netlify, or Vercel.')
+  const validTarget = target as 'doxbrix' | 'github-pages' | 'netlify' | 'vercel' | undefined
   const visibility = optionalString(body.visibility)
   if (visibility && visibility !== 'private' && visibility !== 'public') throw new DoxloopError('Visibility must be private or public.')
   const validVisibility = visibility === 'private' || visibility === 'public' ? visibility : undefined
@@ -1526,10 +2129,16 @@ function deploymentFromBody(raw: unknown): DeploymentConfig {
     validApiUrl = parsed.toString().replace(/\/$/, '')
   }
   return {
+    ...(validTarget ? { target: validTarget } : {}),
     ...(optionalString(body.name) ? { name: optionalString(body.name)! } : {}),
     ...(optionalString(body.slug) ? { slug: optionalString(body.slug)! } : {}),
     ...(validVisibility ? { visibility: validVisibility } : {}),
     ...(validApiUrl ? { apiUrl: validApiUrl } : {}),
+    ...(optionalString(body.siteId) ? { siteId: optionalString(body.siteId)! } : {}),
+    ...(optionalString(body.projectId) ? { projectId: optionalString(body.projectId)! } : {}),
+    ...(optionalString(body.teamId) ? { teamId: optionalString(body.teamId)! } : {}),
+    ...(optionalString(body.branch) ? { branch: optionalString(body.branch)! } : {}),
+    ...(optionalString(body.basePath) ? { basePath: optionalString(body.basePath)! } : {}),
   }
 }
 
@@ -1616,7 +2225,7 @@ function startCliJob(
   }
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
     cwd,
-    env: { ...process.env, ...remoteCredentialEnvironment() },
+    env: { ...process.env, ...remoteCredentialEnvironment(), ...(type === 'preview' && runtime.controlCenterUrl ? { DOXLOOP_CONTROL_CENTER_URL: runtime.controlCenterUrl } : {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   job.child = child
@@ -1624,7 +2233,11 @@ function startCliJob(
     const text = chunk.toString()
     const lines = text.split(/\r?\n/).filter(Boolean)
     appendJobLines(job, lines)
-    for (const line of lines) applyWorkflowStageLine(job.stages, line)
+    for (const line of lines) {
+      applyWorkflowStageLine(job.stages, line)
+      const outcome = parseJobOutcomeLine(line)
+      if (outcome) job.outcome = outcome
+    }
     job.lastOutputAt = new Date().toISOString()
     queueUiJobLog(runtime, job.id, text)
     publishJobs(runtime)
@@ -1652,6 +2265,20 @@ function startCliJob(
   return job
 }
 
+/**
+ * Ask a CLI job to stop. The CLI forwards the signal to its agent and exits
+ * once the agent is gone; if it does not, the job is killed outright so a
+ * cancelled run can never keep the workspace busy.
+ */
+function stopJobChild(child: ChildProcess | undefined): void {
+  if (!child) return
+  signalTree(child, false, 'SIGTERM')
+  const escalation = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) signalTree(child, false, 'SIGKILL')
+  }, JOB_STOP_GRACE_MS)
+  escalation.unref?.()
+}
+
 function publicJob(job: UiJob): Omit<UiJob, 'child' | 'retry'> & { retryable: boolean } {
   const { child: _child, retry, ...rest } = job
   return { ...rest, retryable: Boolean(retry) && job.status !== 'running' }
@@ -1663,8 +2290,12 @@ function persistedJob(job: UiJob): Omit<UiJob, 'child'> {
 }
 
 function assertNoActiveDocumentationJob(runtime: UiRuntime): void {
-  const active = [...runtime.jobs.values()].find(
-    (job) => job.status === 'running' && (job.type.startsWith('author:') || job.type.startsWith('plan:') || job.type.startsWith('proposal:')),
+  assertNoActiveDocumentationJobs(runtime.jobs.values())
+}
+
+export function assertNoActiveDocumentationJobs(jobs: Iterable<Pick<UiJob, 'status' | 'type'>>): void {
+  const active = [...jobs].find(
+    (job) => job.status === 'running' && (job.type.startsWith('author:') || job.type.startsWith('plan:') || job.type.startsWith('proposal:') || job.type.startsWith('page-edit:')),
   )
   if (active) {
     throw new DoxloopError('A documentation workflow is already in progress. Wait for it to finish or cancel it before starting another.')
@@ -1677,15 +2308,48 @@ function requirePlanFirstAuthoring(mode: string): void {
   }
 }
 
-async function waitForPreviewServer(url: string, job: UiJob): Promise<void> {
+function projectPreviewIdentity(generator: string, root: string): string | undefined {
+  return generator === 'doxbrix' ? resolve(root) : undefined
+}
+
+export function previewIdentityMatches(value: unknown, expectedRoot: string): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const root = (value as Record<string, unknown>).root
+  return typeof root === 'string' && resolve(root) === resolve(expectedRoot)
+}
+
+export async function availableLocalPort(): Promise<number> {
+  const probe = createNetServer()
+  probe.unref()
+  await new Promise<void>((resolveListen, rejectListen) => {
+    probe.once('error', rejectListen)
+    probe.listen(0, '127.0.0.1', resolveListen)
+  })
+  const address = probe.address()
+  if (!address || typeof address === 'string') {
+    await new Promise<void>((resolveClose) => probe.close(() => resolveClose()))
+    throw new DoxloopError('Could not allocate a local documentation preview port.')
+  }
+  await new Promise<void>((resolveClose, rejectClose) => {
+    probe.close((error) => error ? rejectClose(error) : resolveClose())
+  })
+  return address.port
+}
+
+async function waitForPreviewServer(url: string, job: UiJob, expectedRoot?: string): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (job.status !== 'running') {
       throw new DoxloopError(job.lines.at(-1) ?? 'The documentation preview failed to start.')
     }
     try {
-      const response = await fetch(url, { cache: 'no-store' })
-      await response.body?.cancel()
-      if (response.ok) return
+      const response = await fetch(expectedRoot ? `${url}/__doxloop/identity` : url, { cache: 'no-store' })
+      if (expectedRoot) {
+        const identity = await response.json().catch(() => undefined)
+        if (response.ok && previewIdentityMatches(identity, expectedRoot)) return
+      } else {
+        await response.body?.cancel()
+        if (response.ok) return
+      }
     } catch {
       // The preview process may still be binding its local port.
     }
@@ -1891,6 +2555,7 @@ function parsePersistedUiJob(raw: unknown, root: string): UiJob | undefined {
     ...(typeof job.planId === 'string' && /^plan-[a-z0-9-]+$/.test(job.planId) ? { planId: job.planId } : {}),
     ...(retry ? { retry } : {}),
     ...(job.recovered === true ? { recovered: true } : {}),
+    ...(parseJobOutcome(job.outcome) ? { outcome: parseJobOutcome(job.outcome)! } : {}),
     lines,
     stages: Array.isArray(job.stages) ? job.stages.flatMap((stage) => parseWorkflowStage(stage) ?? []) : [],
   }
@@ -1912,13 +2577,75 @@ function parseRetry(value: Record<string, unknown>, root: string, type: string):
 function expectedRetryCommand(type: string): string | undefined {
   if (type.startsWith('plan:')) return 'plan'
   if (type.startsWith('proposal:revise:') || type.startsWith('proposal:resume:')) return 'proposal'
+  if (type.startsWith('page-edit:')) return 'pages'
   if (type === 'author:review') return 'review'
-  return ['sync', 'capture', 'generator', 'deploy', 'deploy:dry-run'].includes(type) ? type.split(':')[0] : undefined
+  return ['sync', 'capture', 'generator', 'deploy', 'deploy:dry-run', 'export'].includes(type) ? type.split(':')[0] : undefined
 }
 
 function containedBy(root: string, candidate: string): boolean {
   const rel = relative(resolve(root), resolve(candidate))
   return rel !== '..' && !rel.startsWith(`..${sep}`)
+}
+
+export function uiErrorStatus(error: unknown): number {
+  return error instanceof DoxloopError ? (error.exitCode === 2 ? 400 : 409) : 500
+}
+
+/** The release-notes template a plan request carries, validated as a bad request. */
+export function releaseTemplateFromBody(raw: unknown): ReleaseTemplateInput | undefined {
+  if (raw === undefined || raw === null) return undefined
+  const body = recordBody(raw)
+  if (body.kind !== 'release-notes') throw new DoxloopError('Only the release-notes template is available.', 2)
+  const version = optionalString(body.version)
+  const from = optionalString(body.from)
+  const to = optionalString(body.to)
+  if (!version) throw new DoxloopError('Release notes need a version label, such as v0.2.0.', 2)
+  if (!from || !to) throw new DoxloopError('Release notes need the starting and ending Git refs.', 2)
+  const sources = stringArray(body.sources).map((name) => name.trim()).filter(Boolean)
+  return { version, from, to, ...(sources.length ? { sources } : {}) }
+}
+
+export function pageEditJobSpec(
+  root: string,
+  project: DoxloopProject,
+  runId: string,
+  rawBody: unknown,
+): { type: string; args: string[]; paths: string[]; allowRelated: boolean; agent?: AgentName } {
+  const body = recordBody(rawBody)
+  const paths = [...new Set(stringArray(body.paths).map((path) => path.trim()).filter(Boolean))]
+  const instruction = optionalString(body.instruction)?.trim() ?? ''
+  if (instruction.length < 8) throw new DoxloopError('Describe what should change.', 2)
+  if (paths.length < 1 || paths.length > 10) throw new DoxloopError('Select between 1 and 10 pages to edit.', 2)
+  const requestedAgent = parseAgent(optionalString(body.agent))
+  const effectiveAgent = requestedAgent ?? project.defaultAgent
+  const screenshots = optionalString(body.screenshots) ?? 'disabled'
+  if (screenshots !== 'enabled' && screenshots !== 'disabled') throw new DoxloopError('Screenshots must be enabled or disabled.', 2)
+  const args = ['pages', 'edit', '--run-id', runId, '--request', instruction]
+  for (const path of paths) args.push('--path', path)
+  if (body.allowRelated === true) args.push('--allow-related')
+  if (screenshots === 'enabled') args.push('--screenshots')
+  appendOption(args, 'agent', requestedAgent)
+  appendOption(args, 'model', optionalString(body.model))
+  if (effectiveAgent === 'codex') appendOption(args, 'reasoning', parseReasoning(optionalString(body.reasoning)))
+  if (effectiveAgent === 'claude') appendOption(args, 'effort', parseClaudeEffort(optionalString(body.effort)))
+  args.push('--cwd', root)
+  return {
+    type: `page-edit:${runId}`,
+    args,
+    paths,
+    allowRelated: body.allowRelated === true,
+    ...(effectiveAgent ? { agent: effectiveAgent } : {}),
+  }
+}
+
+export function pageRefineJobSpec(root: string, run: SyncRun, rawBody: unknown): { type: string; args: string[] } {
+  if (!run.editRequest) throw new DoxloopError('Only a page edit can be refined from the Pages view.', 2)
+  const instruction = optionalString(recordBody(rawBody).instruction)?.trim() ?? ''
+  if (instruction.length < 8) throw new DoxloopError('Describe what should be different.', 2)
+  const args = ['proposal', 'revise', '--id', run.id, '--request', instruction]
+  for (const change of run.changes.filter((change) => change.category === 'page')) args.push('--change', change.id)
+  args.push('--cwd', root)
+  return { type: `proposal:revise:${run.id}`, args }
 }
 
 async function optionalProjectRoot(cwd: string): Promise<string | undefined> {
@@ -1944,13 +2671,13 @@ function requireProject(runtime: UiRuntime): string {
   return runtime.root
 }
 
-async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+async function readJsonBody(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += value.length
-    if (size > MAX_BODY_BYTES) throw new DoxloopError('The UI request is too large.')
+    if (size > limit) throw new DoxloopError('The UI request is too large.')
     chunks.push(value)
   }
   try {
@@ -1999,7 +2726,7 @@ function requireSameOrigin(request: IncomingMessage, port: number): void {
 function appHeaders(): Record<string, string> {
   return {
     ...baseHeaders(),
-    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:4321; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   }
 }
 
@@ -2137,11 +2864,14 @@ function mimeType(path: string): string {
   }
 }
 
+/** The URL segment to open. Older page names still work and land on the renamed page. */
 export function normalizeInitialPage(value: string | undefined): string {
   const page = value ?? 'overview'
-  const allowed = new Set(['overview', 'sources', 'authoring', 'proposals', 'publish', 'settings'])
-  if (!allowed.has(page)) throw new DoxloopError(`Unknown UI page "${page}".`)
-  return page
+  const legacy: Record<string, string> = { authoring: 'update', proposals: 'review', publish: 'deploy' }
+  const allowed = new Set(['overview', 'sources', 'update', 'pages', 'review', 'deploy', 'settings'])
+  const resolved = legacy[page] ?? page
+  if (!allowed.has(resolved)) throw new DoxloopError(`Unknown UI page "${page}".`)
+  return resolved
 }
 
 function openBrowser(url: string): void {
@@ -2151,15 +2881,16 @@ function openBrowser(url: string): void {
   child.unref()
 }
 
-async function chooseLocalDirectory(): Promise<string | undefined> {
+async function chooseLocalDirectory(prompt: string): Promise<string | undefined> {
+  // Prompts are fixed strings chosen by the server, never request input.
   const picker = process.platform === 'darwin'
-    ? { command: 'osascript', args: ['-e', 'POSIX path of (choose folder with prompt "Choose product source directory")'] }
+    ? { command: 'osascript', args: ['-e', `POSIX path of (choose folder with prompt "${prompt}")`] }
     : process.platform === 'win32'
       ? {
           command: 'powershell.exe',
-          args: ['-NoProfile', '-STA', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; $picker = New-Object System.Windows.Forms.FolderBrowserDialog; $picker.Description = "Choose product source directory"; if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $picker.SelectedPath }'],
+          args: ['-NoProfile', '-STA', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $picker = New-Object System.Windows.Forms.FolderBrowserDialog; $picker.Description = "${prompt}"; if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $picker.SelectedPath }`],
         }
-      : { command: 'zenity', args: ['--file-selection', '--directory', '--title=Choose product source directory'] }
+      : { command: 'zenity', args: ['--file-selection', '--directory', `--title=${prompt}`] }
 
   return new Promise<string | undefined>((resolvePicker, rejectPicker) => {
     const child = spawn(picker.command, picker.args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -2197,6 +2928,11 @@ function sourceIdentifier(label: string): string {
   return identifier || 'source'
 }
 
+function rawText(value: unknown): string {
+  if (typeof value !== 'string') throw new DoxloopError('Page content must be text.')
+  return value
+}
+
 function stringValue(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') throw new DoxloopError('A required value is missing.')
   return value.trim()
@@ -2230,6 +2966,13 @@ function optionalPositiveNumber(value: unknown): number | undefined {
   const number = Number(value)
   if (!Number.isInteger(number) || number < 1) throw new DoxloopError('Budget values must be positive integers.')
   return number
+}
+
+function optionalPositiveAmount(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0 || number > 100_000) throw new DoxloopError('The spending cap must be a positive amount in US dollars.')
+  return Math.round(number * 100) / 100
 }
 
 function optionalViewportNumber(value: unknown, key: 'width' | 'height', maximum: number): number | undefined {

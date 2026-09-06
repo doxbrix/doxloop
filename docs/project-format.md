@@ -29,6 +29,7 @@ form field.
   }],
   "designReferences": [{ "url": "https://docs.example.com/" }],
   "deployment": {
+    "target": "doxbrix",
     "name": "Example documentation",
     "slug": "example-docs",
     "visibility": "private",
@@ -66,7 +67,7 @@ form field.
     "on": ["every@15m"],
     "watch": ["src/**", "openapi.yaml"],
     "ignore": ["pnpm-lock.yaml"],
-    "budget": { "maxRunsPerDay": 8, "maxMinutes": 15 },
+    "budget": { "maxRunsPerDay": 8, "maxMinutes": 15, "maxUsd": 10 },
     "maxVerificationAgeDays": 30,
     "maxVerificationAgeSeverity": "warn"
   }
@@ -99,10 +100,20 @@ form field.
   without this object keep the existing behaviour. `screenshots.startPath`
   records the default starting route, and `screenshots.workflow` records
   authentication, safe fixture data, ordered actions, and expected outcomes
-  that constrain capture planning.
-- `deployment` saves the hosted project name, slug, visibility, and Doxbrix
-  destination used by the **Deploy** page. Visibility is edited there; missing
-  values are derived from the project title and default to private.
+  that constrain capture planning. `authentication.loginPath` names the
+  sign-in route the browser sign-in opens. Sign-in secrets are never stored
+  here: the recorded browser session and any test-account credentials live
+  under `~/.config/doxloop/capture-auth/<project key>/` (or
+  `$DOXLOOP_CONFIG_HOME`) with owner-only permissions, keyed by the project
+  root, and are managed under **Settings → Visual evidence → Application
+  sign-in**.
+- `deployment.target` is `doxbrix`, `github-pages`, `netlify`, or `vercel`.
+  Common fields save the project name and slug. Doxbrix also uses `visibility`
+  and `apiUrl`; GitHub Pages uses `branch` and optional `basePath`; Netlify uses
+  `siteId`; Vercel uses `projectId` and optional `teamId`. Provider tokens are
+  never stored here—they come from the OS credential store, protected user
+  configuration, or `DOXLOOP_NETLIFY_TOKEN` / `DOXLOOP_VERCEL_TOKEN`. Missing
+  names and slugs are derived from the project title.
 - `documentation` persists confirmed reader, scope, terminology, editorial,
   and accessibility decisions, edited under **Settings → Audience and voice**
   and in each plan's **Documentation brief**.
@@ -115,8 +126,10 @@ form field.
   `on` selects one polling frequency: `every@Nm`, `every@Nh`, `daily@HH:MM`,
   `weekdays@HH:MM`, `weekly@<day>@HH:MM`, or `monthly@<day>@HH:MM`. `watch`
   and `ignore` are path patterns applied to changed source files; `ignore`
-  always wins. `budget` caps unattended runs. Missing values use the defaults
-  below. `maxVerificationAgeDays` warns or fails (according to
+  always wins. `budget` caps unattended runs: `maxRunsPerDay` limits scheduled
+  runs, `maxMinutes` stops an agent (and the planner) after that many minutes,
+  and `maxUsd` passes a spending cap to Claude Code, which is the only agent
+  with such a flag. Missing values use the defaults below. `maxVerificationAgeDays` warns or fails (according to
   `maxVerificationAgeSeverity`) when evidence has not been reverified
   recently, even when source revisions are unchanged.
 
@@ -129,6 +142,48 @@ Schema version 1 treats a missing legacy `generator` as `doxbrix` and supplies
 the default documentation brief when it is absent. Unsupported structures fail
 closed rather than being silently migrated.
 
+### Imported projects
+
+A folder that already holds a documentation site can be adopted from the
+control center (**Use existing documentation folder** in the setup wizard, or
+**Import existing documentation…** in the project switcher) or with
+`doxloop init --existing [directory]`. The generator is recognized from its
+configuration files: `docs.json` (Doxbrix), `docusaurus.config.*`,
+`mkdocs.yml`, `astro.config.*` mentioning Starlight, `<dir>/.vitepress/config.*`,
+`next.config.*` mentioning Nextra or `theme.config.*`, `markdoc.config.*`,
+`hugo.*` or a Hugo `config.toml`, `<dir>/conf.py` (Sphinx), and `_config.yml`
+(Jekyll). The content directory and title are read from the same files where
+they are declared, and both can be overridden.
+
+Import writes `project.json` with no sources and the default brief, an
+`evidence-map.json` in which every existing page has no sources and the
+confidence `needs-human` (so the first update run must attach evidence before
+drift detection trusts the page), the machine-local `.gitignore` entries
+listed above, and the agent skills. It then runs a read-only discovery pass.
+Pages, navigation, and generator configuration are never modified. A
+generator other than Doxbrix must have its Doxloop generator package
+resolvable from the folder; the control center offers to add it as a
+development dependency.
+
+## `projects.json` (user level)
+
+The control center keeps a list of the projects it has opened at
+`~/.doxloop/projects.json` (`DOXLOOP_HOME` overrides the directory). Each
+entry records the project path, title, generator, and when it was last opened,
+newest first, capped at twenty entries. The file is a convenience: a damaged
+one is ignored and rewritten on the next open, and a project whose
+`.doxloop/project.json` has disappeared is shown as missing until it is removed
+from the list.
+
+```json
+{
+  "schemaVersion": 1,
+  "projects": [
+    { "path": "/work/product-docs", "title": "Product documentation", "generator": "doxbrix", "lastOpenedAt": "2026-09-04T10:12:00.000Z" }
+  ]
+}
+```
+
 ## `quality.json`
 
 `.doxloop/quality.json` is an optional version 1 contract for external-link
@@ -140,9 +195,12 @@ results are derived artifacts; approved visual and evaluation baselines may be
 committed when a team wants CI regression protection.
 
 Proposal runs live under `.doxloop/runs/<id>/`: the isolated `workspace/`
-the agent wrote into, the reviewed `run.json`, and `authoring.json`, which
-records the instructions, agent, model, screenshot mode, and source summary
-the run was started with so a failed run can be resumed in place. UI recovery
+the agent wrote into, the reviewed `run.json`, `baseline.json`, which holds a
+content hash of every file as the workspace was created so review can tell
+what the agent changed from what changed in the project while it ran, and
+`authoring.json`, which records the instructions, agent, model, screenshot
+mode, and source summary the run was started with so a failed run can be
+resumed in place. UI recovery
 checkpoints and logs live in `.doxloop/ui-jobs.json` and
 `.doxloop/ui-job-logs/`. Learned local review guidance is stored in
 `.doxloop/review-preferences.json`, and prepared Git delivery metadata is stored
@@ -202,6 +260,12 @@ tracked and untracked non-ignored, non-credential source content used by the
 last successful authoring run. The fingerprint prevents an unchanged dirty
 working tree from being reported again after its content is committed.
 
+A local folder without Git history records the marker commit `local-content`
+together with the fingerprint and a `files` map of source-relative paths to
+content digests. A later check compares the folder against that map, so it
+can name the added, modified, and deleted files even though there is no
+commit range to diff. Credential files are never read or listed.
+
 Doxloop updates synchronization state only when a create or update proposal
 has been fully accepted, documentation validation passes, and the brief has a
 primary audience and priority outcomes. Automatic review runs keep their staged
@@ -211,9 +275,12 @@ change has been accepted.
 ## `runs/`
 
 `.doxloop/runs/` is ignored runtime state for generated documentation reviews.
-Each run contains an isolated workspace, original copies of changed files, and a
+Each run contains an isolated workspace, original copies of changed files, a
+`baseline.json` hash manifest of the project as the run started, and a
 `run.json` manifest with the trigger, validation result, exact line hunks, and
-acceptance decisions. The **Review** page lists the manifests and renders them.
+acceptance decisions. A change whose file also moved in the project while the
+agent ran is marked `changedDuringRun`; the **Review** page groups those under
+**Changed while the agent ran** and asks before applying them. The **Review** page lists the manifests and renders them.
 The directory is not required to be committed and can be retained according to
 local review policy; **Clean up archived** on the Review page removes eligible
 workspaces.

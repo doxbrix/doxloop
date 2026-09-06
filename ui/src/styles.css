@@ -2016,3 +2016,60 @@ body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
   .review-toolbar { align-items: flex-start; }
   .review-toolbar .row-actions { width: 100%; }
 }
+
+/* Agent capability matrix (setup wizard and Settings) */
+.agent-capabilities-details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface, #fff); }
+.agent-capabilities-details > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 13px; list-style: none; display: flex; align-items: center; gap: 8px; }
+.agent-capabilities-details > summary::-webkit-details-marker { display: none; }
+.agent-capabilities-details > summary::before { content: '▸'; font-size: 11px; color: var(--muted, #6b7280); }
+.agent-capabilities-details[open] > summary::before { content: '▾'; }
+.agent-capabilities { display: grid; gap: 0; padding: 0 14px 12px; overflow-x: auto; font-size: 13px; }
+.agent-capabilities-head, .agent-capabilities-row { display: grid; grid-template-columns: minmax(160px, 1.6fr) repeat(3, minmax(96px, 1fr)); gap: 8px; align-items: start; padding: 8px 0; border-top: 1px solid var(--border); }
+.agent-capabilities-head { border-top: 0; }
+.agent-capabilities-head span { display: grid; gap: 2px; }
+.agent-capabilities-head small { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; width: max-content; background: #e8f5ec; color: #1f7a3a; }
+.agent-capabilities-head small.limited { background: #fff0de; color: #9a5b00; }
+.agent-capabilities-head span.selected strong, .agent-capabilities-row span.selected { color: var(--accent, #2f5bea); }
+.agent-capabilities-row [role="rowheader"] { display: grid; gap: 2px; }
+.agent-capabilities-row [role="rowheader"] small, .agent-capabilities-row [role="cell"] small { display: block; color: var(--muted, #6b7280); font-size: 11.5px; line-height: 1.35; }
+.agent-capabilities-row [role="cell"] { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-weight: 600; }
+.agent-capabilities-row [role="cell"] small { flex-basis: 100%; font-weight: 400; }
+.agent-capabilities-row [role="cell"].full { color: #1f7a3a; }
+.agent-capabilities-row [role="cell"].limited { color: #9a5b00; }
+.agent-capabilities-row [role="cell"].none { color: var(--muted, #6b7280); }
+.agent-capabilities.compact .agent-capabilities-row { padding: 5px 0; }
+.sync-outcome-toast.warn .toast-icon { color: #9a5b00; }
+.sync-outcome-toast.bad .toast-icon { color: #b42318; }
+
+/* ── Generator tiers and pre-flight (setup wizard) ──────────────────────── */
+.generator-tier-label { width: fit-content; display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border-radius: 999px; font-size: 10.5px !important; font-weight: 600; background: var(--surface-2, #f3f4f6); color: var(--muted, #6b7280) !important; }
+.generator-tier-label.tier-full { background: var(--ok-soft, #ecfdf5); color: var(--ok, #047857) !important; }
+.generator-tier-label.tier-supported { background: var(--brand-soft, #eef2ff); color: var(--brand, #4f46e5) !important; }
+.generator-tier-label.tier-basic { background: var(--warn-soft, #fff7ed); color: var(--warn, #c2410c) !important; }
+.generator-tiers { display: grid; font-size: 12.5px; }
+.generator-tiers-head, .generator-tiers-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr) minmax(0, 1.6fr); gap: 10px; padding: 8px 14px; align-items: center; border-top: 1px solid var(--border); }
+.generator-tiers-head { border-top: 0; color: var(--muted, #6b7280); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.generator-tiers-row.selected { background: var(--brand-soft, #eef2ff); }
+.generator-tiers-row [role="cell"].tier-full { color: var(--ok, #047857); font-weight: 600; }
+.generator-tiers-row [role="cell"].tier-supported { color: var(--brand, #4f46e5); font-weight: 600; }
+.generator-tiers-row [role="cell"].tier-basic { color: var(--warn, #c2410c); font-weight: 600; }
+.generator-tiers-legend { margin: 0; padding: 10px 14px 12px; border-top: 1px solid var(--border); color: var(--muted, #6b7280); font-size: 11.5px; line-height: 17px; }
+.generator-tiers-legend strong { color: var(--heading, #111827); margin-right: 3px; }
+.generator-tiers-legend strong + strong, .generator-tiers-legend strong:not(:first-child) { margin-left: 6px; }
+.setup-generator-preflight { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface, #fff); }
+.setup-generator-preflight > header { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.setup-generator-preflight > header > div { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.setup-generator-preflight > header strong { color: var(--heading, #111827); font-size: 13.5px; font-weight: 650; }
+.setup-generator-preflight > header small { color: var(--muted, #6b7280); font-size: 12px; line-height: 17px; }
+.setup-generator-preflight-icon { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border-radius: 9px; background: var(--surface-2, #f3f4f6); color: var(--muted, #6b7280); }
+.setup-generator-preflight.ready .setup-generator-preflight-icon { background: var(--ok-soft, #ecfdf5); color: var(--ok, #047857); }
+.setup-generator-preflight.warning .setup-generator-preflight-icon, .setup-generator-preflight.missing .setup-generator-preflight-icon { background: #fff0de; color: var(--warn, #c2410c); }
+.setup-generator-preflight.missing { border-color: var(--warn, #c2410c); }
+.setup-generator-preflight-checks { list-style: none; margin: 0; padding: 0 14px 12px; display: grid; gap: 6px; }
+.setup-generator-preflight-checks li { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; }
+.setup-generator-preflight-checks li > span { display: grid; gap: 2px; }
+.setup-generator-preflight-checks li small { color: var(--muted, #6b7280); font-size: 11.5px; line-height: 16px; }
+.setup-generator-preflight-checks li.pass { color: var(--ok, #047857); }
+.setup-generator-preflight-checks li.warning { color: var(--warn, #c2410c); }
+.setup-generator-preflight-checks li.fail { color: var(--danger, #b91c1c); }
+.setup-generator-preflight-checks li strong { color: var(--heading, #111827); font-weight: 600; }

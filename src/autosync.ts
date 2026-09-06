@@ -1,8 +1,13 @@
+import { readFile, writeFile, rename } from 'node:fs/promises'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { ProjectBusyError, withProjectLock } from './project-lock.js'
 import { agentAuthenticationStatus, chooseAgent } from './agents.js'
 import { runAuthor } from './author.js'
 import { computeDrift, computeDriftFromChanges, formatDrift } from './drift.js'
 import { DoxloopError } from './errors.js'
 import { readEvidenceMap } from './evidence.js'
+import { emitJobOutcome, type JobOutcome } from './job-events.js'
 import { saveProjectSettings, sourceKind } from './project.js'
 import { heading, note, promptConfirm, promptSelect, type PromptIo } from './prompts.js'
 import { monitorRemoteSources } from './remote-monitor.js'
@@ -15,7 +20,7 @@ import {
   scheduleFrequency,
   scheduleState,
 } from './schedule.js'
-import { collectSourceChanges } from './sync.js'
+import { collectSourceChanges, readSyncState, LOCAL_CONTENT_BASELINE } from './sync.js'
 import { createSyncRun, listSyncRuns, pendingRunCount, type CreateSyncRunOptions } from './sync-runs.js'
 import type {
   DoxloopProject,
@@ -40,6 +45,7 @@ export function replaySyncSetupCommand(sync: SyncConfig): string {
 
 export function parseTriggerList(raw: string): SyncTrigger[] {
   if (raw.trim().toLowerCase() === 'manual') return []
+  if (raw.split(',').filter((value) => value.trim()).length > 1) throw new DoxloopError('Choose one schedule per project; multiple triggers are not supported.')
   return raw
     .split(',')
     .map((value) => value.trim())
@@ -90,15 +96,29 @@ export async function computeConfiguredDrift(
   return computeDriftFromChanges(root, project, monitored.changes)
 }
 
+/** The native scheduler, replaceable in tests so no real job is registered. */
+export interface SyncScheduler {
+  install: typeof installSchedule
+  remove: typeof removeSchedule
+  state: typeof scheduleState
+}
+
+const NATIVE_SCHEDULER: SyncScheduler = { install: installSchedule, remove: removeSchedule, state: scheduleState }
+
 /**
  * Apply a sync configuration: persist it, then make the local machine match it.
  * Installing and removing are the same operation with different inputs, so a
  * project can move between trigger sets without leaving orphaned jobs behind.
+ * Local folders are checked in place: a Git checkout by its HEAD commit and
+ * working tree, any other folder by the content it held at the last sync.
+ * Nothing is fetched, pulled, or written in the source, so a local folder
+ * needs no remote to be scheduled.
  */
 export async function applySyncConfig(
   root: string,
   project: DoxloopProject,
   sync: SyncConfig,
+  scheduler: SyncScheduler = NATIVE_SCHEDULER,
 ): Promise<string[]> {
   const frequency = scheduleFrequency(sync.on)
   const sources = sync.branch
@@ -107,28 +127,22 @@ export async function applySyncConfig(
           ? { ...source, remote: { ...source.remote, branch: sync.branch! } }
           : source)
     : project.sources
-  if (frequency) {
-    const missing = sources.filter(
-      (source) => sourceKind(source) === 'directory' && !source.remote,
-    )
-    if (missing.length > 0) {
-      throw new DoxloopError(
-        `Scheduled sync requires a read-only remote for: ${missing.map((source) => source.name).join(', ')}. Doxloop will not install source-repository hooks.`,
-      )
-    }
-  }
   await saveProjectSettings(root, { sources, sync })
   const lines: string[] = []
 
   if (frequency) {
-    const state = await installSchedule(root, frequency)
+    const state = await scheduler.install(root, frequency)
     lines.push(
       statusLine('✓', 'Schedule installed', `${formatScheduleFrequency(frequency)} · ${state.label}`),
     )
+    for (const source of sources) {
+      if (sourceKind(source) !== 'directory' || source.remote) continue
+      lines.push(statusLine('✓', 'Local source', `${source.name} is checked in place; nothing is fetched or written there`))
+    }
   } else {
-    const existing = await scheduleState(root)
+    const existing = await scheduler.state(root)
     if (existing.installed) {
-      await removeSchedule(root)
+      await scheduler.remove(root)
       lines.push(statusLine('✓', 'Schedule removed', existing.label))
     }
   }
@@ -239,13 +253,15 @@ export async function formatSyncStatus(
   const enabled = sync.on.length > 0
   const lines: string[] = [`Automatic sync: ${enabled ? 'ON' : 'OFF'}`, '']
 
+  const syncState = await readSyncState(root)
   for (const source of project.sources) {
     if (sourceKind(source) !== 'directory') continue
-    lines.push(
-      source.remote
-        ? statusLine('✓', 'Remote source', `${source.remote.provider}:${source.remote.repository} @ ${source.remote.branch}`)
-        : statusLine('✗', 'Remote source', `${source.name} is not configured`),
-    )
+    if (source.remote) {
+      lines.push(statusLine('✓', 'Remote source', `${source.remote.provider}:${source.remote.repository} @ ${source.remote.branch}`))
+      continue
+    }
+    const record = syncState.sources[source.name]
+    lines.push(statusLine('✓', 'Local source', `${source.name} · ${describeLocalBaseline(record?.commit)}`))
   }
 
   const schedule = await scheduleState(root)
@@ -310,6 +326,12 @@ export async function formatSyncStatus(
   return lines.join('\n')
 }
 
+function describeLocalBaseline(commit: string | undefined): string {
+  if (!commit) return 'checked in place; no baseline recorded yet'
+  if (commit === LOCAL_CONTENT_BASELINE) return 'compared by content (no Git history)'
+  return `Git HEAD, baseline ${commit.slice(0, 12)}`
+}
+
 async function agentStatusLine(project: DoxloopProject): Promise<string> {
   try {
     const agent = await chooseAgent(project.defaultAgent)
@@ -331,7 +353,7 @@ async function agentStatusLine(project: DoxloopProject): Promise<string> {
  * the mode allows it, the configured branch is checked out, and the run budget
  * has not been spent.
  */
-export async function runSyncNow(options: {
+interface RunSyncOptions {
   root: string
   project: DoxloopProject
   quiet?: boolean
@@ -340,8 +362,29 @@ export async function runSyncNow(options: {
   author?: typeof runAuthor
   /** Manual authoring request and controls supplied by the workspace UI. */
   authoring?: CreateSyncRunOptions['authoring']
-}): Promise<number> {
+}
+export async function runSyncNow(options: RunSyncOptions): Promise<number> {
+  try { return await withProjectLock(options.root, 'monitor', () => withProjectLock(options.root, 'authoring', () => runSyncNowLocked(options), 0), 0) }
+  catch (error) {
+    if (!(error instanceof ProjectBusyError)) throw error
+    await appendSyncLog(options.root, `skipped: ${error.message}`)
+    emitJobOutcome({ kind: 'sync', status: 'skipped', message: error.message })
+    return 1
+  }
+}
+async function runSyncNowLocked(options: RunSyncOptions): Promise<number> {
   const { root, project } = options
+  const frequency = scheduleFrequency(project.sync.on)
+  if (options.trigger === 'schedule' && frequency?.kind === 'interval') {
+    const clockPath = join(root, '.doxloop', 'monitor-interval.json')
+    let last = 0
+    try { last = Number(JSON.parse(await readFile(clockPath, 'utf8')).startedAt) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    const now = Date.now()
+    if (last > 0 && now >= last && now - last < frequency.minutes * 60_000) return 0
+    const temporary = `${clockPath}.${randomUUID()}.tmp`
+    await writeFile(temporary, JSON.stringify({ startedAt: now }), { mode: 0o600 })
+    await rename(temporary, clockPath)
+  }
   const write = (text: string): void => {
     if (!options.quiet) process.stdout.write(text)
   }
@@ -352,25 +395,46 @@ export async function runSyncNow(options: {
     ? await computeDriftFromChanges(root, project, monitored.changes)
     : await computeDrift(root, project)
 
+  const outcome = (status: JobOutcome['status'], message: string, extra: Partial<JobOutcome> = {}): void =>
+    emitJobOutcome({ kind: 'sync', status, message, pages: drift.pages.length, ...extra })
   if (drift.status === 'current' && !options.authoring) {
     await appendSyncLog(root, 'check: no reader-visible changes')
     write(`${formatDrift(drift)}\n`)
+    outcome('current', 'No reader-visible source changes since the last check.')
     return 0
   }
 
   write(`${formatDrift(drift)}\n`)
   if (project.sync.mode === 'check' && !options.authoring) {
     await appendSyncLog(root, `check: ${pageCount(drift.pages.length)}, reporting only`)
+    if (drift.status === 'stale') outcome('stale', `${pageCount(drift.pages.length)} · monitoring is in check mode, so no proposal was drafted.`)
+    else outcome('unknown', drift.notes[0] ?? 'Doxloop could not determine whether the documentation is current.')
     return 1
   }
 
-  const blocked = await authoringBlocker(root, project)
+  const pending = !options.authoring && (await listSyncRuns(root)).some((run) => ['generating', 'awaiting-review', 'partially-applied', 'conflicted'].includes(run.status) && !run.archivedAt)
+  if (pending) {
+    const message = 'An existing proposal needs review. Accept, reject, or archive it before monitoring drafts another update.'
+    await appendSyncLog(root, `skipped: ${message}`)
+    outcome('skipped', message)
+    return 1
+  }
+  let blocked = await authoringBlocker(root, project)
+  if (!blocked && !options.author) {
+    try {
+      const agent = await chooseAgent(options.authoring?.agent ?? project.defaultAgent)
+      const authentication = await agentAuthenticationStatus(agent)
+      if (authentication.status === 'unauthenticated' || (options.trigger === 'schedule' && authentication.status !== 'authenticated')) blocked = `sign in to ${agent.name} before unattended authoring: ${authentication.detail}`
+    } catch (error) { blocked = error instanceof Error ? error.message : String(error) }
+  }
   if (blocked) {
     await appendSyncLog(root, `skipped: ${blocked}`)
     write(`\nSkipping the documentation update: ${blocked}\n`)
+    outcome('skipped', `${pageCount(drift.pages.length)} · the update was skipped because ${blocked}`)
     return 1
   }
 
+  await reserveRun(root)
   await appendSyncLog(root, `proposal: starting for ${pageCount(drift.pages.length)}`)
   const changes = monitored?.changes ?? await collectSourceChanges(root, project.sources)
   const proposal = await createSyncRun({
@@ -387,6 +451,7 @@ export async function runSyncNow(options: {
   if (proposal.status === 'failed') {
     await appendSyncLog(root, `proposal: ${proposal.id} failed: ${proposal.error ?? 'unknown error'}`)
     write(`\nDocumentation proposal failed: ${proposal.error ?? 'unknown error'}\n`)
+    outcome('failed', `The documentation proposal failed: ${proposal.error ?? 'unknown error'}`, { proposalId: proposal.id })
     return 1
   }
   await appendSyncLog(
@@ -396,6 +461,7 @@ export async function runSyncNow(options: {
   write(
     `\nProposal ${proposal.id} is ready. The actual documentation is unchanged.\nReview and accept changes with:\n  doxloop sync review --open\n`,
   )
+  outcome('proposal', `${options.authoring ? 'The requested update' : pageCount(drift.pages.length)} · proposal ${proposal.id} is ready for review with ${proposal.changes.length} changed file${proposal.changes.length === 1 ? '' : 's'}.`, { proposalId: proposal.id })
   return 0
 }
 
@@ -411,14 +477,27 @@ async function authoringBlocker(
   return undefined
 }
 
-async function runsToday(root: string): Promise<number> {
-  const today = new Date().toISOString().slice(0, 10)
-  const log = await readSyncLog(root, 500)
-  return log.filter(
-    (line) =>
-      line.startsWith(today) &&
-      (line.includes('proposal: starting') || line.includes('update: starting')),
-  ).length
+interface BudgetLedger { date: string; count: number }
+async function budgetLedger(root: string): Promise<BudgetLedger> {
+  const date = new Date().toISOString().slice(0, 10)
+  try {
+    const ledger = JSON.parse(await readFile(join(root, '.doxloop', 'monitor-budget.json'), 'utf8')) as BudgetLedger
+    if (!Number.isInteger(ledger.count) || ledger.count < 0) throw new DoxloopError('Monitoring budget state is invalid. Repair it before starting another run.')
+    return ledger.date === date ? ledger : { date, count: 0 }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    // Migrate starts recorded before the durable ledger was introduced.
+    const log = await readSyncLog(root, 100_000)
+    return { date, count: log.filter((line) => line.startsWith(date) && (line.includes('proposal: starting') || line.includes('update: starting'))).length }
+  }
+}
+async function runsToday(root: string): Promise<number> { return (await budgetLedger(root)).count }
+async function reserveRun(root: string): Promise<void> {
+  const ledger = await budgetLedger(root)
+  const path = join(root, '.doxloop', 'monitor-budget.json')
+  const temporary = `${path}.${randomUUID()}.tmp`
+  await writeFile(temporary, JSON.stringify({ ...ledger, count: ledger.count + 1 }), { mode: 0o600 })
+  await rename(temporary, path)
 }
 
 export async function disableSync(

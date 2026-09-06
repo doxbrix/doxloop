@@ -1,3 +1,4 @@
+import { documentationCollections } from './documentation-collections.js'
 import {
   access,
   mkdir,
@@ -538,24 +539,38 @@ export async function scaffoldProject(options: {
     await scaffoldDoxbrix(root, title, contentDir)
   }
   await mergeGitignore(root, [
-    '.doxloop/cache/',
-    '.doxloop/runs/',
-    '.doxloop/last-run.json',
-    '.doxloop/sync.log',
-    '.doxloop/quality-reports/',
-    '.doxloop/quality-artifacts/',
-    '.doxloop/evaluations/',
-    '.doxloop/ui-jobs.json',
-    '.doxloop/ui-job-logs/',
-    '.doxloop/review-preferences.json',
-    '.doxloop/deliveries/',
-    '.doxloop/doxloop.db',
-    '.doxloop/doxloop.db-wal',
-    '.doxloop/doxloop.db-shm',
+    ...PROJECT_GITIGNORE_ENTRIES,
     ...(adapter?.project.gitignore ?? []),
   ])
   return root
 }
+
+/**
+ * Machine-local Doxloop state that never belongs in version control. Shared by
+ * the scaffold and by importing an existing documentation folder.
+ */
+export const PROJECT_GITIGNORE_ENTRIES: readonly string[] = [
+  '.doxloop/cache/',
+  '.doxloop/runs/',
+  '.doxloop/last-run.json',
+  '.doxloop/sync.log',
+  '.doxloop/sync.log.1',
+  '.doxloop/locks/',
+  '.doxloop/direct-edits/',
+  '.doxloop/monitor-budget.json',
+  '.doxloop/quality-reports/',
+  '.doxloop/quality-artifacts/',
+  '.doxloop/evaluations/',
+  '.doxloop/ui-jobs.json',
+  '.doxloop/ui-job-logs/',
+  '.doxloop/review-preferences.json',
+  '.doxloop/deliveries/',
+  '.doxloop/exports/',
+  '.doxloop/doxloop.db',
+  '.doxloop/doxloop.db-wal',
+  '.doxloop/doxloop.db-shm',
+  'build/',
+]
 
 export async function loadPages(root: string, project: DoxloopProject): Promise<string[]> {
   const contentRoot = await resolveContainedDirectory(
@@ -565,11 +580,14 @@ export async function loadPages(root: string, project: DoxloopProject): Promise<
     { allowRoot: project.generator === 'doxbrix' },
   )
   await access(contentRoot)
-  return listFiles(contentRoot, await pageExtensions(root, project), {
-    ...(contentRoot === resolve(root)
-      ? { ignoredDirectories: ROOT_CONTENT_IGNORED_DIRECTORIES }
-      : {}),
-  })
+  const extensions = await pageExtensions(root, project)
+  const collections = await documentationCollections(root, project)
+  const sets = await Promise.all(collections.map(async (collection) => {
+    const directory = await resolveContainedDirectory(root, collection.directory, 'Collection directory', { allowRoot: project.generator === 'doxbrix' })
+    return listFiles(directory, extensions, { ...(directory === resolve(root) ? { ignoredDirectories: ROOT_CONTENT_IGNORED_DIRECTORIES } : {}) })
+  }))
+  return [...new Set(sets.flat())].sort()
+
 }
 
 /**
@@ -605,14 +623,23 @@ export async function readPage(path: string): Promise<{
   title: string
   description?: string
   body: string
+  /** SEO fields from frontmatter, rendered by the preview and the static build. */
+  canonical?: string
+  socialImage?: string
 }> {
   const parsed = matter(await readFile(path, 'utf8'))
   const title = typeof parsed.data.title === 'string' ? parsed.data.title.trim() : ''
   const description =
     typeof parsed.data.description === 'string' ? parsed.data.description.trim() : undefined
-  return description === undefined
-    ? { title, body: parsed.content }
-    : { title, description, body: parsed.content }
+  const canonical = typeof parsed.data.canonical === 'string' ? parsed.data.canonical.trim() : ''
+  const socialImage = typeof parsed.data.socialImage === 'string' ? parsed.data.socialImage.trim() : ''
+  return {
+    title,
+    ...(description === undefined ? {} : { description }),
+    body: parsed.content,
+    ...(canonical ? { canonical } : {}),
+    ...(socialImage ? { socialImage } : {}),
+  }
 }
 
 export function pageId(contentRoot: string, path: string): string {
@@ -631,7 +658,7 @@ async function mergeGitignore(root: string, entries: string[]): Promise<void> {
   await ensureGitignoreEntries(root, entries)
 }
 
-function titleFromDirectory(directory: string): string {
+export function titleFromDirectory(directory: string): string {
   return basename(directory)
     .split(/[-_]+/)
     .filter(Boolean)
@@ -954,6 +981,14 @@ function isApplicationConfig(
   ) {
     return false
   }
+  const authentication = application.authentication
+  if (authentication !== undefined) {
+    if (!authentication || typeof authentication !== 'object' || Array.isArray(authentication)) return false
+    if (
+      authentication.loginPath !== undefined &&
+      (typeof authentication.loginPath !== 'string' || !validApplicationPath(authentication.loginPath))
+    ) return false
+  }
   const screenshots = application.screenshots
   if (screenshots === undefined) return true
   if (!screenshots || typeof screenshots !== 'object' || Array.isArray(screenshots)) {
@@ -999,6 +1034,9 @@ function isDeploymentConfig(value: unknown): value is DeploymentConfig {
     candidate === undefined ||
     (typeof candidate === 'string' && candidate.trim() !== '')
   if (!optionalText(deployment.name) || !optionalText(deployment.slug)) return false
+  if (deployment.target !== undefined && !['doxbrix', 'github-pages', 'netlify', 'vercel'].includes(deployment.target)) return false
+  if (![deployment.siteId, deployment.projectId, deployment.teamId, deployment.branch, deployment.basePath].every(optionalText)) return false
+  if (deployment.basePath?.split('/').some((part) => part === '..')) return false
   if (
     deployment.visibility !== undefined &&
     !['private', 'public'].includes(deployment.visibility)
@@ -1109,8 +1147,11 @@ function isSyncConfig(value: unknown): value is SyncConfig {
   const limit = (candidate: unknown, max: number): boolean =>
     candidate === undefined ||
     (Number.isInteger(candidate) && (candidate as number) >= 1 && (candidate as number) <= max)
+  const amount = (candidate: unknown, max: number): boolean =>
+    candidate === undefined ||
+    (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0 && candidate <= max)
   return (
-    limit(sync.budget.maxRunsPerDay, 1000) && limit(sync.budget.maxMinutes, 24 * 60)
+    limit(sync.budget.maxRunsPerDay, 1000) && limit(sync.budget.maxMinutes, 24 * 60) && amount(sync.budget.maxUsd, 100_000)
   )
 }
 

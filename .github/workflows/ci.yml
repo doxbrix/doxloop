@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, stage, codex/claude-review-follow-through]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, unit tests, skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - name: Build core and generator packages
+        run: pnpm run build
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - run: node --test scripts/docs-impact.test.mjs
+      - run: pnpm run validate:skill
+      - run: pnpm run check:boundary
+
+  generators:
+    name: ${{ matrix.generator }} scaffold, preview, build
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        generator:
+          - docusaurus
+          - mkdocs
+          - sphinx
+          - vitepress
+          - starlight
+          - nextra
+          - markdoc
+          - static
+          - hugo
+          - jekyll
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        if: matrix.generator == 'mkdocs' || matrix.generator == 'sphinx'
+        with:
+          python-version: '3.12'
+      - uses: peaceiris/actions-hugo@v3
+        if: matrix.generator == 'hugo'
+        with:
+          hugo-version: latest
+          extended: true
+      - uses: ruby/setup-ruby@v1
+        if: matrix.generator == 'jekyll'
+        with:
+          ruby-version: '3.3'
+      - run: pnpm install --frozen-lockfile
+      - name: Build core and generator packages
+        run: pnpm run build
+      - name: Scaffold, preview, and build ${{ matrix.generator }}
+        run: node scripts/ci-generator-smoke.mjs ${{ matrix.generator }}
+
+  browser-e2e:
+    name: Real server and fake agent browser E2E
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm exec playwright test
+        env:
+          DOXLOOP_E2E_REAL: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failure-traces
+          path: test-results/
+
+  existing-sites:
+    name: Existing Docusaurus and MkDocs sites
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: node scripts/ci-existing-sites.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: existing-sites-result
+          path: evals/results/existing-sites.json
+
+  python-boundary:
+    name: Real Python execution boundary
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DOXLOOP_PYTHON_SANDBOX_IMAGE: public.ecr.aws/docker/library/python@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: docker pull "$DOXLOOP_PYTHON_SANDBOX_IMAGE"
+      - run: node scripts/ci-python-sandbox.mjs

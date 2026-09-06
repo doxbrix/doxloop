@@ -134,11 +134,27 @@ describe('applySyncConfig', () => {
     expect((await loadProject(root)).sync).toMatchObject({ mode: 'check', on: [] })
   })
 
-  test('refuses scheduled polling until a read-only provider remote is configured', async () => {
+  test('schedules a local checkout in place without asking for a remote', async () => {
     const { root, project } = await makeFixture()
-    await expect(
-      applySyncConfig(root, project, { ...checkManual, on: ['every@15m'] }),
-    ).rejects.toThrow('read-only remote')
+    const calls: string[] = []
+    const scheduler = {
+      install: async (installRoot: string, frequency: { kind: string }) => {
+        calls.push(`install:${installRoot === root}:${frequency.kind}`)
+        return { installed: true, label: 'doxloop-test' }
+      },
+      remove: async () => { calls.push('remove'); return { installed: false, label: 'doxloop-test' } },
+      state: async () => ({ installed: calls.some((call) => call.startsWith('install')), label: 'doxloop-test' }),
+    }
+
+    const lines = await applySyncConfig(root, project, { ...checkManual, on: ['every@15m'] }, scheduler)
+
+    expect(calls).toEqual(['install:true:interval'])
+    expect(lines.join('\n')).toContain('Schedule installed')
+    expect(lines.join('\n')).toContain('product is checked in place; nothing is fetched or written there')
+    expect((await loadProject(root)).sync.on).toEqual(['every@15m'])
+
+    await applySyncConfig(root, await loadProject(root), checkManual, scheduler)
+    expect(calls).toEqual(['install:true:interval', 'remove'])
   })
 
   test('keeps the provider branch aligned with the followed branch', async () => {
@@ -160,12 +176,75 @@ describe('applySyncConfig', () => {
   })
 })
 
+/** Outcome events the CLI reports to a control center that started it. */
+async function captureOutcomes<T>(run: () => Promise<T>): Promise<{ result: T; outcomes: Array<Record<string, unknown>> }> {
+  const outcomes: Array<Record<string, unknown>> = []
+  const original = process.stdout.write.bind(process.stdout)
+  const originalTty = process.stdout.isTTY
+  Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true })
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    for (const line of String(chunk).split('\n')) {
+      if (line.startsWith('DOXLOOP_EVENT ')) outcomes.push(JSON.parse(line.slice('DOXLOOP_EVENT '.length)) as Record<string, unknown>)
+    }
+    return true
+  }) as typeof process.stdout.write
+  try {
+    return { result: await run(), outcomes }
+  } finally {
+    process.stdout.write = original
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalTty, configurable: true })
+  }
+}
+
 describe('runSyncNow', () => {
   test('records a quiet no-op when documentation is current', async () => {
     const { root, project } = await makeFixture()
 
-    expect(await runSyncNow({ root, project, quiet: true })).toBe(0)
+    const { result, outcomes } = await captureOutcomes(() => runSyncNow({ root, project, quiet: true }))
+    expect(result).toBe(0)
     expect((await readSyncLog(root)).at(-1)).toContain('no reader-visible changes')
+    expect(outcomes).toEqual([expect.objectContaining({ type: 'outcome', kind: 'sync', status: 'current', pages: 0 })])
+  })
+
+  test('a scheduled check on a local checkout reports the stale pages as an outcome', async () => {
+    const { root, product, project } = await makeFixture()
+    await changeSource(product)
+
+    const { result, outcomes } = await captureOutcomes(() => runSyncNow({ root, project, quiet: true, trigger: 'schedule' }))
+    expect(result).toBe(1)
+    expect(outcomes).toEqual([expect.objectContaining({ status: 'stale', pages: 1, message: expect.stringContaining('1 stale page') })])
+    expect((await readSyncLog(root)).at(-1)).toContain('reporting only')
+  })
+
+  test('a plain folder source without Git history is checked by content on a schedule', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-autosync-plain-'))
+    parents.push(parent)
+    const product = join(parent, 'product')
+    await mkdir(join(product, 'src'), { recursive: true })
+    await writeFile(join(product, 'src', 'auth.ts'), 'export const ttl = 3600\n', 'utf8')
+    const root = await scaffoldProject({
+      directory: join(parent, 'product-docs'),
+      sources: [{ name: 'product', path: '../product' }],
+    })
+    await writeFile(
+      join(root, 'index.mdx'),
+      '---\ntitle: Authentication\ndescription: Understand the current authentication lifetime.\n---\n\nTokens last 3600 seconds.\n',
+    )
+    await writeEvidenceMap(root, {
+      schemaVersion: 1,
+      pages: { 'index.mdx': { sources: [{ source: 'product', paths: ['src/auth.ts'] }] } },
+    })
+    const project = await loadProject(root)
+    await recordSyncState(root, project.sources)
+
+    const current = await captureOutcomes(() => runSyncNow({ root, project, quiet: true, trigger: 'schedule' }))
+    expect(current.result).toBe(0)
+    expect(current.outcomes[0]).toMatchObject({ status: 'current' })
+
+    await writeFile(join(product, 'src', 'auth.ts'), 'export const ttl = 900\n', 'utf8')
+    const stale = await captureOutcomes(() => runSyncNow({ root, project, quiet: true, trigger: 'schedule' }))
+    expect(stale.result).toBe(1)
+    expect(stale.outcomes[0]).toMatchObject({ status: 'stale', pages: 1 })
   })
 
   test('manual workspace updates create a review proposal even when automatic sync is check-only', async () => {
@@ -419,3 +498,27 @@ describe('runSyncSetupWizard', () => {
     expect(io.rendered()).toContain('starts an agent, deploys, or writes documentation')
   })
 })
+
+test('monitoring reserves once across concurrent runs and skips a pending proposal after log rotation', async () => {
+  const { root, project } = await makeFixture()
+  const automatic = { ...project, sync: { ...project.sync, mode: 'auto' as const, budget: { maxRunsPerDay: 1 } } }
+  let release!: () => void
+  let entered!: () => void
+  const ready = new Promise<void>((resolve) => { entered = resolve })
+  let calls = 0
+  const author = async (options: { root: string }) => {
+    calls += 1; entered()
+    await new Promise<void>((resolve) => { release = resolve })
+    await writeFile(join(options.root, 'quickstart.mdx'), '---\ntitle: Quickstart\ndescription: Start the product safely.\n---\n\nRun the supported start command and verify readiness.\n')
+    return 0
+  }
+  const first = runSyncNow({ root, project: automatic, quiet: true, authoring: { request: 'Clarify quickstart' }, author })
+  await ready
+  expect(await runSyncNow({ root, project: automatic, quiet: true, author })).toBe(1)
+  expect(calls).toBe(1)
+  release(); expect(await first).toBe(0)
+  await writeFile(join(root, '.doxloop/sync.log'), '')
+  expect(JSON.parse(await readFile(join(root, '.doxloop/monitor-budget.json'), 'utf8')).count).toBe(1)
+  expect(await runSyncNow({ root, project: automatic, quiet: true, authoring: { request: 'Another update' }, author })).toBe(1)
+  expect(calls).toBe(1)
+}, 15_000)

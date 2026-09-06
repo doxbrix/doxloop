@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DoxloopError,
@@ -11,8 +11,10 @@ import {
   type ValidationIssue,
 } from '@doxbrix/doxloop/generator-api'
 import {
+  contentRelativePages,
   findExecutable,
   isRecord,
+  navigationUnverifiedIssue,
   openBrowser,
   pathExists,
   readPackageJson,
@@ -29,6 +31,23 @@ const PACKAGE_VERSION = (
     version: string
   }
 ).version
+
+/** Configuration files Hugo reads, in the order it prefers them. */
+const HUGO_CONFIG_FILES = [
+  'hugo.toml',
+  'hugo.yaml',
+  'hugo.yml',
+  'hugo.json',
+  'config.toml',
+  'config.yaml',
+  'config.yml',
+  'config.json',
+  'config/_default/hugo.toml',
+  'config/_default/config.toml',
+  'config/_default/hugo.yaml',
+  'config/_default/config.yaml',
+]
+const HUGO_MENU_FILES = ['config/_default/menus.toml', 'config/_default/menus.yaml', 'config/_default/menus.yml']
 
 const adapter = defineGenerator({
   apiVersion: 1,
@@ -80,6 +99,7 @@ async function scaffoldHugo(context: GeneratorScaffoldContext): Promise<void> {
   const { root, title, contentDir } = context
   await mkdir(join(root, contentDir), { recursive: true })
   await mkdir(join(root, 'layouts', '_default'), { recursive: true })
+  await mkdir(join(root, 'layouts', 'shortcodes'), { recursive: true })
   await mkdir(join(root, 'assets', 'css'), { recursive: true })
   const existing = await readPackageJson(root)
   await writeJsonFile(join(root, 'package.json'), {
@@ -120,6 +140,9 @@ description = ${JSON.stringify(`Documentation for ${title}.`)}
 [markup.highlight]
 noClasses = false
 
+[markup.goldmark.renderer]
+unsafe = false
+
 [[menus.main]]
 name = "Overview"
 pageRef = "/"
@@ -146,9 +169,10 @@ weight = 20
   <body>
     <header><a class="brand" href="/">{{ site.Title }}</a></header>
     <div class="layout">
-      <aside><nav aria-label="Documentation"><ul>{{ range site.Menus.main }}<li><a href="{{ .URL }}"{{ if $.IsMenuCurrent "main" . }} aria-current="page"{{ end }}>{{ .Name }}</a></li>{{ end }}</ul></nav></aside>
+      <aside><nav aria-label="Documentation"><ul>{{ range site.Menus.main }}<li><a href="{{ .URL }}"{{ if $.IsMenuCurrent "main" . }} aria-current="page"{{ end }}>{{ .Name }}</a>{{ with .Children }}<ul>{{ range . }}<li><a href="{{ .URL }}"{{ if $.IsMenuCurrent "main" . }} aria-current="page"{{ end }}>{{ .Name }}</a></li>{{ end }}</ul>{{ end }}</li>{{ end }}</ul></nav></aside>
       <main class="book-page">{{ block "main" . }}{{ end }}</main>
     </div>
+    {{ if .Store.Get "hasMermaid" }}<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true });</script>{{ end }}
   </body>
 </html>
 `,
@@ -167,14 +191,51 @@ weight = 20
     { encoding: 'utf8', flag: 'wx' },
   )
   await writeFile(
+    join(root, 'layouts', '_default', 'list.html'),
+    `{{ define "main" }}<article><h1>{{ .Title }}</h1>{{ .Content }}<ul class="section-pages">{{ range .Pages }}<li><a href="{{ .RelPermalink }}">{{ .Title }}</a>{{ with .Description }} <small>{{ . }}</small>{{ end }}</li>{{ end }}</ul></article>{{ end }}
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await mkdir(join(root, 'layouts', '_default', '_markup'), { recursive: true })
+  await writeFile(
+    join(root, 'layouts', '_default', '_markup', 'render-codeblock-mermaid.html'),
+    `<pre class="mermaid">{{ .Inner | htmlEscape | safeHTML }}</pre>
+{{ .Page.Store.Set "hasMermaid" true }}
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await writeFile(
+    join(root, 'layouts', 'shortcodes', 'callout.html'),
+    `{{- $type := .Get "type" | default "note" -}}
+<aside class="callout callout-{{ $type }}" role="note">{{ with .Get "title" }}<strong>{{ . }}</strong>{{ end }}{{ .Inner | markdownify }}</aside>
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await writeFile(
+    join(root, 'layouts', 'shortcodes', 'tabs.html'),
+    `<div class="tabs">{{ .Inner }}</div>
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await writeFile(
+    join(root, 'layouts', 'shortcodes', 'tab.html'),
+    `<details class="tab"{{ if eq (.Get "default") "true" }} open{{ end }}><summary>{{ .Get "name" }}</summary>{{ .Inner | markdownify }}</details>
+`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  await writeFile(
     join(root, 'assets', 'css', 'site.css'),
     `:root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; --primary: #4f46e5; }
 body { margin: 0; color: #1f2937; background: #fff; }
 header { border-bottom: 1px solid #e5e7eb; padding: 1rem 2rem; }
 .brand { color: var(--primary); font-weight: 700; text-decoration: none; }
 .layout { display: grid; grid-template-columns: 16rem minmax(0, 48rem); gap: 3rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
-aside ul { list-style: none; padding: 0; } aside a { display: block; padding: .5rem; }
+aside ul { list-style: none; padding: 0; } aside a { display: block; padding: .5rem; } aside ul ul { padding-left: 1rem; }
 main { line-height: 1.7; } code { font-family: ui-monospace, monospace; }
+.callout { border-left: 4px solid var(--primary); padding: .75rem 1rem; margin: 1rem 0; background: #eef2ff; }
+.callout-warning { border-color: #d97706; background: #fffbeb; } .callout-danger { border-color: #dc2626; background: #fef2f2; }
+.tabs { border: 1px solid #e5e7eb; border-radius: .5rem; margin: 1rem 0; } .tab summary { cursor: pointer; padding: .5rem 1rem; font-weight: 600; } .tab > :not(summary) { padding: 0 1rem 1rem; }
+.section-pages small { display: block; color: #6b7280; }
 @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } }
 `,
     { encoding: 'utf8', flag: 'wx' },
@@ -226,53 +287,145 @@ async function startHugoPreview(options: GeneratorPreviewOptions): Promise<void>
   await runPreviewProcess(invocation.command, invocation.args, options.root, 'Hugo')
 }
 
+/**
+ * A Hugo page is reachable when a menu names it, its front matter joins a
+ * menu, or it lives in a section whose `_index.md` lists it. A site that uses
+ * a theme gets its navigation from that theme, which this cannot follow, so
+ * only menu references are checked there.
+ */
 async function validateHugo(
   context: GeneratorValidationContext,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = []
-  for (const file of [
-    'package.json',
-    'hugo.toml',
-    'layouts/_default/baseof.html',
-    'layouts/_default/single.html',
-  ]) {
-    if (!(await pathExists(join(context.root, file)))) {
-      issues.push({
-        severity: 'error',
-        code: 'missing-generator-file',
-        message: `Hugo project is missing ${file}.`,
-        file,
-      })
+  if (!(await pathExists(join(context.root, 'package.json')))) {
+    issues.push({
+      severity: 'error',
+      code: 'missing-generator-file',
+      message: 'Hugo project is missing package.json.',
+      file: 'package.json',
+    })
+  }
+  let configFile: string | undefined
+  for (const candidate of HUGO_CONFIG_FILES) {
+    if (await pathExists(join(context.root, candidate))) {
+      configFile = candidate
+      break
     }
   }
-  const configPath = join(context.root, 'hugo.toml')
-  if (!(await pathExists(configPath))) return issues
-  const config = await readFile(configPath, 'utf8')
+  if (!configFile) {
+    issues.push({
+      severity: 'error',
+      code: 'missing-generator-file',
+      message: 'Hugo project is missing hugo.toml (or another Hugo configuration file).',
+      file: 'hugo.toml',
+    })
+    return issues
+  }
+  const config = await readFile(join(context.root, configFile), 'utf8')
+  const usesTheme =
+    /^\s*theme\s*[:=]/m.test(config) ||
+    (await pathExists(join(context.root, 'themes'))) ||
+    /^\s*\[module\]|^\s*module\s*:/m.test(config)
+  if (!usesTheme) {
+    for (const file of ['layouts/_default/baseof.html', 'layouts/_default/single.html']) {
+      if (!(await pathExists(join(context.root, file)))) {
+        issues.push({
+          severity: 'error',
+          code: 'missing-generator-file',
+          message: `Hugo project is missing ${file}.`,
+          file,
+        })
+      }
+    }
+  }
+  if (!/\.toml$/.test(configFile)) {
+    issues.push(
+      navigationUnverifiedIssue('Hugo', configFile, `menus in ${configFile} are not read; only TOML configuration is.`),
+    )
+    return issues
+  }
+  const menuSources = [config]
+  for (const menuFile of HUGO_MENU_FILES) {
+    if (await pathExists(join(context.root, menuFile))) {
+      if (!/\.toml$/.test(menuFile)) {
+        issues.push(navigationUnverifiedIssue('Hugo', menuFile, `menus in ${menuFile} are not read; only TOML configuration is.`))
+        return issues
+      }
+      menuSources.push(await readFile(join(context.root, menuFile), 'utf8'))
+    }
+  }
+  const pageIds = new Set(context.pageIds)
   const navigation = new Set<string>()
-  for (const match of config.matchAll(/^\s*pageRef\s*=\s*["']([^"']+)["']/gm)) {
-    const target = match[1]
-    if (!target) continue
-    navigation.add(target === '/' ? '_index' : target.replace(/^\/|\/$/g, ''))
-  }
-  for (const id of navigation) {
-    if (!context.pageIds.includes(id)) {
-      issues.push({
-        severity: 'error',
-        code: 'missing-page',
-        message: `Hugo menu references missing page "${id}".`,
-        file: 'hugo.toml',
-      })
+  for (const source of menuSources) {
+    for (const match of source.matchAll(/^\s*pageRef\s*=\s*["']([^"']+)["']/gm)) {
+      const target = hugoRouteToPageId(match[1] ?? '', pageIds)
+      if (!target.found) {
+        issues.push({
+          severity: 'error',
+          code: 'missing-page',
+          message: `Hugo menu references missing page "${target.id}".`,
+          file: configFile,
+        })
+      }
+      navigation.add(target.id)
+    }
+    for (const match of source.matchAll(/^\s*url\s*=\s*["']\/([^"']*)["']/gm)) {
+      navigation.add(hugoRouteToPageId(`/${match[1] ?? ''}`, pageIds).id)
     }
   }
-  for (const id of context.pageIds) {
+  const pages = contentRelativePages(context.contentRoot, context.pages)
+  for (const page of pages) {
+    const id = page.replace(/\.md$/i, '')
+    if (navigation.has(id)) continue
+    const raw = await readFile(join(context.contentRoot, page), 'utf8')
+    if (frontMatterJoinsMenu(raw)) {
+      navigation.add(id)
+      continue
+    }
+    const base = posix.basename(id)
+    if (base === '_index' || base === 'index') {
+      // Home and section pages are reachable through their parent list page.
+      navigation.add(id)
+      continue
+    }
+    const directory = posix.dirname(id)
+    if (directory !== '.' && pageIds.has(`${directory}/_index`)) {
+      navigation.add(id)
+    }
+  }
+  if (usesTheme) {
+    issues.push(
+      navigationUnverifiedIssue('Hugo', configFile, 'the theme decides which pages its sidebar lists.'),
+    )
+    return issues
+  }
+  for (const page of pages) {
+    const id = page.replace(/\.md$/i, '')
     if (!navigation.has(id)) {
       issues.push({
         severity: 'error',
         code: 'unnavigated-page',
-        message: `Page "${id}" is not in the Hugo main menu.`,
-        file: `${id}.md`,
+        message: `Page "${id}" is not in a Hugo menu or a section with an _index.md page.`,
+        file: `${context.project.contentDir}/${page}`,
       })
     }
   }
   return issues
+}
+
+function hugoRouteToPageId(route: string, pageIds: Set<string>): { id: string; found: boolean } {
+  const clean = route.replace(/^\/+|\/+$/g, '')
+  if (clean === '') return { id: '_index', found: pageIds.has('_index') }
+  if (pageIds.has(clean)) return { id: clean, found: true }
+  if (pageIds.has(`${clean}/_index`)) return { id: `${clean}/_index`, found: true }
+  if (pageIds.has(`${clean}/index`)) return { id: `${clean}/index`, found: true }
+  return { id: clean, found: false }
+}
+
+function frontMatterJoinsMenu(raw: string): boolean {
+  const yaml = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (yaml) return /^menus?\s*:/m.test(yaml[1] ?? '')
+  const toml = raw.match(/^\+\+\+\r?\n([\s\S]*?)\r?\n\+\+\+/)
+  if (toml) return /^\s*(?:\[menus?[.\]]|menus?\s*=)/m.test(toml[1] ?? '')
+  return false
 }

@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   applyDocumentationPlanProposal,
   approveDocumentationPlan,
@@ -10,6 +10,7 @@ import {
   continueDocumentationPlanGeneration,
   createDocumentationPlan,
   editDocumentationPlan,
+  agentReplyFromStream,
   extractPlanOutput,
   ignoreDocumentationPlanError,
   latestDocumentationPlan,
@@ -22,12 +23,23 @@ import {
   screenshotCoverageAdvisory,
   screenshotPlanningInstructions,
   documentationPlanClarificationFeedback,
+  DEFAULT_PLANNING_TIMEOUT_MINUTES,
+  planningTimeoutMinutes,
+  proposeDocumentationPlan,
+  planWritingRequirements,
 } from './documentation-plan.js'
 import { loadProject, saveProjectSettings, scaffoldProject } from './project.js'
 
 const roots: string[] = []
+const originalPath = process.env.PATH
+const originalTimeout = process.env.DOXLOOP_PLAN_TIMEOUT_MINUTES
 
 afterEach(async () => {
+  if (originalPath === undefined) delete process.env.PATH
+  else process.env.PATH = originalPath
+  if (originalTimeout === undefined) delete process.env.DOXLOOP_PLAN_TIMEOUT_MINUTES
+  else process.env.DOXLOOP_PLAN_TIMEOUT_MINUTES = originalTimeout
+  vi.restoreAllMocks()
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -98,6 +110,19 @@ describe('documentation plan workflow', () => {
     // Claude streams its answer as JSON lines with the reply in `result`.
     const streamed = `{"type":"system"}\n${JSON.stringify({ type: 'result', result: JSON.stringify(proposal) })}`
     expect((extractPlanOutput(streamed, 'claude') as { productProfile: string }).productProfile).toBe('Developer API')
+    const codexStream = [
+      JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: '{"productProfile":"wrong"}' } }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `Here is the plan.\n<doxloop-plan>${JSON.stringify(proposal)}</doxloop-plan>` } }),
+    ].join('\n')
+    expect((extractPlanOutput(codexStream, 'codex') as { productProfile: string }).productProfile).toBe('Developer API')
+    const geminiStream = [
+      JSON.stringify({ type: 'init', model: 'gemini-3.5-flash' }),
+      JSON.stringify({ type: 'message', role: 'assistant', content: '<doxloop-plan>', delta: true }),
+      JSON.stringify({ type: 'message', role: 'assistant', content: `${JSON.stringify(proposal)}</doxloop-plan>`, delta: true }),
+      JSON.stringify({ type: 'result', status: 'success' }),
+    ].join('\n')
+    expect((extractPlanOutput(geminiStream, 'gemini') as { productProfile: string }).productProfile).toBe('Developer API')
+    expect(agentReplyFromStream('prose only', 'codex')).toBeUndefined()
 
     // A stray brace that closes the plan early must be reported, never
     // silently truncated into a plan that has lost its remaining pages.
@@ -604,5 +629,61 @@ describe('documentation plan workflow', () => {
     expect(restored.status).toBe('planning')
     expect(restored.error).toBeUndefined()
     await expect(retryDocumentationPlan(root, created.id, 'generate')).rejects.toThrow('approved snapshot')
+  })
+})
+
+describe('planning time budget', () => {
+  test('defaults to twenty minutes, follows the project budget, and lets the environment override both', () => {
+    expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [] } }, {})).toBe(DEFAULT_PLANNING_TIMEOUT_MINUTES)
+    expect(DEFAULT_PLANNING_TIMEOUT_MINUTES).toBe(20)
+    expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [], budget: { maxMinutes: 45 } } }, {})).toBe(45)
+    expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [], budget: { maxMinutes: 45 } } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: '5' })).toBe(5)
+    expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [] } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: 'soon' })).toBe(20)
+    expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [] } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: '0' })).toBe(20)
+  })
+
+  test('stops a planner that never answers and records a named failure', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-plan-timeout-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'codex')
+    // Ignores SIGTERM so the escalation to SIGKILL is exercised too.
+    await writeFile(executable, '#!/bin/sh\ntrap "" TERM\n/bin/sleep 30\n')
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    process.env.DOXLOOP_PLAN_TIMEOUT_MINUTES = '0.01'
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const created = await createDocumentationPlan(root, { mode: 'create', scope: 'starter', execution: { agent: 'codex', screenshots: false } })
+    const started = Date.now()
+    await expect(proposeDocumentationPlan(root, created.id)).rejects.toThrow('Planning stopped after 1 second without a plan reply from codex')
+    expect(Date.now() - started).toBeLessThan(20_000)
+    const failed = await readDocumentationPlan(root, created.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.error).toContain('DOXLOOP_PLAN_TIMEOUT_MINUTES')
+    expect(failed.failure).toMatchObject({ stage: 'propose' })
+  }, 30_000)
+})
+
+describe('diagram requirements', () => {
+  test('defaults concept pages to a required diagram and keeps reviewer overrides', async () => {
+    const { root } = await fixture()
+    const created = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', execution: { screenshots: 'disabled' } })
+    const base = proposal.pages[0]!
+    const ready = await applyDocumentationPlanProposal(root, created.id, {
+      ...proposal,
+      pages: [
+        { ...base, id: 'model', title: 'Event model', path: 'concepts/event-model', type: 'concept' },
+        { ...base, id: 'send', title: 'Send an event', path: 'guides/send', type: 'how-to' },
+        { ...base, id: 'plain', title: 'Plain concept', path: 'concepts/plain', type: 'concept', diagram: 'none' },
+        { ...base, id: 'ref', title: 'Reference', path: 'reference/events', type: 'reference', diagram: 'required' },
+      ],
+    })
+    expect(ready.pages.map((page) => [page.id, page.diagram])).toEqual([['model', 'required'], ['send', 'none'], ['plain', 'none'], ['ref', 'required']])
+    expect(planWritingRequirements(ready)).toContain('- Event model (concepts/event-model)')
+    expect(planWritingRequirements(ready)).toContain('- Reference (reference/events)')
+    expect(planWritingRequirements(ready)).not.toContain('Plain concept')
   })
 })

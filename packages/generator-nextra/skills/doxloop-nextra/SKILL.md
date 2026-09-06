@@ -12,11 +12,13 @@ router; never use Nextra 3 pages-router conventions.
 
 1. Confirm `.doxloop/project.json` selects `nextra`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect the app-router shell, `_meta.js`, MDX components, theme options, and
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect the app-router shell, `_meta.js`, MDX components, theme options, and
    content.
-4. Keep reader pages in `content/` and shell code in `app/`.
-5. Give pages `title` and outcome-focused `description` frontmatter.
-6. Maintain `_meta.js` with stable routes and purposeful groups.
+5. Keep reader pages in `content/` and shell code in `app/`.
+6. Give pages `title` and outcome-focused `description` frontmatter.
+7. Maintain `_meta.js` with stable routes and purposeful groups.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` with
 the docs-theme navbar or verified header links and `_meta.js` page maps. Preserve

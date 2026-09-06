@@ -1,0 +1,10 @@
+site_name: Existing operations manual
+site_url: https://docs.example.test/operations/
+docs_dir: manual
+site_dir: site
+use_directory_urls: false
+strict: true
+nav:
+  - Overview: index.md
+  - Runbooks:
+      - Export a report: guides/custom-export.md

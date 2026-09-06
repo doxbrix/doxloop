@@ -13,11 +13,13 @@ files and rendering.
 
 1. Confirm `.doxloop/project.json` selects `hugo`.
 2. Read [references/project-format.md](references/project-format.md).
-3. Inspect `hugo.toml`, layouts, shortcodes, assets, and existing content.
-4. Keep reader pages under `content/`; use `_index.md` for home and section
+3. Read [references/authoring.md](references/authoring.md) for callout, tab,
+   code, image, and diagram syntax.
+4. Inspect `hugo.toml`, layouts, shortcodes, assets, and existing content.
+5. Keep reader pages under `content/`; use `_index.md` for home and section
    pages.
-5. Give every page `title` and outcome-focused `description` frontmatter.
-6. Maintain `menus.main` with stable `pageRef` values.
+6. Give every page `title` and outcome-focused `description` frontmatter.
+7. Maintain `menus.main` with stable `pageRef` values.
 
 Implement the semantic top/left navigation plan from `$doxloop-authoring` with
 Hugo menus, section pages, and the selected theme's supported sidebar data.

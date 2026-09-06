@@ -2,6 +2,7 @@ import { UsageError } from './errors.js'
 import type { ParsedArgs } from './types.js'
 
 const BOOLEAN_FLAGS = new Set([
+  'backfill-evidence',
   'ignore-screenshot-problems',
   'dry-run',
   'h',
@@ -24,6 +25,9 @@ const BOOLEAN_FLAGS = new Set([
   'warnings-as-errors',
   'approve-baseline',
   'approve-quality-baseline',
+  'allow-related',
+  'existing',
+  'zip',
 ])
 
 export function parseArgs(argv: string[]): ParsedArgs {

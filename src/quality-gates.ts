@@ -15,6 +15,7 @@ import { checkExternalLinks } from './quality-links.js'
 import { checkRenderedQuality } from './quality-rendered.js'
 import { lintSchemas } from './quality-schema.js'
 import { validateProject } from './validation.js'
+import { buildDoxbrixStaticSite } from './doxbrix-build.js'
 import type { DoxloopProject, QualityCheck, QualityReport } from './types.js'
 
 export const QUALITY_REPORT_DIRECTORY = join('.doxloop', 'quality-reports')
@@ -159,7 +160,14 @@ export function formatQualityReport(report: QualityReport): string {
 }
 
 async function strictBuild(root: string, project: DoxloopProject): Promise<QualityCheck> {
-  if (project.generator === 'doxbrix') return { code: QUALITY_CODES.buildPassed, category: 'build', status: 'pass', message: 'The built-in Doxbrix renderer passed deterministic validation; no separate build command is required.' }
+  if (project.generator === 'doxbrix') {
+    try {
+      const result = await buildDoxbrixStaticSite({ root })
+      return { code: QUALITY_CODES.buildPassed, category: 'build', status: 'pass', message: `Doxbrix static build passed (${result.pages} pages).` }
+    } catch (error) {
+      return { code: QUALITY_CODES.buildFailed, category: 'build', status: 'fail', message: 'Doxbrix static build failed.', detail: error instanceof Error ? error.message : String(error) }
+    }
+  }
   const adapter = await loadGeneratorAdapter(root, project)
   const result = await runShell(adapter.build.command, root)
   return result.code === 0

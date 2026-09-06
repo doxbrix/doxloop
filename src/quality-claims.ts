@@ -30,7 +30,7 @@ export async function reverifyClaims(root: string, project: DoxloopProject, publ
   }
   const stale = new Set(drift.pages.map((page) => page.page))
   for (const [page, evidence] of Object.entries(map.pages)) {
-    const pageIsStale = stale.has(page)
+    const pageIsStale = stale.has(page) || drift.status === 'unknown'
     const hasRevision = evidence.sources.length > 0 && evidence.sources.every((source) => !!evidence.verifiedAt?.[source.source])
     const fallback = defaultState(evidence.confidence, pageIsStale, hasRevision)
     const currentEvidence = await claimEvidenceText(root, project, evidence.sources)
@@ -40,11 +40,11 @@ export async function reverifyClaims(root: string, project: DoxloopProject, publ
     })
     const state = worstState(claimStates.length > 0 ? claimStates : [fallback])
     const revisions = Object.fromEntries(evidence.sources.flatMap((source) => {
-      const revision = evidence.verifiedAt?.[source.source] ?? sync?.sources[source.source]?.commit
+      const revision = evidence.verifiedAt?.[source.source]
       return revision ? [[source.source, revision] as const] : []
     }))
     const dates = Object.values(evidence.verifiedOn ?? {}).filter(Boolean).sort()
-    const verifiedOn = dates.at(-1)
+    const verifiedOn = dates.at(0)
     metadata.pages[page] = {
       state,
       confidence: evidence.confidence ?? 'needs-human',

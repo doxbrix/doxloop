@@ -17,3 +17,16 @@ export function settledPlanJobs(
     !alreadyHandled.has(job.id),
   )
 }
+
+export function settledPageEditJobs(
+  jobs: UiJob[],
+  previouslyRunning: ReadonlySet<string>,
+  alreadyHandled: ReadonlySet<string>,
+): UiJob[] {
+  return jobs.filter((job) =>
+    job.type.startsWith('page-edit:') &&
+    job.status !== 'running' &&
+    previouslyRunning.has(job.id) &&
+    !alreadyHandled.has(job.id),
+  )
+}

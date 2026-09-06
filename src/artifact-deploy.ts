@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstat, readdir, readFile } from 'node:fs/promises'
-import { basename, extname, relative, resolve, sep } from 'node:path'
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { basename, extname, join, relative, resolve, sep } from 'node:path'
 import { zipSync } from 'fflate'
 import { apiUrl, authenticatedRequest, authenticatedRequestOptional } from './auth.js'
 import { DoxloopError } from './errors.js'
@@ -120,7 +120,8 @@ export async function deployGeneratedSite(options: {
     )
 
     if (options.dryRun) {
-      process.stdout.write(`\nDeployment is valid.\nGenerator: ${project.generator}\nVisibility: ${visibility}\nOutput: ${adapter.build.outputDir}\nFiles: ${packaged.files}\nArtifact: ${formatBytes(packaged.archive.byteLength)}\nSHA-256: ${packaged.sha256}\nNo data was uploaded.\n`)
+      const archivePath = await writeDryRunArchive(options.root, packaged.archive)
+      process.stdout.write(`\nDeployment is valid.\nGenerator: ${project.generator}\nVisibility: ${visibility}\nOutput: ${adapter.build.outputDir}\nFiles: ${packaged.files}\nArtifact: ${formatBytes(packaged.archive.byteLength)}\nArchive: ${archivePath}\nSHA-256: ${packaged.sha256}\nNo data was uploaded.\n`)
       return
     }
     if (!target) throw new DoxloopError('Doxbrix project resolution failed.')
@@ -169,7 +170,7 @@ function assertArtifactProject(project: ProjectSummary, generator: string): void
   }
 }
 
-function containedOutput(root: string, outputDir: string): string {
+export function containedOutput(root: string, outputDir: string): string {
   const base = resolve(root)
   const output = resolve(base, outputDir)
   if (output === base || !output.startsWith(`${base}${sep}`)) {
@@ -178,10 +179,14 @@ function containedOutput(root: string, outputDir: string): string {
   return output
 }
 
-async function runLocalBuild(generator: string, command: string, root: string, siteUrl: string): Promise<void> {
+export async function runLocalBuild(generator: string, command: string, root: string, siteUrl: string): Promise<void> {
   const environment: NodeJS.ProcessEnv = { ...process.env, DOXLOOP_SITE_URL: siteUrl, SITE_URL: siteUrl }
   delete environment.DOXLOOP_TOKEN
   delete environment.DOXBRIX_TOKEN
+  delete environment.DOXLOOP_NETLIFY_TOKEN
+  delete environment.NETLIFY_AUTH_TOKEN
+  delete environment.DOXLOOP_VERCEL_TOKEN
+  delete environment.VERCEL_TOKEN
   const effectiveCommand = generator === 'hugo'
     ? `${command} --baseURL ${JSON.stringify(`${siteUrl.replace(/\/$/, '')}/`)}`
     : generator === 'jekyll'
@@ -202,7 +207,7 @@ async function runLocalBuild(generator: string, command: string, root: string, s
   }
 }
 
-async function packageStaticOutput(root: string): Promise<{
+export async function packageStaticOutput(root: string): Promise<{
   archive: Uint8Array
   files: number
   omittedSourceMaps: number
@@ -237,11 +242,18 @@ async function packageStaticOutput(root: string): Promise<{
       if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(text)) {
         throw new DoxloopError(`Build output appears to contain a private key: ${path}`)
       }
-      const activeTokens = [process.env.DOXLOOP_TOKEN, process.env.DOXBRIX_TOKEN].filter(
+      const activeTokens = [
+        process.env.DOXLOOP_TOKEN,
+        process.env.DOXBRIX_TOKEN,
+        process.env.DOXLOOP_NETLIFY_TOKEN,
+        process.env.NETLIFY_AUTH_TOKEN,
+        process.env.DOXLOOP_VERCEL_TOKEN,
+        process.env.VERCEL_TOKEN,
+      ].filter(
         (value): value is string => Boolean(value && value.length >= 12),
       )
       if (activeTokens.some((token) => text.includes(token)) || /\bdxb_[A-Za-z0-9_-]{20,}\b/.test(text)) {
-        throw new DoxloopError(`Build output appears to contain a Doxbrix access token: ${path}`)
+        throw new DoxloopError(`Build output appears to contain a deployment access token: ${path}`)
       }
       entries[path] = new Uint8Array(data)
       if (path === 'index.html') hasIndex = true
@@ -253,6 +265,15 @@ async function packageStaticOutput(root: string): Promise<{
   const archive = zipSync(entries, { level: 6 })
   if (archive.byteLength > MAX_ZIP_BYTES) throw new DoxloopError(`Compressed artifact exceeds ${formatBytes(MAX_ZIP_BYTES)}.`)
   return { archive, files, omittedSourceMaps, sha256: createHash('sha256').update(archive).digest('hex') }
+}
+
+export async function writeDryRunArchive(root: string, archive: Uint8Array): Promise<string> {
+  const directory = join(root, '.doxloop', 'exports')
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const path = join(directory, `${stamp}.zip`)
+  await writeFile(path, archive, { mode: 0o600 })
+  return path
 }
 
 function assertSafeArtifactName(path: string): void {

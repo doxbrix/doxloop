@@ -20,9 +20,10 @@ describe('historyRequestSummary', () => {
 })
 
 describe('history presentation', () => {
-  it('shows create and update as explicit actions', () => {
+  it('shows create, update, and edit as explicit actions', () => {
     expect(historyActionLabel('create')).toBe('Create')
     expect(historyActionLabel('update')).toBe('Update')
+    expect(historyActionLabel('edit')).toBe('Edit')
   })
 
   it('replaces an internal generation prompt with a useful instruction', () => {

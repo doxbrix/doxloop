@@ -5,9 +5,12 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
+  LOCAL_CONTENT_BASELINE,
   SYNC_STATE_FILE,
+  changedSourcePaths,
   collectSourceChanges,
   formatSourceChanges,
+  manifestChanges,
   readSyncState,
   recordSyncState,
 } from './sync.js'
@@ -45,10 +48,12 @@ async function makeGitSource(root: string, name: string): Promise<string> {
 }
 
 describe('sync state', () => {
-  test('records and reads a baseline for git sources only', async () => {
+  test('records a commit baseline for git sources and a content manifest for plain folders', async () => {
     const root = await makeRoot()
     await makeGitSource(root, 'product')
-    await mkdir(join(root, 'plain'), { recursive: true })
+    await mkdir(join(root, 'plain', 'src'), { recursive: true })
+    await writeFile(join(root, 'plain', 'src', 'index.ts'), 'export const a = 1\n', 'utf8')
+    await writeFile(join(root, 'plain', '.env'), 'SECRET=1\n', 'utf8')
 
     const state = await recordSyncState(root, [
       { name: 'product', path: 'product' },
@@ -56,8 +61,11 @@ describe('sync state', () => {
       { name: 'missing', path: 'does-not-exist' },
     ])
 
-    expect(Object.keys(state.sources)).toEqual(['product'])
+    expect(Object.keys(state.sources)).toEqual(['product', 'plain'])
     expect(state.sources.product?.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(state.sources.product?.files).toBeUndefined()
+    expect(state.sources.plain).toMatchObject({ commit: LOCAL_CONTENT_BASELINE })
+    expect(Object.keys(state.sources.plain?.files ?? {})).toEqual(['src/index.ts'])
     const reloaded = await readSyncState(root)
     expect(reloaded).toEqual(state)
     expect(JSON.parse(await readFile(join(root, SYNC_STATE_FILE), 'utf8'))).toEqual(state)
@@ -111,10 +119,37 @@ describe('source change collection', () => {
     expect(changes.map((change) => change.kind)).toEqual([
       'unchanged',
       'no-baseline',
-      'not-git',
+      'no-baseline',
       'missing-path',
     ])
   }, 15_000)
+
+  test('names added, modified, and deleted files in a plain folder by comparing content', async () => {
+    const root = await makeRoot()
+    const plain = join(root, 'plain')
+    await mkdir(join(plain, 'src'), { recursive: true })
+    await mkdir(join(plain, 'node_modules', 'dep'), { recursive: true })
+    await writeFile(join(plain, 'src', 'auth.ts'), 'v1\n', 'utf8')
+    await writeFile(join(plain, 'src', 'old.ts'), 'old\n', 'utf8')
+    await writeFile(join(plain, 'node_modules', 'dep', 'index.js'), 'ignored\n', 'utf8')
+    const source = { name: 'plain', path: 'plain' }
+    await recordSyncState(root, [source])
+
+    expect((await collectSourceChanges(root, [source]))[0]).toMatchObject({ kind: 'unchanged', baseline: LOCAL_CONTENT_BASELINE })
+
+    await writeFile(join(plain, 'src', 'auth.ts'), 'v2\n', 'utf8')
+    await writeFile(join(plain, 'src', 'new.ts'), 'new\n', 'utf8')
+    await rm(join(plain, 'src', 'old.ts'))
+    await writeFile(join(plain, 'node_modules', 'dep', 'index.js'), 'still ignored\n', 'utf8')
+    const [change] = await collectSourceChanges(root, [source])
+
+    expect(change).toMatchObject({ kind: 'changed', changedFiles: ['M\tsrc/auth.ts', 'A\tsrc/new.ts', 'D\tsrc/old.ts'] })
+    expect(changedSourcePaths(change!)).toEqual(['src/auth.ts', 'src/new.ts', 'src/old.ts'])
+    const summary = formatSourceChanges([change!])
+    expect(summary).toContain('compared by content')
+    expect(summary).toContain('- M\tsrc/auth.ts')
+    expect(manifestChanges({ a: '1' }, { a: '1' })).toEqual([])
+  })
 
   test('does not repeat synchronized dirty content after it is committed', async () => {
     const root = await makeRoot()

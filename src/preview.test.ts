@@ -19,6 +19,18 @@ afterEach(async () => {
 })
 
 describe('generator preview', () => {
+  test('marks an embedded page preview so reader navigation can be hidden', () => {
+    const html = doxbrixDocument({
+      site: { version: 1, spaces: [{ name: 'Docs', nav: [{ type: 'page', file: 'index' }] }] },
+      title: 'Overview',
+      current: 'index',
+      rendered: { html: '<p>Focused content</p>', toc: [] },
+      embedded: true,
+    })
+    expect(html).toContain('dp-root--embedded')
+    expect(html).toContain('Focused content')
+  })
+
   test('renders evidence-derived verification metadata only when supplied', () => {
     const site = { version: 1 as const, spaces: [{ name: 'Docs', nav: [{ type: 'page' as const, file: 'index' }] }] }
     const without = doxbrixDocument({ site, title: 'Overview', current: 'index', rendered: { html: '<p>Content</p>', toc: [] } })

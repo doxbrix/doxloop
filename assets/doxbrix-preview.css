@@ -6747,6 +6747,37 @@ body.dxb-search-open { overflow: hidden; }
 .dp-root--published[data-shell-theme='atlas'] .dp-toc-entry { color: var(--dp-muted-text); font-size: 14px; line-height: 1.45; padding-top: 5px; padding-bottom: 5px; }
 .dp-root--published[data-shell-theme='atlas'] .dp-toc-entry.active { color: var(--project-primary); }
 
+/* Focused page rendering used inside the Doxloop Pages workspace. The outer
+   workspace already owns navigation and actions, so repeating the reader
+   shell inside its iframe only reduces the space available to review content. */
+.dp-root--published.dp-root--embedded .dxb-atlas-header,
+.dp-root--published.dp-root--embedded .dp-leftnav,
+.dp-root--published.dp-root--embedded .dp-toc,
+.dp-root--published.dp-root--embedded .dxb-atlas-copy-page,
+.dp-root--published.dp-root--embedded .dxb-preview-search {
+  display: none !important;
+}
+
+.dp-root--published.dp-root--embedded[data-shell-theme='atlas'] .dp-body {
+  width: 100%;
+  min-height: 100vh;
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+.dp-root--published.dp-root--embedded[data-shell-theme='atlas'] .dp-main {
+  width: 100%;
+  margin: 0;
+}
+
+.dp-root--published.dp-root--embedded[data-shell-theme='atlas'] .dp-content-wrap {
+  width: min(100%, 920px);
+  max-width: none;
+  margin: 0 auto;
+  padding: 32px clamp(24px, 5vw, 56px) 64px;
+}
+
 @media (max-width: 1180px) {
   .dxb-atlas-header-inner { grid-template-columns: 210px minmax(280px, 1fr) auto; }
   .dxb-atlas-header-link span { display: none; }

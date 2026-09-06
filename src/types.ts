@@ -94,15 +94,32 @@ export interface ApplicationConfig {
   startCommand?: string
   readyPath?: string
   screenshots?: ApplicationScreenshots
+  /**
+   * Shareable sign-in details. Secrets never live here: saved credentials and
+   * the recorded browser session are kept in the user's Doxloop config home.
+   */
+  authentication?: ApplicationAuthentication
+}
+
+export interface ApplicationAuthentication {
+  /** Application-relative route of the sign-in page, used by the browser sign-in and the agent. */
+  loginPath?: string
 }
 
 export type DeploymentVisibilitySetting = 'private' | 'public'
+export type DeploymentTargetSetting = 'doxbrix' | 'github-pages' | 'netlify' | 'vercel'
 
 export interface DeploymentConfig {
+  target?: DeploymentTargetSetting
   name?: string
   slug?: string
   visibility?: DeploymentVisibilitySetting
   apiUrl?: string
+  siteId?: string
+  projectId?: string
+  teamId?: string
+  branch?: string
+  basePath?: string
 }
 
 export type DocumentationExperienceLevel =
@@ -166,6 +183,56 @@ export interface DocumentationPlanPage {
   evidenceDetails: DocumentationPlanEvidence[]
   /** Planned reader-facing application images for this page. */
   visuals?: DocumentationPlanVisuals
+  /**
+   * Whether the writer must include a Mermaid diagram. Concept pages default
+   * to `required`; the reviewer can change it per page in plan review.
+   */
+  diagram?: DocumentationPlanDiagram
+}
+
+export type DocumentationPlanDiagram = 'required' | 'none'
+
+/** One commit between the two release refs of a Git-backed source. */
+export interface ReleaseCommit {
+  hash: string
+  date: string
+  author: string
+  subject: string
+  body?: string
+}
+
+export interface ReleaseSourceInventory {
+  source: string
+  from: string
+  to: string
+  commits: ReleaseCommit[]
+  /** `A`, `M`, `D`, or `R` plus the source-relative path, capped for prompt size. */
+  changedFiles: string[]
+  truncated: boolean
+  changelog?: { path: string; excerpt: string }
+}
+
+export interface ReleaseInventory {
+  version: string
+  from: string
+  to: string
+  collectedAt: string
+  sources: ReleaseSourceInventory[]
+}
+
+/**
+ * A content-type template that feeds deterministic inputs to the planner.
+ * Release notes are grounded in the Git log between two refs plus the
+ * product's own changelog, so the planned page never restates guesses.
+ */
+export interface DocumentationPlanTemplate {
+  kind: 'release-notes'
+  version: string
+  from: string
+  to: string
+  /** Source names the inventory was collected from; empty means every Git-backed source. */
+  sources: string[]
+  inventory: ReleaseInventory
 }
 
 export interface DocumentationPlanQuestion {
@@ -176,6 +243,7 @@ export interface DocumentationPlanQuestion {
 }
 
 export interface DocumentationPlanExecution {
+  limits?: { maxPages: number; maxScreenshots: number; maxMinutes: number }
   agent?: AgentName
   model?: string
   reasoning?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -271,6 +339,8 @@ export interface DocumentationPlan {
   target: DocumentationPlanTarget
   clarification: { mode: 'review' | 'defaults' | 'stop'; answers: Record<string, string> }
   execution: DocumentationPlanExecution
+  /** Present when the plan was started from a content-type template such as release notes. */
+  template?: DocumentationPlanTemplate
   approvedAt?: string
   approvedHash?: string
   proposalId?: string
@@ -302,6 +372,8 @@ export type SyncTrigger =
 export interface SyncBudget {
   maxRunsPerDay?: number
   maxMinutes?: number
+  /** Claude Code spending cap per run in US dollars. Codex and Gemini expose no equivalent. */
+  maxUsd?: number
 }
 
 export interface SyncConfig {
@@ -361,6 +433,8 @@ export interface SourceSyncRecord {
   commit: string
   recordedAt: string
   contentFingerprint?: string
+  /** Per-file digests, recorded for folders without Git history. */
+  files?: Record<string, string>
   connector?: {
     id: string
     version: 1
@@ -390,6 +464,7 @@ export type SyncRunStatus =
 export type SyncRunTrigger =
   | 'manual'
   | 'schedule'
+  | 'edit'
 
 export type SyncChangeKind = 'added' | 'modified' | 'deleted'
 export type SyncChangeCategory = 'page' | 'navigation' | 'configuration' | 'evidence' | 'asset'
@@ -402,6 +477,7 @@ export interface SyncChangeHunk {
   newLines: string[]
   acceptedAt?: string
   rejectedAt?: string
+  rejectionReason?: string
 }
 
 export interface SyncEvidenceReference {
@@ -443,12 +519,19 @@ export interface SyncFileChange {
   afterEndsWithNewline?: boolean
   hunks: SyncChangeHunk[]
   rationale: SyncChangeRationale
+  /**
+   * The file also changed in the project while the agent ran, so the
+   * proposal would replace an edit the agent never saw. Applying it needs an
+   * explicit confirmation.
+   */
+  changedDuringRun?: boolean
 }
 
 export interface SyncRunValidation {
   pages: number
   errors: number
   warnings: number
+  issues?: ValidationIssue[]
 }
 
 /** A generated documentation proposal. The real documentation changes only after review. */
@@ -470,6 +553,13 @@ export interface SyncRun {
   /** Plan-first authoring mode, used to complete Create/Update state after acceptance. */
   authoringMode?: 'create' | 'update'
   planId?: string
+  /** Present on runs started from the Pages view. */
+  editRequest?: {
+    instruction: string
+    paths: string[]
+    allowRelated: boolean
+    followUps: Array<{ id: string; createdAt: string; instruction: string }>
+  }
   revisionOf?: string
   supersededBy?: string
   archivedAt?: string
@@ -657,7 +747,7 @@ export interface SourceHealth {
 
 export type CoverageSurface = 'commands' | 'exports' | 'http-operations' | 'configuration' | 'security' | 'errors' | 'events-integrations' | 'reader-journeys' | 'verified-pages'
 
-export type CoverageItemState = 'documented' | 'uncovered' | 'excluded' | 'needs-human'
+export type CoverageItemState = 'documented' | 'uncovered' | 'excluded' | 'needs-human' | 'planned' | 'stale'
 
 export interface CoverageItem {
   id: string
@@ -843,7 +933,17 @@ export interface ParsedArgs {
 }
 
 /** What the user asked Doxloop to do. Agent transcripts are never recorded. */
-export type RequestKind = 'create' | 'update' | 'review'
+export type RequestKind =
+  | 'create'
+  | 'update'
+  | 'review'
+  | 'edit'
+  /** A direct navigation, branding, asset, page-metadata, or glossary write from the control center. */
+  | 'navigation'
+  | 'branding'
+  | 'asset'
+  | 'metadata'
+  | 'glossary'
 
 export type RequestStatus =
   | 'running'
