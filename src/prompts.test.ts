@@ -39,6 +39,7 @@ function fakeIo(lines: string[], tty = false): PromptIo & { rendered: () => stri
 
 describe('interactivity gate', () => {
   test('requires a terminal on both stdin and stdout', () => {
+    delete process.env.CI // Exercise terminal behavior independently of the test host.
     const args = parseArgs(['init'])
     expect(isInteractive(args, fakeIo([]))).toBe(false)
     expect(isInteractive(args, fakeIo([], true))).toBe(true)

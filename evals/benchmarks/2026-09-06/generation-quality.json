@@ -1,0 +1,389 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "1.0.0",
+  "generatedAt": "2026-09-06T11:26:25.494Z",
+  "inputHash": "dfdd9eea48c15af6dd334d8a018068e9bf9a74a141cf625d68d03dcf33563c04",
+  "project": "Config Check",
+  "generator": "doxbrix",
+  "status": "warning",
+  "checks": [
+    {
+      "code": "quality.validation",
+      "category": "validation",
+      "status": "pass",
+      "message": "8 documentation pages passed deterministic validation."
+    },
+    {
+      "code": "quality.build.passed",
+      "category": "build",
+      "status": "pass",
+      "message": "Doxbrix static build passed (8 pages)."
+    },
+    {
+      "code": "quality.link.ok",
+      "category": "links",
+      "status": "pass",
+      "message": "No literal external links were found in Markdown, HTML attributes, or reStructuredText. Dynamic links and cross-reference roles require the native generator check."
+    },
+    {
+      "code": "quality.example.source-verified",
+      "category": "examples",
+      "status": "skipped",
+      "message": "No executable-example manifest is configured; examples remain source-verified."
+    },
+    {
+      "code": "quality.schema.passed",
+      "category": "schemas",
+      "status": "pass",
+      "message": "No connector-native schemas require linting."
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/getting-started/install.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/getting-started/install.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/getting-started/validate-yaml.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/getting-started/validate-yaml.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/index.md"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Exact executable name from package metadata\" where \"config-check\" is used.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.lint.issue",
+      "category": "lint",
+      "status": "warning",
+      "message": "Terminology guidance prefers \"Only verified subcommand\" where \"validate\" is used.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The package exposes a config-check executable.",
+      "file": "docs/index.md"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The only verified subcommand is validate.",
+      "file": "docs/index.md"
+    },
+    {
+      "code": "quality.claim.needs-human",
+      "category": "claims",
+      "status": "warning",
+      "message": "needs-human: --format accepts text and json, with text as the default.",
+      "file": "docs/index.md"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: A .yaml path returns exit status 0, other suffixes return 1, and unsupported command or format usage returns 2.",
+      "file": "docs/index.md"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The package name is config-check and the recorded version is 2.0.0.",
+      "file": "docs/getting-started/install.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The package metadata maps the config-check executable to ./dist/cli.js.",
+      "file": "docs/getting-started/install.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The validate subcommand is the supported command boundary for readiness checks.",
+      "file": "docs/getting-started/install.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: config-check validate uses text as the default format when --format is omitted.",
+      "file": "docs/getting-started/validate-yaml.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: A file path ending with .yaml returns exit status 0.",
+      "file": "docs/getting-started/validate-yaml.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: --format json is an accepted format value.",
+      "file": "docs/getting-started/validate-yaml.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: A .yaml file path returns exit status 0.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: A non-.yaml file path returns exit status 1 when the command and format are accepted.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: invalid.txt with --format json returns exit status 1.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Unsupported command or unsupported format usage returns exit status 2.",
+      "file": "docs/guides/validate-in-ci.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: --format is the verified output-selection flag.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The default format is text.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: text and json are the only verified accepted format values.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Unsupported format values return exit status 2.",
+      "file": "docs/guides/output-format.mdx"
+    },
+    {
+      "code": "quality.claim.needs-human",
+      "category": "claims",
+      "status": "warning",
+      "message": "needs-human: The verified command syntax is config-check validate <file> [--format text|json].",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The package metadata records version 2.0.0.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The file path argument succeeds when it ends with .yaml.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.claim.needs-human",
+      "category": "claims",
+      "status": "warning",
+      "message": "needs-human: --format defaults to text and accepts text or json.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.claim.needs-human",
+      "category": "claims",
+      "status": "warning",
+      "message": "needs-human: The configured source does not verify --output, additional subcommands, environment variables, or emitted output schema.",
+      "file": "docs/reference/command.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Exit status 0 means the verified command succeeded for a .yaml path.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Exit status 1 means validation failed for a non-.yaml path after accepted command and format usage.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Exit status 2 means unsupported command or unsupported format usage.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: invalid.txt with --format json returns exit status 1.",
+      "file": "docs/reference/exit-status.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Exit status 1 is caused by a non-.yaml path after accepted command and format usage.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: Exit status 2 is caused by an unsupported first argument or unsupported format value.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: --output json is not supported by the configured source evidence.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.claim.verified",
+      "category": "claims",
+      "status": "pass",
+      "message": "verified: The configured source does not verify exact error text, logs, or JSON fields.",
+      "file": "docs/troubleshooting/validation.mdx"
+    },
+    {
+      "code": "quality.accessibility.manual-review",
+      "category": "accessibility",
+      "status": "skipped",
+      "message": "Rendered checks are opt-in. Enable rendered.enabled in .doxloop/quality.json."
+    },
+    {
+      "code": "quality.visual.skipped",
+      "category": "visual",
+      "status": "skipped",
+      "message": "Visual regression checks are disabled."
+    }
+  ],
+  "counts": {
+    "passed": 31,
+    "warnings": 19,
+    "failed": 0,
+    "skipped": 3
+  },
+  "artifacts": {
+    "report": ".doxloop/quality-reports/quality-2026-09-06T11-26-25-494Z.json"
+  },
+  "options": {
+    "offline": true,
+    "rendered": false,
+    "examples": false
+  }
+}

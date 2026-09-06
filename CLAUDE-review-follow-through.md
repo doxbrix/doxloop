@@ -23,7 +23,7 @@ Licensing is excluded at the user's request.
 - Real digest-pinned Python container check passed.
 - Package audit: zero source maps or marketing/social assets in the tarball.
 - Full typecheck, skill validation, and source-boundary checks passed.
-- A real generation attempt was blocked for deleting a page approved for update. File-contract instructions and failed-workspace retention were strengthened; the repeat with explicit medium reasoning is running.
+- The repeat real generation benchmark completed planning/generation/acceptance and scored 62/100 (floor 60), with zero quality failures and 19 warnings. Both review and generation observations are recorded separately in the benchmark baseline.
 - Hosted CI publication and run are pending. Licensing files are unchanged.
 
 Implementation boundaries and usage are documented in [review workflows](docs/review-workflows.md).

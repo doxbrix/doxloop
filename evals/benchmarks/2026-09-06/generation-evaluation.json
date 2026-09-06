@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "1.0.0",
+  "generatedAt": "2026-09-06T11:26:25.826Z",
+  "mode": "generation",
+  "project": "Config Check",
+  "score": 62,
+  "metrics": [
+    {
+      "id": "factual-precision",
+      "score": 87.1,
+      "weight": 18,
+      "detail": "27/31 claim checks are verified; 0 contradicted."
+    },
+    {
+      "id": "unsupported-claim-rate",
+      "score": 87.1,
+      "weight": 12,
+      "detail": "4/31 claim checks are contradicted or need human review."
+    },
+    {
+      "id": "public-surface-coverage",
+      "score": 50,
+      "weight": 13,
+      "detail": "4/9 coverage surfaces were measurable. Coverage counts existing pages linked to source evidence. Planned pages are shown separately and do not count as documented; verified pages require current evidence. It does not prove that prose, examples, or behavior are correct."
+    },
+    {
+      "id": "reader-journey-and-ia",
+      "score": 100,
+      "weight": 10,
+      "detail": "0 errors and 0 warnings."
+    },
+    {
+      "id": "executable-examples",
+      "score": 0,
+      "weight": 8,
+      "detail": "No executable examples were run; verification is missing."
+    },
+    {
+      "id": "evidence-precision-recall",
+      "score": 0,
+      "weight": 12,
+      "detail": "22 evidence diagnostics."
+    },
+    {
+      "id": "page-economy",
+      "score": 100,
+      "weight": 7,
+      "detail": "8 pages; expected maximum 8."
+    },
+    {
+      "id": "update-locality-preservation",
+      "score": 100,
+      "weight": 12,
+      "detail": "Generation run; locality is not applicable."
+    },
+    {
+      "id": "accessibility-validation",
+      "score": 0,
+      "weight": 8,
+      "detail": "No rendered accessibility run was performed; verification is missing."
+    }
+  ],
+  "reviewer": {
+    "accepted": 1,
+    "revised": 0,
+    "rejected": 0
+  }
+}

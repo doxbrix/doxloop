@@ -47,3 +47,15 @@ tests. A Docker daemon was unavailable on this machine, so actual container
 execution was not claimed; unconfigured Python checks stay skipped.
 
 The follow-through existing-site run passed six native builds for each generator, including version and locale creation and undo. Screenshots: [Docusaurus](docusaurus-existing.png), [MkDocs](mkdocs-existing.png). The real container boundary result is in `python-boundary.json`.
+
+## Real generation observation
+
+Codex CLI 0.151.0 / gpt-5.5 / medium reasoning completed planning, generation, and acceptance in 798.350 seconds. The eight-page CLI fixture scored **62/100**, above its 60-point benchmark floor. The quality report had **0 failures and 19 warnings**; four claim checks still needed human review, and no executable examples were measured. This is a bounded passing benchmark observation, not a claim of publication-ready prose.
+
+```sh
+node scripts/run-authoring-evals.mjs --agent codex --model codex=gpt-5.5 --reasoning medium --case cli --mode generation
+```
+
+See `generation-matrix.json`, `generation-evaluation.json`, and `generation-quality.json`. The generation observation was added alongside the review observation in `evals/baseline.json`. Raw diagnostics and generated workspaces remain ignored under `evals/results/`.
+
+An earlier attempt was rejected because the agent deleted an existing page that the plan marked for update. That run was not accepted or scored as documentation quality. The enforced file contract remains in place; author instructions now explicitly preserve existing filenames and extensions, and the evaluation runner retains failed proposal workspaces for inspection.
