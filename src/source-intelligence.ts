@@ -51,8 +51,21 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
     const source = health.find((item) => item.name === entry.source)
     const date = evidence.verifiedOn?.[entry.source]
     const revision = evidence.verifiedAt?.[entry.source]
-    return source?.status !== 'error' && Boolean(source) && (Boolean(revision && source?.revision === revision) || Boolean(!source?.revision && date && Number.isFinite(Date.parse(date)) && (!project.sync.maxVerificationAgeDays || Date.now() - Date.parse(date) <= project.sync.maxVerificationAgeDays * 86_400_000)))
+    // A page is verified against the commit the project is synchronized to.
+    // Health reports the provider's live head, which moves on every upstream
+    // push; that is drift for the sync report to raise, not a lost verification.
+    const baseline = drift.sources.find((item) => item.name === entry.source)?.baseline ?? source?.revision
+    return source?.status !== 'error' && Boolean(source) && (Boolean(revision && baseline === revision) || Boolean(!baseline && date && Number.isFinite(Date.parse(date)) && (!project.sync.maxVerificationAgeDays || Date.now() - Date.parse(date) <= project.sync.maxVerificationAgeDays * 86_400_000)))
   })
+  // A partially inventoried source cannot support a coverage percentage the
+  // reader should trust, so the cut is reported next to the source itself.
+  for (const source of inventory.sources) {
+    const item = health.find((entry) => entry.name === source.name)
+    if (!item || !source.truncated) continue
+    item.status = item.status === 'error' ? 'error' : 'warning'
+    item.summary = `${item.summary}; ${source.filesScanned} of ${source.filesAvailable} files inventoried`
+    item.details.push(...source.warnings)
+  }
   const plan = plans.find((item) => ['generated', 'generating', 'approved'].includes(item.status))
   const signals = inventory.sources.flatMap((source) => source.evidence)
   const exclusions = new Set(plan?.capabilities.filter((item) => item.disposition === 'excluded').flatMap((item) => [item.id, item.title, ...item.evidence.map((entry) => entry.label ?? entry.path)]) ?? [])
@@ -65,15 +78,19 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
     const id = coverageJourneyId(journey)
     const resolution = resolutions.items[id]
     const linkedPage = resolution?.page && pagePaths.includes(resolution.page) ? resolution.page : undefined
-    const documented = resolution?.disposition === 'documented' && linkedPage
     const suggestion = linkedPage ? undefined : suggestedPage(journey, pagePaths, plan?.pages ?? [])
+    // A journey the generated plan set out to serve, with a page on disk that
+    // answers to it, is delivered; asking the reviewer to hand-link every
+    // priority outcome left this row at zero on every finished project.
+    const delivered = plan?.status === 'generated' && plannedOutcomes.has(normalize(journey)) && Boolean(suggestion)
+    const documented = (resolution?.disposition === 'documented' && linkedPage) || (resolution === undefined && delivered)
     return {
       id,
       surface: 'reader-journeys',
       label: journey,
       state: documented ? 'documented' : resolution?.disposition === 'needs-human' ? 'needs-human' : plannedOutcomes.has(normalize(journey)) ? 'planned' : 'uncovered',
-      ...(linkedPage ? { page: linkedPage } : {}),
-      ...(suggestion ? { suggestedPage: suggestion } : {}),
+      ...(linkedPage ? { page: linkedPage } : documented && suggestion ? { page: suggestion } : {}),
+      ...(suggestion && !documented ? { suggestedPage: suggestion } : {}),
       ...(resolution?.reason ? { reason: resolution.reason } : {}),
     }
   })
@@ -190,7 +207,13 @@ async function evidenceDiagnostics(root: string, project: DoxloopProject, map: E
       for (const identifier of identifiers) {
         if (isBroad(identifier)) output.push(diagnostic('warning', 'broad-pattern', page, `Evidence pattern "${identifier}" is too broad for localized drift.`, 'Replace it with the smallest relevant file, directory, operation, or schema.', entry.source, identifier))
         if (!(await identifierExists(root, source.path, source.kind === 'openapi', entry.source, identifier, signals))) output.push(diagnostic('warning', 'deleted-identifier', page, `Evidence identifier "${identifier}" was not found in the current source inventory.`, 'Choose a current identifier or remove claims that depended on the deleted surface.', entry.source, identifier))
-        if (weakRelation(page, identifier)) output.push(diagnostic('warning', 'weak-relation', page, `Evidence "${identifier}" has a weak textual relationship to this page.`, `Confirm the relationship and prefer a closer identifier${closestSignal(entry.source, page, signals) ? `, such as "${closestSignal(entry.source, page, signals)}"` : ''}.`, entry.source, identifier))
+      }
+      // One relationship check per page and source: a screen component named
+      // differently from its guide is normal, so only a page whose evidence
+      // shares no vocabulary with it at all is worth a reviewer's attention.
+      if (identifiers.length > 0 && identifiers.every((identifier) => weakRelation(page, identifier))) {
+        const closest = closestSignal(entry.source, page, signals)
+        output.push(diagnostic('warning', 'weak-relation', page, `None of the ${identifiers.length} evidence identifiers from "${entry.source}" share vocabulary with this page.`, `Confirm the relationship${closest ? ` or prefer a closer identifier, such as "${closest}"` : ''}.`, entry.source, identifiers[0]))
       }
     }
   }
@@ -205,22 +228,33 @@ function isBroad(identifier: string): boolean { return identifier === '*' || ide
 
 async function identifierExists(root: string, path: string, openapi: boolean, source: string, identifier: string, signals: DiscoveryEvidence[]): Promise<boolean> {
   if (signals.some((item) => item.source === source && evidenceMatches(item, identifier))) return true
-  if (openapi || /[*?[]/.test(identifier)) return signals.some((item) => item.source === source && (matchesGlob(item.path, identifier) || matchesGlob(item.label, identifier)))
-  try { return (await lstat(resolve(root, path, identifier))).isFile() || (await lstat(resolve(root, path, identifier))).isDirectory() } catch { return false }
+  // A literal file wins over pattern matching: Next.js route folders such as
+  // `app/(main)/websites/[websiteId]/page.tsx` contain glob characters and
+  // were reported as deleted while sitting on disk.
+  if (!openapi) {
+    try {
+      const stat = await lstat(resolve(root, path, identifier))
+      if (stat.isFile() || stat.isDirectory()) return true
+    } catch { /* not a literal path; fall through to pattern matching */ }
+  }
+  if (openapi || /[*?]/.test(identifier)) return signals.some((item) => item.source === source && (matchesGlob(item.path, identifier) || matchesGlob(item.label, identifier)))
+  return false
 }
 
 function weakRelation(page: string, identifier: string): boolean {
-  const pageTokens = tokens(basename(page).replace(/\.[^.]+$/, ''))
+  const pageTokens = tokens(page.replace(/\.[^.]+$/, ''))
   const evidenceTokens = tokens(identifier)
-  return pageTokens.length > 0 && evidenceTokens.length > 0 && !pageTokens.some((token) => evidenceTokens.includes(token))
+  return pageTokens.length > 0 && evidenceTokens.length > 0 && !pageTokens.some((token) => evidenceTokens.some((candidate) => candidate === token || candidate.startsWith(token) || token.startsWith(candidate)))
 }
 
 function closestSignal(source: string, page: string, signals: DiscoveryEvidence[]): string | undefined {
   const wanted = tokens(page)
-  return signals.filter((item) => item.source === source).map((item) => ({ label: item.label, score: tokens(item.label).filter((token) => wanted.includes(token)).length })).sort((left, right) => right.score - left.score)[0]?.label
+  const best = signals.filter((item) => item.source === source).map((item) => ({ label: item.label, score: tokens(item.label).filter((token) => wanted.includes(token)).length })).sort((left, right) => right.score - left.score)[0]
+  return best && best.score > 0 ? best.label : undefined
 }
 
-function tokens(value: string): string[] { return normalize(value).split(/[^a-z0-9]+/).filter((item) => item.length >= 3 && !['docs', 'documentation', 'page', 'index'].includes(item)) }
+/** Lower-case words of a path, title, or symbol, with camelCase split. */
+function tokens(value: string): string[] { return normalize(value.replace(/([a-z0-9])([A-Z])/g, '$1 $2')).split(/[^a-z0-9]+/).filter((item) => item.length >= 3 && !['docs', 'documentation', 'page', 'index', 'src', 'app', 'main', 'components', 'component', 'lib', 'server', 'client', 'mdx', 'tsx', 'vue'].includes(item)) }
 function normalize(value: string): string { return value.trim().toLowerCase() }
 function suggestedPage(outcome: string, pages: string[], plannedPages: Array<{ title: string; path: string; purpose: string }>): string | undefined {
   const wanted = tokens(outcome)

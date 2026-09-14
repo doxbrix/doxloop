@@ -69,6 +69,7 @@ async function mockWorkspace(page, overrides = {}, apiOverrides = {}) {
     if (['/api/comments', '/api/pages/search', '/api/direct-edits'].includes(url.pathname)) return route.fulfill({ json: [] })
     if (url.pathname === '/api/collections') return route.fulfill({ json: [{ directory: '', version: 'current', locale: 'default', native: true }] })
     if (url.pathname === '/api/authoring-estimate') return route.fulfill({ json: { samples: 0, message: 'No comparable completed runs yet.', cost: 'Provider billing applies.' } })
+    if (url.pathname === '/api/navigation') return route.fulfill({ json: { ...navigationTree, spaces: [{ name: 'Documentation', nav: documentationPages.map(page => ({ type: 'page', file: page.path.replace(/\.mdx$/, ''), path: page.path, pageTitle: page.title })) }], orphans: [] } })
     if (url.pathname === '/api/pages') return route.fulfill({ json: documentationPages })
     if (url.pathname === '/api/preview/start') return route.fulfill({ json: { job: { id: 'preview-job', status: 'running' }, url: 'http://127.0.0.1:45991' } })
     if (/^\/api\/proposals\/[a-z0-9-]+\/preview\/start$/.test(url.pathname)) return route.fulfill({ json: { job: { id: 'proposal-preview-job', status: 'running' }, url: 'http://127.0.0.1:45992' } })
@@ -222,7 +223,7 @@ test('workspace pages stay fluid, readable, and expose usable buttons', async ({
     const workspaceWidth = await page.locator('.workspace-main').evaluate((element) => element.getBoundingClientRect().width)
     const pageWidth = await page.locator('.workspace-main .page').evaluate((element) => element.getBoundingClientRect().width)
     expect(pageWidth / workspaceWidth).toBeGreaterThan(0.89)
-    expect(pageWidth / workspaceWidth).toBeLessThan(0.95)
+    expect(pageWidth / workspaceWidth).toBeLessThan(route === 'pages' ? 0.99 : 0.95)
     await expect(page.getByText('Local', { exact: true })).toHaveCount(0)
 
     const invalidButtons = await page.locator('button:visible').evaluateAll((buttons) => buttons.flatMap((button) => {
@@ -272,12 +273,14 @@ test('Pages selects multiple pages and submits one scoped edit request', async (
   await page.goto('/pages')
   await expect(page.getByRole('checkbox', { name: 'Select Overview' })).toBeChecked()
   await page.getByRole('checkbox', { name: 'Select Events API' }).check()
+  await page.getByRole('button', { name: 'Instruct agent', exact: true }).click()
   await expect(page.getByLabel('What should change on these 2 pages?')).toBeVisible()
   await expect(page.getByLabel('Pages selected for this update')).toContainText('2 pages in this edit')
-  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page')
+  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page&workspace=1')
   await page.getByLabel('What should change on these 2 pages?').fill('Add a clearer curl example.')
+  await page.getByText('Options & agent settings', { exact: true }).click()
   await page.getByText('Also allow related changes', { exact: true }).click()
-  await page.getByRole('button', { name: 'Ask the agent to edit' }).click()
+  await page.getByRole('button', { name: 'Generate proposal' }).click()
 
   await expect.poll(() => calls.includes('POST /api/pages/edit')).toBe(true)
   expect(editBody).toMatchObject({
@@ -292,12 +295,61 @@ test('Pages selects a single page on click and previews it', async ({ page }) =>
   await mockWorkspace(page)
   await page.goto('/pages')
   await expect(page.getByRole('checkbox', { name: 'Select Overview' })).toBeChecked()
-  await page.getByRole('option', { name: /Events API/ }).click()
+  await page.getByRole('treeitem').filter({ hasText: 'Events API' }).click()
   await expect(page.getByRole('checkbox', { name: 'Select Overview' })).not.toBeChecked()
   await expect(page.getByRole('checkbox', { name: 'Select Events API' })).toBeChecked()
+  await expect(page.getByLabel('What should change on this page?')).toBeHidden()
+  await page.getByRole('button', { name: 'Instruct agent', exact: true }).click()
   await expect(page.getByLabel('What should change on this page?')).toBeVisible()
-  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page')
+  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', 'http://127.0.0.1:45991/reference/events?embed=page&workspace=1')
   await expect(page).toHaveURL(/\/pages\?path=reference%2Fevents\.mdx$/)
+})
+
+test('the preview edit link opens visual content editing', async ({ page }) => {
+  await mockWorkspace(page, {}, {
+    handle: async ({ path }) => {
+      if (path === '/api/pages/content') return { content: '# Overview\n\nA paragraph.', fingerprint: 'original' }
+      if (path === '/api/pages/editor-preview') return { url: '/api/editor-fixture', blocks: [] }
+    },
+  })
+  await page.goto('/pages?path=index.mdx&edit=1')
+  await expect(page.getByRole('button', { name: 'Edit content', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: 'Content', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByLabel('Page source', { exact: true })).toBeHidden()
+})
+
+test('content drafts survive reload, block conflicting actions, and compare newer saved text', async ({ page }) => {
+  let content = '# Overview\n\nOriginal paragraph.\n'
+  let fingerprint = 'original'
+  let write
+  await mockWorkspace(page, { project: { ...project, generator: 'mkdocs' } }, {
+    handle: async ({ method, path, request }) => {
+      if (path === '/api/pages/content' && method === 'GET') return { content, fingerprint }
+      if (path === '/api/pages/content' && method === 'PUT') {
+        write = request.postDataJSON()
+        content = write.content; fingerprint = 'saved'
+        return { content, fingerprint, editId: 'direct-edit-1' }
+      }
+    },
+  })
+  await page.goto('/pages?path=index.mdx')
+  await expect(page.getByRole('button', { name: 'Generate proposal' })).toBeHidden()
+  await page.getByRole('button', { name: 'Edit content', exact: true }).click()
+  await page.getByLabel('Page source', { exact: true }).fill('# Overview\n\nMy unsaved paragraph.\n')
+  await page.getByRole('treeitem').filter({ hasText: 'Events API' }).click()
+  await expect(page).toHaveURL(/path=index.mdx/)
+  await page.getByRole('button', { name: 'Instruct agent', exact: true }).click()
+  await page.getByLabel('What should change on this page?').fill('Improve this introduction.')
+  await expect(page.getByRole('button', { name: 'Generate proposal' })).toBeDisabled()
+  content = '# Overview\n\nA newer saved paragraph.\n'; fingerprint = 'newer'
+  await page.reload()
+  await expect(page.getByLabel('Page source', { exact: true })).toHaveValue('# Overview\n\nMy unsaved paragraph.\n')
+  await expect(page.getByRole('heading', { name: 'Latest saved version' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Keep my draft against this version' }).click()
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+  await expect(page.getByLabel('Page source', { exact: true })).toBeHidden()
+  expect(write).toMatchObject({ content: '# Overview\n\nMy unsaved paragraph.\n', fingerprint: 'newer', evidenceDisposition: 'needs-review' })
 })
 
 test('Pages shows a running edit with live output and Stop', async ({ page }) => {
@@ -331,8 +383,8 @@ test('Pages reviews, accepts, and undoes an agent edit', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Reject', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Refine', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Accept', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('Page updated')
-  await page.getByRole('status').getByRole('button', { name: 'Undo' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Page updated' })).toBeVisible()
+  await page.getByRole('status').filter({ hasText: 'Page updated' }).getByRole('button', { name: 'Undo' }).click()
 
   await expect.poll(() => calls.includes('POST /api/proposals/run-page-edit/accept')).toBe(true)
   await expect.poll(() => calls.includes('POST /api/proposals/run-page-edit/undo')).toBe(true)
@@ -683,6 +735,126 @@ test('new-project setup offers the location field and explains a rejected source
   await expect(page.getByRole('button', { name: /Continue/ })).toBeEnabled()
 })
 
+test('new-project setup keeps Continue enabled and explains what is missing on click', async ({ page }) => {
+  const readinessCalls = []
+  await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null, cwd: '/tmp/widget' }, { handle: ({ method, path, request }) => {
+    if (method === 'POST' && path === '/api/setup/validate') {
+      const body = request.postDataJSON()
+      return { directoryPath: '/tmp/widget/my-product-docs', ...(body.sourcePath ? { sourcePath: body.sourcePath } : {}) }
+    }
+    if (method === 'POST' && path === '/api/setup/application/readiness') {
+      const body = request.postDataJSON()
+      readinessCalls.push(body)
+      return body.baseUrl === 'http://localhost:3000'
+        ? { configured: true, reachable: true, status: 'ready', url: 'http://localhost:3000/', authentication: 'none', message: 'The application page is reachable.' }
+        : { configured: true, reachable: false, status: 'unreachable', url: `${body.baseUrl}/`, message: `The application did not answer at ${body.baseUrl}/.` }
+    }
+    return undefined
+  } })
+  await page.goto('/')
+  const next = page.getByRole('button', { name: /Continue/ })
+
+  // Step 1: an empty title no longer disables the button; it explains itself.
+  await page.getByLabel('What should we call your docs?').fill('')
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByText('Enter a title for your documentation.')).toBeVisible()
+  await page.getByLabel('What should we call your docs?').fill('Widget docs')
+  await expect(page.getByText('Enter a title for your documentation.')).toHaveCount(0)
+  await next.click()
+
+  // Step 2: no source yet.
+  await expect(page.getByRole('heading', { name: 'Sources' })).toBeVisible()
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByText(/Add at least one source/)).toBeVisible()
+  await page.getByRole('button', { name: 'Add source' }).click()
+  await page.getByRole('button', { name: 'Source code' }).click()
+  await page.getByRole('button', { name: /^Local folder/ }).click()
+  const dialog = page.locator('.sources-reference-dialog')
+  await dialog.getByLabel('Local folder').fill('/tmp/widget-source')
+  await dialog.getByRole('button', { name: 'Add source' }).click()
+  await expect(page.getByText('widget-source', { exact: true })).toBeVisible()
+  await next.click()
+
+  // Step 3: screenshots on, details missing or malformed, then a page check
+  // that Continue runs by itself.
+  await expect(page.getByRole('heading', { name: 'Configure your tools' })).toBeVisible()
+  await page.getByRole('button', { name: 'Yes', exact: true }).first().click()
+  await expect(page.getByRole('button', { name: 'Check page' })).toBeDisabled()
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByText('Enter the application URL, or choose No for screenshots.').first()).toBeVisible()
+  await page.getByLabel('Application URL').fill('localhost:3000')
+  await next.click()
+  await expect(page.getByText(/including http:\/\/ or https:\/\//).first()).toBeVisible()
+  expect(readinessCalls).toHaveLength(0)
+  await page.getByLabel('Application URL').fill('http://localhost:3001')
+  await expect(page.getByRole('button', { name: 'Check page' })).toBeEnabled()
+  await next.click()
+  await expect(page.getByText(/did not answer at http:\/\/localhost:3001\//).first()).toBeVisible()
+  await expect(page.getByText(/choose No for screenshots/).first()).toBeVisible()
+  expect(readinessCalls).toHaveLength(1)
+  await expect(page.getByRole('heading', { name: 'Configure your tools' })).toBeVisible()
+  await page.getByLabel('Application URL').fill('http://localhost:3000')
+  await next.click()
+  await expect(page.getByRole('heading', { name: 'Guide your documentation' })).toBeVisible()
+  expect(readinessCalls).toHaveLength(2)
+
+  // Editing a sign-in field clears the check; Continue simply checks again.
+  await page.getByRole('button', { name: 'Back' }).click()
+  await expect(page.getByText('The application page is reachable.')).toBeVisible()
+  await page.getByRole('button', { name: 'Yes', exact: true }).nth(1).click()
+  await page.getByLabel('Test account username or email').fill('docs-demo@example.com')
+  await expect(page.getByText('The application page is reachable.')).toHaveCount(0)
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByRole('heading', { name: 'Guide your documentation' })).toBeVisible()
+  expect(readinessCalls).toHaveLength(3)
+  expect(readinessCalls[2]).toMatchObject({ baseUrl: 'http://localhost:3000', hasCredentials: false })
+})
+
+test('planning an update with screenshots re-checks the application instead of disabling the button', async ({ page }) => {
+  let applicationStarted = false
+  let readinessChecks = 0
+  let planRequest
+  await mockWorkspace(page, {
+    receipt: null,
+    project: { ...project, application: { baseUrl: 'http://localhost:3000', screenshots: { policy: 'auto', startPath: '/' } } },
+    documentationPlan: { ...readyPlan, status: 'generated', proposalId: proposal.id },
+    runs: [{ ...proposal, status: 'applied' }],
+  }, { handle: ({ method, path, request }) => {
+    if (method === 'GET' && path === '/api/application/readiness') {
+      readinessChecks += 1
+      return applicationStarted
+        ? { configured: true, reachable: true, status: 'ready', url: 'http://localhost:3000/', authentication: 'none', message: 'The application page is reachable.' }
+        : { configured: true, reachable: false, status: 'unreachable', url: 'http://localhost:3000/', message: 'The application did not answer at http://localhost:3000/.' }
+    }
+    if (method === 'POST' && path === '/api/plans') {
+      planRequest = request.postDataJSON()
+      return { plan: readyPlan, job: { id: 'plan-job', type: 'plan:update', status: 'running', startedAt: '2026-08-26T08:00:00.000Z' } }
+    }
+    return undefined
+  } })
+  await page.goto('/update')
+  await expect(page.getByRole('heading', { name: 'Update documentation' })).toBeVisible()
+  const plan = page.getByRole('button', { name: 'Plan documentation update' })
+  await page.getByRole('button', { name: 'Yes', exact: true }).click()
+  await expect(page.getByText(/did not answer/)).toBeVisible()
+  await expect(plan).toBeEnabled()
+  await plan.click()
+  await expect(page.getByText(/application check did not pass/)).toBeVisible()
+  expect(planRequest).toBeUndefined()
+
+  applicationStarted = true
+  const checksBefore = readinessChecks
+  await page.getByRole('button', { name: 'Check again' }).click()
+  await expect(page.getByText('The application page is reachable.')).toBeVisible()
+  expect(readinessChecks).toBeGreaterThan(checksBefore)
+  await plan.click()
+  await expect.poll(() => planRequest).toMatchObject({ mode: 'update', screenshots: 'enabled' })
+})
+
 test('new-project setup can adopt an existing documentation folder instead of scaffolding', async ({ page }) => {
   await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null }, { handle: ({ method, path }) => {
     if (method === 'GET' && path === '/api/projects') return { current: null, recent: [], generators: [{ id: 'doxbrix', displayName: 'Doxbrix', installed: true }] }
@@ -717,7 +889,7 @@ const navigationTree = {
   icons: ['book', 'rocket'],
 }
 
-test('Pages → Navigation reorders a page and saves the tree with its fingerprint', async ({ page }) => {
+test('Pages edits navigation beside the current page and saves with its fingerprint', async ({ page }) => {
   let saved
   const calls = await mockWorkspace(page, {}, {
     handle: async ({ method, path, request }) => {
@@ -725,14 +897,19 @@ test('Pages → Navigation reorders a page and saves the tree with its fingerpri
       if (method === 'PUT' && path === '/api/navigation') { saved = request.postDataJSON(); return { ...navigationTree, fingerprint: 'nav-2', spaces: saved.spaces } }
     },
   })
-  await page.goto('/pages?view=navigation')
-  await expect(page.getByRole('heading', { name: 'Sidebar navigation' })).toBeVisible()
+  await page.goto('/pages?path=index.mdx')
+  await expect(page.getByRole('button', { name: 'Navigation', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Edit navigation', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Explorer' })).toBeVisible()
+  await expect(page.getByTitle('Current page preview')).toBeVisible()
+  await expect(page.getByTitle('Navigation preview')).toHaveCount(0)
   const tree = page.getByRole('tree', { name: 'Navigation' })
   await expect(tree.getByRole('treeitem')).toHaveCount(4)
   await expect(page.getByRole('button', { name: 'Save navigation' })).toBeDisabled()
-  await page.getByRole('button', { name: 'Move Overview down' }).click()
-  await page.getByRole('button', { name: 'Add page' }).click()
-  await page.getByRole('button', { name: /FAQ/ }).click()
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).click()
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).press('Alt+ArrowDown')
+  await page.getByRole('button', { name: 'Add navigation item', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add FAQ', exact: true }).click()
   await expect(tree.getByRole('treeitem')).toHaveCount(5)
   await page.getByRole('button', { name: 'Save navigation' }).click()
   await expect.poll(() => calls.includes('PUT /api/navigation')).toBe(true)
@@ -741,6 +918,101 @@ test('Pages → Navigation reorders a page and saves the tree with its fingerpri
   expect(saved.spaces[0].nav.at(-1)).toMatchObject({ type: 'page', file: 'faq' })
   expect(JSON.stringify(saved)).not.toContain('pageTitle')
   await expect(page.getByRole('button', { name: 'Save navigation' })).toBeDisabled()
+})
+
+test('navigation and content drafts coexist without losing either edit', async ({ page }) => {
+  const original = '# Overview\n\nOriginal content.\n'
+  let tree = navigationTree
+  await mockWorkspace(page, { project: { ...project, generator: 'mkdocs' } }, {
+    handle: async ({ method, path, request }) => {
+      if (path === '/api/pages/content') return { content: original, fingerprint: 'content-1' }
+      if (path === '/api/navigation' && method === 'GET') return tree
+      if (path === '/api/navigation' && method === 'PUT') { tree = { ...tree, fingerprint: 'nav-2', spaces: request.postDataJSON().spaces }; return tree }
+    },
+  })
+  await page.goto('/pages?path=index.mdx')
+  await page.getByRole('button', { name: 'Edit content', exact: true }).click()
+  await page.getByLabel('Page source', { exact: true }).fill('# Overview\n\nMy content draft.\n')
+  await expect(page.getByRole('button', { name: 'Edit navigation', exact: true })).toHaveCount(0)
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).click()
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).press('Alt+ArrowDown')
+  await expect(page.getByRole('heading', { name: 'Explorer' })).toBeVisible()
+  await page.getByRole('button', { name: 'Images & files', exact: true }).click()
+  await expect(page.getByLabel('Page source', { exact: true })).toHaveValue('# Overview\n\nMy content draft.\n')
+  await page.getByRole('button', { name: 'Save navigation', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save navigation', exact: true })).toBeDisabled()
+  await expect(page.getByLabel('Page source', { exact: true })).toHaveValue('# Overview\n\nMy content draft.\n')
+  expect(tree.spaces[0].nav[0].items.map(node => node.file)).toEqual(['quickstart', 'index'])
+  await expect(page.getByRole('heading', { name: 'Explorer' })).toBeVisible()
+  await expect(page.getByLabel('Page source', { exact: true })).toHaveValue('# Overview\n\nMy content draft.\n')
+})
+
+test('legacy navigation links open the integrated sidebar and guard unsaved navigation', async ({ page }) => {
+  await mockWorkspace(page, {}, { handle: async ({ path }) => path === '/api/navigation' ? navigationTree : undefined })
+  await page.goto('/pages?view=navigation')
+  await expect(page.getByRole('heading', { name: 'Explorer' })).toBeVisible()
+  await expect(page.getByTitle('Current page preview')).toBeVisible()
+  await page.getByRole('treeitem').filter({ hasText: 'Events API' }).click()
+  await expect(page.getByTitle('Current page preview')).toHaveAttribute('src', /reference\/events\?embed=page/)
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).click()
+  await page.getByRole('treeitem').filter({ hasText: 'Overview' }).press('Alt+ArrowDown')
+  await page.getByRole('button', { name: 'Images & files', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Explorer' })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(page).toHaveURL(/\/pages\?/)
+  await page.getByRole('button', { name: 'Discard navigation', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save navigation', exact: true })).toBeDisabled()
+  await expect(page.getByRole('treeitem').filter({ hasText: 'Events API' })).toBeVisible()
+})
+
+test('explorer renames inline and changes the existing icon without opening a settings form', async ({ page }) => {
+  let saved
+  await mockWorkspace(page, {}, { handle: async ({ method, path, request }) => {
+    if (path === '/api/navigation' && method === 'GET') return navigationTree
+    if (path === '/api/navigation' && method === 'PUT') { saved = request.postDataJSON(); return { ...navigationTree, fingerprint: 'nav-2', spaces: saved.spaces } }
+  } })
+  await page.goto('/pages?path=index.mdx')
+  const row = page.getByRole('treeitem').filter({ hasText: 'Overview' })
+  await row.press('F2')
+  await page.getByRole('textbox', { name: 'Rename Overview', exact: true }).fill('Welcome')
+  await page.getByRole('textbox', { name: 'Rename Overview', exact: true }).press('Enter')
+  await page.getByRole('button', { name: 'Change icon for Welcome', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Choose icon for Welcome' })).toBeVisible()
+  await page.getByRole('button', { name: 'Use rocket icon', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  const group = page.getByRole('treeitem').filter({ hasText: 'Get started' })
+  await group.press('F2')
+  await page.getByRole('textbox', { name: 'Rename Get started' }).fill('Discard this rename')
+  await page.getByRole('textbox', { name: 'Rename Get started' }).press('Escape')
+  await expect(group).toBeVisible()
+  await page.getByRole('button', { name: 'Collapse Get started' }).click()
+  await expect(page.getByRole('treeitem').filter({ hasText: 'Welcome' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Expand Get started' }).click()
+  await page.getByRole('button', { name: 'Save navigation', exact: true }).click()
+  await expect.poll(() => saved).toBeTruthy()
+  expect(saved.spaces[0].nav[0]).toMatchObject({ label: 'Get started', items: [{ file: 'index', title: 'Welcome', icon: 'rocket' }, { file: 'quickstart' }] })
+  await expect(page.locator('.nav-tree-details')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Open page', exact: true })).toHaveCount(0)
+})
+
+test('explorer drags pages into sections and stays usable on a narrow screen', async ({ page }) => {
+  let saved
+  await mockWorkspace(page, {}, { handle: async ({ method, path, request }) => {
+    if (path === '/api/navigation' && method === 'GET') return navigationTree
+    if (path === '/api/navigation' && method === 'PUT') { saved = request.postDataJSON(); return { ...navigationTree, fingerprint: 'nav-2', spaces: saved.spaces } }
+  } })
+  await page.goto('/pages?path=index.mdx')
+  await page.getByRole('treeitem').filter({ hasText: 'Events API' }).dragTo(page.getByRole('treeitem').filter({ hasText: 'Get started' }))
+  await page.getByRole('button', { name: 'Save navigation', exact: true }).click()
+  await expect.poll(() => saved).toBeTruthy()
+  expect(saved.spaces[0].nav).toHaveLength(1)
+  expect(saved.spaces[0].nav[0].items.map(node => node.file)).toEqual(['index', 'quickstart', 'reference/events'])
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.locator('.page-outline-toggle').click()
+  await expect(page.getByRole('tree', { name: 'Navigation' })).toBeVisible()
+  await page.getByRole('button', { name: 'Change icon for Overview' }).click()
+  await expect(page.getByRole('dialog', { name: 'Choose icon for Overview' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test('Settings → Branding edits the Doxbrix theme and only sends the changed fields', async ({ page }) => {
@@ -785,4 +1057,77 @@ test('Pages → Images & files lists assets with their uses and saves alt text',
   await page.getByRole('button', { name: 'Save alt text' }).click()
   await expect.poll(() => calls.includes('POST /api/assets/alt')).toBe(true)
   expect(altBody).toEqual({ path: 'assets/team.png', alt: 'The team settings page with the invite form open' })
+})
+
+test('new-project setup crawls an existing documentation site before it can be added', async ({ page }) => {
+  let polls = 0
+  const inspectBodies = []
+  await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null, cwd: '/tmp/widget' }, { handle: ({ method, path, request }) => {
+    if (method === 'POST' && path === '/api/setup/validate') {
+      const body = request.postDataJSON()
+      return { directoryPath: '/tmp/widget/my-product-docs', ...(body.sourcePath ? { sourcePath: body.sourcePath } : {}) }
+    }
+    if (method === 'POST' && path === '/api/docs-site/inspect') {
+      inspectBodies.push(request.postDataJSON())
+      return { id: 'crawl-1', url: 'https://docs.example.com/', status: 'running', startedAt: '2026-09-14T08:00:00.000Z', progress: { fetched: 0, discovered: 0 } }
+    }
+    if (method === 'GET' && path === '/api/docs-site/inspect/crawl-1') {
+      polls += 1
+      if (polls < 2) return { id: 'crawl-1', url: 'https://docs.example.com/', status: 'running', startedAt: '2026-09-14T08:00:00.000Z', progress: { fetched: 12, discovered: 40 } }
+      return { id: 'crawl-1', url: 'https://docs.example.com/', status: 'completed', startedAt: '2026-09-14T08:00:00.000Z', progress: { fetched: 40, discovered: 40 }, summary: { url: 'https://docs.example.com/', pages: 38, words: 12400, images: 9, discovered: 40, generator: 'docusaurus', discovery: ['sitemap', 'links'], truncated: false, pageLimit: 150, skipped: 2, brokenLinks: 1, warnings: [], samplePages: [{ path: '', title: 'Welcome', words: 120 }, { path: 'guide/install', title: 'Install', words: 640 }] } }
+    }
+    return undefined
+  } })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Continue/ }).click()
+  await page.getByRole('button', { name: 'Add source' }).click()
+  await page.getByRole('button', { name: 'Existing documentation' }).click()
+  const dialog = page.locator('.sources-reference-dialog')
+  await expect(dialog.getByRole('heading', { name: 'Add existing documentation' })).toBeVisible()
+  const addButton = dialog.getByRole('button', { name: 'Add source' })
+  await expect(addButton).toBeDisabled()
+  await dialog.getByLabel('Documentation site address').fill('https://docs.example.com/')
+  await dialog.getByRole('button', { name: 'Crawl site' }).click()
+  await expect(dialog.getByText('Reading the documentation site…')).toBeVisible()
+  await expect(dialog.getByText('38 pages ready to rewrite')).toBeVisible({ timeout: 8000 })
+  await expect(dialog.getByText(/built with docusaurus/)).toBeVisible()
+  await expect(dialog.getByText(/1 internal link on the site point/)).toBeVisible()
+  expect(inspectBodies).toEqual([{ url: 'https://docs.example.com/' }])
+  await expect(addButton).toBeEnabled()
+  await addButton.click()
+  await expect(page.getByText('Source added successfully!')).toBeVisible()
+  await expect(page.getByText('docs.example.com', { exact: true })).toBeVisible()
+  await expect(page.getByText('Docs site', { exact: true })).toBeVisible()
+  await expect(page.getByText('38 pages · 12,400 words · docusaurus')).toBeVisible()
+})
+
+test('plan review shows the existing documentation audit', async ({ page }) => {
+  const auditedPlan = {
+    ...readyPlan,
+    existingDocumentation: [{
+      source: 'legacy-docs',
+      summary: 'Accurate but shallow; installation is split across three pages.',
+      strengths: ['Clear terminology'],
+      findings: [{ severity: 'major', title: 'No troubleshooting', description: 'Readers have nowhere to go when a request fails.', pages: ['pages/guide/errors.md'] }],
+      coverage: { gaps: ['Event batching endpoint'], obsolete: ['Legacy v1 API page'], preserved: ['Rate-limit notes from support'], contradicted: ['Accepted response is 202, not 200'] },
+      pages: [
+        { path: 'pages/index.md', title: 'Welcome', url: 'https://docs.example.com/', disposition: 'rewrite', into: ['quickstart'], reason: 'Becomes the quickstart.' },
+        { path: 'pages/api/events.md', title: 'Events', url: 'https://docs.example.com/api/events', disposition: 'merge', into: ['events'], reason: 'Folded into the reference.' },
+        { path: 'pages/v1.md', title: 'v1 API', url: 'https://docs.example.com/v1', disposition: 'drop', into: [], reason: 'Obsolete.' },
+      ],
+    }],
+  }
+  await mockWorkspace(page, { receipt: null, documentationPlan: auditedPlan }, { handle: ({ method, path }) => (method === 'GET' && path === '/api/plans/plan-test/versions' ? [] : undefined) })
+  await page.goto('/update')
+  await expect(page.getByRole('heading', { name: 'Review documentation structure' })).toBeVisible()
+  const panel = page.locator('.plan-existing-docs-panel')
+  await expect(panel.getByRole('heading', { name: 'Existing documentation audit' })).toBeVisible()
+  await expect(panel.getByText('Accurate but shallow; installation is split across three pages.')).toBeVisible()
+  await expect(panel.getByText('Event batching endpoint')).toBeVisible()
+  await expect(panel.getByText('Accepted response is 202, not 200')).toBeVisible()
+  await expect(panel.getByText('No troubleshooting')).toBeVisible()
+  await panel.getByText('Where each existing page lands (3)').click()
+  await expect(panel.getByRole('cell', { name: /Welcome/ })).toBeVisible()
+  await expect(panel.getByText('Quickstart', { exact: true })).toBeVisible()
+  await expect(panel.getByText('Obsolete.', { exact: true })).toBeVisible()
 })

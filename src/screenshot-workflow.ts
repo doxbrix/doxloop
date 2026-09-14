@@ -731,7 +731,12 @@ export async function validateScreenshotManifest(
       const captureSteps = guide.steps.filter((step) => step.capture)
       const sequenceItems = new Set<number>()
       for (const step of captureSteps) {
-        if (!step.sequenceItem || step.sequenceItem < 1 || step.sequenceItem > captureSequence.length || sequenceItems.has(step.sequenceItem)) {
+        // A step numbered past the approved sequence is an extra state the
+        // writer found worth showing (a preview dialog after the approved
+        // result). It stays as a supplementary capture; the batch's screenshot
+        // maximum still bounds the total. Only a missing or repeated item
+        // means the approved story was not followed.
+        if (!step.sequenceItem || step.sequenceItem < 1 || sequenceItems.has(step.sequenceItem)) {
           const message = `Screenshot step ${step.id} in "${guide.page}" must identify one unique approved capture-sequence item.`
           if (!tolerate) throw new DoxloopError(message)
           defects.push(message)

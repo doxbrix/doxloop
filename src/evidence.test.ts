@@ -94,6 +94,23 @@ describe('evidence map storage', () => {
 
     await expect(readEvidenceMap(root)).rejects.toThrow('unsupported format')
   })
+
+  test('reads a page marked contradicted as one that needs a human', async () => {
+    // The writer had just marked the page's claim contradicted and used the
+    // same word for the page; a 33-page proposal was refused over it.
+    const root = await makeRoot()
+    const map = {
+      schemaVersion: 1,
+      pages: {
+        'guides/calendar.md': { sources: [{ source: 'product', paths: ['web/src/router.tsx'] }], confidence: 'contradicted', claimVerification: { 'The Calendar route exists': 'contradicted' } },
+        'guides/tags.md': { sources: [{ source: 'product' }], confidence: 'verified' },
+      },
+    }
+    await writeFile(join(root, EVIDENCE_MAP_FILE), `${JSON.stringify(map)}\n`, 'utf8')
+    const read = await readEvidenceMap(root)
+    expect(read?.pages['guides/calendar.md']).toMatchObject({ confidence: 'needs-human', claimVerification: { 'The Calendar route exists': 'contradicted' } })
+    expect(read?.pages['guides/tags.md']?.confidence).toBe('verified')
+  })
 })
 
 describe('pagesForChange', () => {

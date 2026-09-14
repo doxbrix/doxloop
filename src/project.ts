@@ -38,11 +38,13 @@ import type {
   DeploymentConfig,
   DocumentationBrief,
   DesignReference,
+  DocsSiteSource,
   DoxloopProject,
   DoxbrixNavNode,
   DoxbrixSiteConfig,
   GeneratorName,
   SourceBinding,
+  SourceKind,
   SyncConfig,
   SyncTrigger,
 } from './types.js'
@@ -306,8 +308,45 @@ function isSpecLocation(location: string): boolean {
   return isSpecUrl(location) || /\.(json|ya?ml)$/i.test(location)
 }
 
-export function sourceKind(source: SourceBinding): 'directory' | 'openapi' {
+export function sourceKind(source: SourceBinding): SourceKind {
   return source.kind ?? 'directory'
+}
+
+/**
+ * `--docs name=url` or `--docs url`: an existing documentation website to crawl.
+ * The returned binding is not yet materialized; its `path` holds the URL until
+ * the crawl writes the snapshot and replaces it with the snapshot directory.
+ */
+export function parseDocsSite(raw: string): SourceBinding {
+  const equals = raw.indexOf('=')
+  const looksNamed = equals > 0 && !/^https?:/i.test(raw.slice(0, equals))
+  const name = looksNamed ? raw.slice(0, equals).trim() : 'docs'
+  const location = (looksNamed ? raw.slice(equals + 1) : raw).trim()
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
+    throw new DoxloopError(`Invalid source name "${name}".`, 2)
+  }
+  if (!isSpecUrl(location)) {
+    throw new DoxloopError(
+      `Invalid documentation site "${raw}". Use the HTTP(S) address of the existing documentation, for example --docs https://docs.example.com or --docs legacy=https://docs.example.com/guide/.`,
+      2,
+    )
+  }
+  let url: URL
+  try {
+    url = new URL(location)
+  } catch {
+    throw new DoxloopError(`Invalid documentation site URL "${location}".`, 2)
+  }
+  if (url.username || url.password) {
+    throw new DoxloopError(`Invalid documentation site URL "${location}". Remove embedded credentials.`, 2)
+  }
+  url.hash = ''
+  return { name, path: url.toString(), kind: 'docs-site' }
+}
+
+/** A `docs-site` binding whose snapshot has not been crawled yet: its path is still the URL. */
+export function isUnmaterializedDocsSite(source: SourceBinding): boolean {
+  return sourceKind(source) === 'docs-site' && isSpecUrl(source.path)
 }
 
 export async function resolveSeparateProjectLayout(options: {
@@ -343,6 +382,12 @@ export async function validateProjectSourceBoundaries(
   for (const source of sources) {
     if (sourceKind(source) === 'openapi') {
       await (await import('./openapi.js')).loadOpenApiSource(projectRoot, source)
+      continue
+    }
+    if (sourceKind(source) === 'docs-site') {
+      if (isSpecUrl(source.path)) throw new DoxloopError(`Documentation site source "${source.name}" has not been crawled yet: ${source.path}`)
+      await (await import('./docs-site.js')).assertDocsSiteSnapshot(projectRoot, source)
+      await assertSeparateDirectories(resolve(projectRoot, source.path), projectRoot)
       continue
     }
     const sourceRoot = resolve(projectRoot, source.path)
@@ -745,6 +790,20 @@ function doxbrixSiteConfigProblem(value: unknown): string | undefined {
     return 'description must be a string.'
   }
   if (!Array.isArray(candidate.spaces)) return 'spaces must be an array.'
+  if (candidate.versions !== undefined) {
+    if (!Array.isArray(candidate.versions)) return 'versions must be an array.'
+    const slugs = new Set<string>()
+    for (const entry of candidate.versions) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.version !== 'string' || !entry.version.trim()) return 'Each documentation version needs a non-empty version string.'
+      if (slugs.has(entry.version)) return `Duplicate documentation version "${entry.version}".`
+      slugs.add(entry.version)
+      for (const key of ['label', 'tag']) if (entry[key] !== undefined && typeof entry[key] !== 'string') return `Documentation version ${key} must be a string.`
+      for (const key of ['default', 'isDefault']) if (entry[key] !== undefined && typeof entry[key] !== 'boolean') return `Documentation version ${key} must be a boolean.`
+    }
+    if (candidate.versions.length) for (const space of candidate.spaces) {
+      if (space && typeof space === 'object' && typeof space.version === 'string' && !slugs.has(space.version)) return `Space references unknown documentation version "${space.version}".`
+    }
+  }
 
   for (const [spaceIndex, value] of candidate.spaces.entries()) {
     const location = `spaces[${spaceIndex}]`
@@ -756,7 +815,7 @@ function doxbrixSiteConfigProblem(value: unknown): string | undefined {
       return `${location}.name must be a non-empty string.`
     }
     if (!Array.isArray(space.nav)) return `${location}.nav must be an array.`
-    const optionalStrings = ['slug', 'locale', 'parent', 'icon', 'tag']
+    const optionalStrings = ['slug', 'locale', 'parent', 'icon', 'tag', 'version']
     for (const key of optionalStrings) {
       if (space[key] !== undefined && typeof space[key] !== 'string') {
         return `${location}.${key} must be a string.`
@@ -868,11 +927,20 @@ function isSourceBindings(value: unknown): value is SourceBinding[] {
         typeof (source as Partial<SourceBinding>).path === 'string' &&
         ((source as Partial<SourceBinding>).kind === undefined ||
           (source as Partial<SourceBinding>).kind === 'directory' ||
-          (source as Partial<SourceBinding>).kind === 'openapi') &&
+          (source as Partial<SourceBinding>).kind === 'openapi' ||
+          (source as Partial<SourceBinding>).kind === 'docs-site') &&
+        isDocsSiteInfo((source as Partial<SourceBinding>).site) &&
         isSourceScope((source as Partial<SourceBinding>).scope) &&
         isRemoteSource((source as Partial<SourceBinding>).remote),
     )
   )
+}
+
+function isDocsSiteInfo(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const site = value as Partial<DocsSiteSource>
+  return typeof site.url === 'string' && typeof site.crawledAt === 'string' && typeof site.pages === 'number' && typeof site.hash === 'string'
 }
 
 function isSourceScope(value: unknown): boolean {

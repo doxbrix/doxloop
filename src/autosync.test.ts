@@ -271,6 +271,10 @@ describe('runSyncNow', () => {
           reasoning: 'high',
           screenshots: 'disabled',
         })
+        // The agent writes into a throwaway workspace, but the capture browser's
+        // saved sign-in is keyed by the project, so that root must travel along.
+        expect(options.root).not.toBe(root)
+        expect(options.captureAuthRoot).toBe(root)
         await writeFile(
           join(options.root, 'quickstart.mdx'),
           '---\ntitle: Quickstart\ndescription: Start the product with a clearer supported command.\n---\n\nRun the supported start command, then verify the service is ready.\n',

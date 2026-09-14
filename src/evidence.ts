@@ -15,13 +15,35 @@ export const EVIDENCE_MAP_FILE = join('.doxloop', 'evidence-map.json')
 export async function readEvidenceMap(root: string): Promise<EvidenceMap | undefined> {
   const path = join(root, EVIDENCE_MAP_FILE)
   if (!(await pathExists(path))) return undefined
-  const map = await readJson<unknown>(path)
+  const map = normalizeEvidenceConfidence(await readJson<unknown>(path))
   if (!isEvidenceMap(map)) {
     throw new DoxloopError(
       `${EVIDENCE_MAP_FILE} has an unsupported format. Delete it and run \`doxloop update\` to rebuild it.`,
     )
   }
   return map
+}
+
+/**
+ * A page whose evidence the writer found contradicted needs a person to look
+ * at it; "contradicted" is the claim-level word for that, and an agent that
+ * has just marked a claim contradicted sometimes writes the same word as the
+ * page's confidence. That is a wording slip, not a broken file: refusing the
+ * whole map for it discarded complete generation runs.
+ */
+function normalizeEvidenceConfidence(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const pages = (value as { pages?: unknown }).pages
+  if (!pages || typeof pages !== 'object' || Array.isArray(pages)) return value
+  let changed = false
+  const normalized = Object.fromEntries(Object.entries(pages as Record<string, unknown>).map(([page, evidence]) => {
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [page, evidence]
+    const confidence = (evidence as { confidence?: unknown }).confidence
+    if (confidence !== 'contradicted') return [page, evidence]
+    changed = true
+    return [page, { ...(evidence as object), confidence: 'needs-human' }]
+  }))
+  return changed ? { ...(value as object), pages: normalized } : value
 }
 
 export async function writeEvidenceMap(root: string, map: EvidenceMap): Promise<void> {

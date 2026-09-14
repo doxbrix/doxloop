@@ -7,11 +7,23 @@ export interface SourceRemote {
   apiBaseUrl?: string
 }
 
+export interface DocsSiteInfo {
+  url: string
+  crawledAt: string
+  pages: number
+  words: number
+  hash: string
+  generator?: string
+  truncated?: boolean
+}
+
 export interface Source {
   name: string
   path: string
-  kind?: 'directory' | 'openapi'
+  kind?: 'directory' | 'openapi' | 'docs-site'
   remote?: SourceRemote
+  /** Present on `docs-site` sources: the crawled documentation website. */
+  site?: DocsSiteInfo
   scope?: { space?: string; routePrefix?: string; navigationGroup?: string; sharedPages?: string[] }
 }
 
@@ -28,7 +40,7 @@ export interface SyncConfig {
 
 export interface SourceIntelligence {
   generatedAt: string
-  health: Array<{ name: string; connector: string; status: 'healthy' | 'warning' | 'error'; checkedAt: string; lastSuccessfulAt?: string; lastMonitoringAt?: string; location: string; provider: string; branch?: string; subdirectory?: string; monitored: boolean; revision?: string; summary: string; details: string[]; openapi?: { title: string; version: string; specificationVersion: string; servers: string[]; securitySchemes: string[]; schemas: string[]; operationCount: number }; scope?: Source['scope'] }>
+  health: Array<{ name: string; connector: string; status: 'healthy' | 'warning' | 'error'; checkedAt: string; lastSuccessfulAt?: string; lastMonitoringAt?: string; location: string; provider: string; branch?: string; subdirectory?: string; monitored: boolean; revision?: string; summary: string; details: string[]; openapi?: { title: string; version: string; specificationVersion: string; servers: string[]; securitySchemes: string[]; schemas: string[]; operationCount: number }; docsSite?: DocsSiteInfo & { brokenLinks: number }; scope?: Source['scope'] }>
   coverage: {
     metrics: Array<{ id: string; label: string; documented: number; total: number; excluded: number; percent: number; status?: 'measured' | 'unknown'; denominator: string; items: CoverageItem[] }>
     groups: Array<{ source: string; scope?: Source['scope']; documented: number; total: number; percent: number; status?: 'measured' | 'unknown' }>
@@ -184,6 +196,17 @@ export interface DocumentationPlan {
   error?: string
   failure?: { stage: 'propose' | 'revise' | 'generate'; proposalId?: string; resumable: boolean; ignorable: boolean }
   advisories?: string[]
+  /** Present when a docs-site source is configured: the planner's audit of each existing documentation site. */
+  existingDocumentation?: ExistingDocumentationAssessment[]
+}
+
+export interface ExistingDocumentationAssessment {
+  source: string
+  summary: string
+  strengths: string[]
+  findings: Array<{ severity: 'blocker' | 'major' | 'minor'; title: string; description: string; pages: string[] }>
+  coverage: { gaps: string[]; obsolete: string[]; preserved: string[]; contradicted: string[] }
+  pages: Array<{ path: string; title?: string; url?: string; disposition: 'rewrite' | 'merge' | 'preserve' | 'drop'; into: string[]; reason: string }>
 }
 
 export interface ValidationIssue {
@@ -400,6 +423,7 @@ export interface GeneratorCandidate {
 
 /** A read-only look at a folder before it is imported. */
 export interface ProjectInspection {
+  conversion?: 'mintlify'
   root: string
   alreadyProject: boolean
   detection: { candidates: GeneratorCandidate[]; recommended?: GeneratorCandidate }
@@ -414,6 +438,7 @@ export interface ProjectInspection {
 }
 
 export interface UiState {
+  mintlifyImport?: { pageCount: number; warnings: string[]; unmapped: string[] } | null
   projectFound: boolean
   cwd: string
   root?: string
@@ -481,7 +506,7 @@ export type NavigationNode =
 
 export interface NavigationSupport { icons: boolean; hidden: boolean; labels: boolean; links: boolean; dividers: boolean; spaces: boolean }
 
-export interface NavigationSpace { name: string; icon?: string; nav: NavigationNode[] }
+export interface NavigationSpace { name: string; version?: string; icon?: string; nav: NavigationNode[] }
 
 export interface NavigationTree {
   generator: string

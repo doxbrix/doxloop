@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
@@ -105,4 +105,18 @@ describe('capture sign-in store', () => {
     expect(sessionCookieHeader(state, 'http://app.example.com/app')).toBeUndefined()
     expect(sessionCookieHeader(undefined, 'http://localhost:3000')).toBeUndefined()
   })
+})
+
+test('a secrets file left behind by a killed run is swept before the next run writes its own', async () => {
+  const root = '/tmp/doxloop-project-swept'
+  await saveCaptureCredentials(root, { username: 'docs', password: 'secret' })
+  const directory = captureAuthDirectory(root)
+  // No process can have this id on a normal system, so the file reads as orphaned.
+  await writeFile(join(directory, 'secrets-2147483646-1.env'), 'DOXLOOP_APP_USERNAME=old\n')
+  const material = await prepareCaptureAuth(root)
+  const names = (await readdir(directory)).filter((name) => name.startsWith('secrets-'))
+  expect(names).toEqual([material!.secretsPath!.split('/').pop()])
+  expect(names[0]).toContain(`secrets-${process.pid}-`)
+  await material!.cleanup()
+  expect((await readdir(directory)).filter((name) => name.startsWith('secrets-'))).toEqual([])
 })

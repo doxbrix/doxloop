@@ -1,46 +1,67 @@
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useMemo, useState } from 'preact/hooks'
 import { api, post, put } from './api'
 import { Button, Note } from './components'
 import { Icon } from './icons'
 import { NavigationEditor } from './NavigationEditor'
-import { fromItems, itemsToPlanNavigation, planNavigationToItems, toItems, type NavItem } from './navigation-tree'
+import { NavigationExplorer } from './NavigationExplorer'
+import { flattenItems, fromItems, itemsToPlanNavigation, planNavigationToItems, toItems, type NavItem } from './navigation-tree'
 import type { DocumentationPlan, DocumentationPlanNavigation, NavigationTree } from './types'
 
 type Action = <T>(run: () => Promise<T>, success?: string, reload?: boolean) => Promise<T | undefined>
 
 /**
- * Pages → Navigation. Loads the generator's navigation as a tree, lets the
+ * Loads the generator's navigation as a tree, lets the
  * person reorder, group, relabel, hide, and add pages, and writes it back
  * through the navigation service with the fingerprint it was loaded with.
  * The preview frame beside it reloads after every save.
  */
-export function NavigationView({ act, onError, previewUrl }: { act: Action; onError: (error: string) => void; previewUrl?: string }) {
+export function NavigationView({ act, onError, previewUrl, embedded = false, onStatus, onSaved, onSelectPage, activePath, selectedPaths, onTogglePage, pages = [], refreshToken }: {
+  act: Action; onError: (error: string) => void; previewUrl?: string; embedded?: boolean
+  onStatus?: (dirty: boolean, saving: boolean) => void
+  onSaved?: () => Promise<void>
+  onSelectPage?: (path: string) => void
+  activePath?: string
+  pages?: Array<{ path: string; title: string }>
+  refreshToken?: number
+  selectedPaths?: string[]
+  onTogglePage?: (path: string) => void
+}) {
   const [tree, setTree] = useState<NavigationTree>()
-  const [spaces, setSpaces] = useState<Array<{ name: string; items: NavItem[] }>>([])
+  const [spaces, setSpaces] = useState<Array<{ name: string; version?: string; items: NavItem[] }>>([])
   const [spaceIndex, setSpaceIndex] = useState(0)
   const [saving, setSaving] = useState(false)
   const [conflict, setConflict] = useState('')
+  const [loadError, setLoadError] = useState('')
   const [frameUrl, setFrameUrl] = useState(previewUrl)
   const [frameNonce, setFrameNonce] = useState(0)
 
   const load = async () => {
+    setLoadError('')
     try {
       const raw = await api<NavigationTree>('/api/navigation')
       const next: NavigationTree = { ...raw, spaces: raw.spaces ?? [], orphans: raw.orphans ?? [], icons: raw.icons ?? [], supports: raw.supports ?? { icons: false, hidden: false, labels: false, links: false, dividers: false, spaces: false } }
       setTree(next)
-      setSpaces(next.spaces.map((space) => ({ name: space.name, items: toItems(space.nav) })))
+      setSpaces(next.spaces.map((space) => ({ name: space.name, ...(space.version ? { version: space.version } : {}), items: toItems(space.nav) })))
       setConflict('')
-    } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) { setLoadError(cause instanceof Error ? cause.message : String(cause)) }
   }
-  useEffect(() => { void load() }, [])
+
   useEffect(() => {
-    if (frameUrl || !tree?.editable) return
+    if (embedded || frameUrl || !tree?.editable) return
     void post<{ url: string }>('/api/preview/start', { open: false }).then((result) => setFrameUrl(result.url)).catch(() => undefined)
   }, [tree?.editable, frameUrl])
 
-  const saved = useMemo(() => JSON.stringify(tree?.spaces.map((space) => ({ name: space.name, nav: space.nav.map(stripDerived) })) ?? []), [tree])
-  const current = JSON.stringify(spaces.map((space) => ({ name: space.name, nav: fromItems(space.items) })))
+  const saved = useMemo(() => JSON.stringify(tree?.spaces.map((space) => ({ name: space.name, ...(space.version ? { version: space.version } : {}), nav: space.nav.map(stripDerived) })) ?? []), [tree])
+  const current = JSON.stringify(spaces.map((space) => ({ name: space.name, ...(space.version ? { version: space.version } : {}), nav: fromItems(space.items) })))
   const dirty = Boolean(tree) && current !== saved
+  useEffect(() => { if (!dirty && !saving) void load() }, [refreshToken])
+  useEffect(() => { const matches = (space: typeof spaces[number]) => flattenItems(space.items).some(({ item }) => item.node.type === 'page' && item.node.path === activePath); if (spaces[spaceIndex] && matches(spaces[spaceIndex]!)) return; const index = spaces.findIndex(matches); if (index >= 0) setSpaceIndex(index) }, [activePath])
+  useLayoutEffect(() => { onStatus?.(dirty, saving) }, [dirty, saving])
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => { if (dirty || saving) { event.preventDefault(); event.returnValue = '' } }
+    addEventListener('beforeunload', guard)
+    return () => removeEventListener('beforeunload', guard)
+  }, [dirty, saving])
   const space = spaces[spaceIndex] ?? spaces[0]
   const orphans = useMemo(() => {
     if (!tree) return []
@@ -49,66 +70,68 @@ export function NavigationView({ act, onError, previewUrl }: { act: Action; onEr
   }, [tree, current])
 
   const save = async () => {
-    if (!tree || !dirty) return
+    if (!tree || !dirty || saving) return
     setSaving(true)
     try {
       const next = await act(() => put<NavigationTree>('/api/navigation', {
         fingerprint: tree.fingerprint,
-        spaces: spaces.map((entry) => ({ name: entry.name, nav: fromItems(entry.items) })),
+        spaces: spaces.map((entry) => ({ name: entry.name, ...(entry.version ? { version: entry.version } : {}), nav: fromItems(entry.items) })),
       }).catch((error: Error) => {
         if (/changed on disk/.test(error.message)) setConflict(error.message)
         throw error
       }), 'Navigation saved', false)
       if (next) {
         setTree(next)
-        setSpaces(next.spaces.map((entry) => ({ name: entry.name, items: toItems(entry.nav) })))
+        setSpaces(next.spaces.map((entry, index) => ({ name: entry.name, ...(entry.version ? { version: entry.version } : {}), items: retainItemIds(toItems(entry.nav), spaces[index]?.items ?? []) })))
         setFrameNonce((value) => value + 1)
+        await onSaved?.()
       }
-    } finally { setSaving(false) }
+    } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setSaving(false) }
   }
-  const discard = () => { if (tree) setSpaces(tree.spaces.map((entry) => ({ name: entry.name, items: toItems(entry.nav) }))) }
+  const discard = () => { if (tree) setSpaces(tree.spaces.map((entry) => ({ name: entry.name, ...(entry.version ? { version: entry.version } : {}), items: toItems(entry.nav) }))) }
 
+  if (!tree && loadError) return <Note tone="bad"><span>{loadError}</span><Button size="sm" onClick={() => void load()}>Retry navigation</Button></Note>
   if (!tree) return <div class="page-list-empty"><span class="spinner" />Loading navigation…</div>
+  if (!tree.editable && embedded) return <NavigationExplorer items={pages.map(page => ({ id: page.path, node: { type: 'page', file: page.path, path: page.path, pageTitle: page.title } }))} onChange={() => undefined} supports={tree.supports} icons={[]} editable={false} requiresEveryPage={false} orphans={[]} {...(onSelectPage ? { onSelectPage } : {})} {...(onTogglePage ? { onTogglePage } : {})} {...(selectedPaths ? { selectedPaths } : {})} {...(activePath ? { activePath } : {})} />
   if (!tree.editable) {
-    return <div class="navigation-view">
+    return <div class={`navigation-view ${embedded ? 'navigation-view-embedded' : ''}`}>
       <section class="navigation-editor-pane">
         <Note>{tree.reason}</Note>
         {tree.configFile && <p class="branding-config-hint">Navigation file: <code>{tree.configFile}</code></p>}
       </section>
     </div>
   }
-  return <div class="navigation-view">
+  const versions = [...new Set(spaces.map(entry => entry.version).filter((version): version is string => Boolean(version)))];
+  const Editor = embedded ? NavigationExplorer : NavigationEditor
+  return <div class={`navigation-view ${embedded ? 'navigation-view-embedded' : ''}`}>
     <section class="navigation-editor-pane">
-      <header class="navigation-editor-head">
-        <div>
-          <h2>Sidebar navigation</h2>
-          <p>Reorder pages, group them into sections, rename labels{tree.supports.icons ? ', set icons' : ''}{tree.supports.hidden ? ', or hide pages' : ''}. Saved to <code>{tree.configFile}</code>.</p>
-        </div>
-        <div class="navigation-editor-actions">
-          <Button size="sm" tone="ghost" disabled={!dirty || saving} onClick={discard}>Discard</Button>
-          <Button size="sm" tone="primary" busy={saving} disabled={!dirty} onClick={() => void save()}>Save navigation</Button>
-        </div>
-      </header>
+      {embedded ? <header class="explorer-header"><h2>Explorer</h2><span class="explorer-save-state" role="status">{saving ? 'Saving…' : dirty ? 'Unsaved' : 'Saved'}</span><Button size="sm" tone="ghost" aria-label="Discard navigation" title="Discard navigation changes" disabled={!dirty || saving} onClick={discard}><Icon name="undo" size={14} /></Button><Button size="sm" tone="ghost" aria-label="Save navigation" title="Save navigation" disabled={!dirty} busy={saving} onClick={() => void save()}><Icon name="check" size={15} /></Button></header> : <header class="navigation-editor-head"><h2>Sidebar navigation</h2><div class="navigation-editor-actions"><Button size="sm" disabled={!dirty || saving} onClick={discard}>Discard</Button><Button size="sm" busy={saving} disabled={!dirty} onClick={() => void save()}>Save navigation</Button></div></header>}
       {conflict && <Note tone="bad"><span class="note-body">{conflict}<span class="note-actions"><Button size="sm" onClick={() => void load()}>Reload navigation</Button></span></span></Note>}
-      {spaces.length > 1 && <div class="navigation-spaces" role="tablist" aria-label="Spaces">{spaces.map((entry, index) => <button type="button" role="tab" key={entry.name} aria-selected={index === spaceIndex} class={index === spaceIndex ? 'active' : ''} onClick={() => setSpaceIndex(index)}>{entry.name}</button>)}</div>}
-      {orphans.length > 0 && <Note tone={tree.requiresEveryPage ? 'warn' : 'info'}>{orphans.length} page{orphans.length === 1 ? ' is' : 's are'} not in the navigation{tree.requiresEveryPage ? ', which validation reports as an error' : ''}. Use “Add page” to place {orphans.length === 1 ? 'it' : 'them'}.</Note>}
-      {space && <NavigationEditor
+      {versions.length > 1 && <label class="navigation-editor-head">Version<select aria-label="Documentation version" value={spaces[spaceIndex]?.version} onChange={(event) => setSpaceIndex(spaces.findIndex(entry => entry.version === event.currentTarget.value))}>{versions.map(version => <option key={version} value={version}>{version}</option>)}</select></label>}
+      {spaces.length > 1 && <div class="navigation-spaces" role="tablist" aria-label="Spaces">{spaces.map((entry, index) => (versions.length < 2 || entry.version === spaces[spaceIndex]?.version) && <button type="button" role="tab" key={index} aria-selected={index === spaceIndex} class={index === spaceIndex ? 'active' : ''} onClick={() => setSpaceIndex(index)}>{entry.name}</button>)}</div>}
+      {!embedded && orphans.length > 0 && <Note tone={tree.requiresEveryPage ? 'warn' : 'info'}>{orphans.length} page{orphans.length === 1 ? ' is' : 's are'} not in the navigation{tree.requiresEveryPage ? ', which validation reports as an error' : ''}. Use “Add page” to place {orphans.length === 1 ? 'it' : 'them'}.</Note>}
+      {space && <Editor
         items={space.items}
         onChange={(items) => setSpaces(spaces.map((entry, index) => (index === spaceIndex ? { ...entry, items } : entry)))}
         supports={tree.supports}
         icons={tree.icons}
-        editable
+        editable={!saving}
+        {...(selectedPaths ? { selectedPaths } : {})}
+        {...(onTogglePage ? { onTogglePage } : {})}
+        {...(onSelectPage ? { onSelectPage } : {})}
+        {...(activePath ? { activePath } : {})}
         requiresEveryPage={tree.requiresEveryPage}
         orphans={orphans}
       />}
     </section>
-    <aside class="navigation-preview-pane" aria-label="Navigation preview">
+    {!embedded && <aside class="navigation-preview-pane" aria-label="Navigation preview">
       <div class="preview-chrome" aria-hidden="true"><span class="preview-dots"><i /><i /><i /></span><code>/</code></div>
       {frameUrl
         ? <iframe key={`${frameUrl}:${frameNonce}`} title="Navigation preview" src={`${frameUrl}/`} />
         : <div class="preview-placeholder"><span class="spinner" /><strong>Preview is starting…</strong></div>}
       {dirty && <div class="navigation-preview-note"><Icon name="info" size={13} />The preview shows the saved navigation. Save to see your changes.</div>}
-    </aside>
+    </aside>}
   </div>
 }
 
@@ -156,4 +179,8 @@ function collectFiles(node: NavigationTree['spaces'][number]['nav'][number]): st
   if (node.type === 'page') return [node.file]
   if (node.type === 'group') return node.items.flatMap(collectFiles)
   return []
+}
+
+function retainItemIds(next: NavItem[], previous: NavItem[]): NavItem[] {
+  return next.map((item, index) => ({ ...item, id: previous[index]?.id ?? item.id, ...(item.children ? { children: retainItemIds(item.children, previous[index]?.children ?? []) } : {}) }))
 }

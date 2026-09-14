@@ -190,9 +190,11 @@ async function startDoxbrixPreview(
           ...(page.canonical ? { canonical: page.canonical } : {}),
           ...(page.socialImage ? { socialImage: page.socialImage } : {}),
           current: requested,
+          ...(url.searchParams.get('version') ? { docVersion: url.searchParams.get('version')! } : {}),
           ...(localEditorUrl(process.env.DOXLOOP_CONTROL_CENTER_URL, relative(options.root, pagesById.get(requested)!)) ? { editorUrl: localEditorUrl(process.env.DOXLOOP_CONTROL_CENTER_URL, relative(options.root, pagesById.get(requested)!))! } : {}),
           rendered,
           ...(url.searchParams.get('embed') === 'page' ? { embedded: true } : {}),
+          ...(url.searchParams.get('workspace') === '1' ? { workspace: true } : {}),
           ...(qualityConfig.readerVerification?.enabled && verificationMetadata?.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')]
             ? { verification: verificationMetadata.pages[relative(options.root, pagesById.get(requested)!).replace(/\\/g, '/')] }
             : {}),
@@ -259,19 +261,32 @@ export function doxbrixDocument(input: {
   canonical?: string
   socialImage?: string
   current: string
+  docVersion?: string
   rendered: { html: string; toc: TocEntry[] }
   verification?: { state: string; verifiedOn?: string; revisions: Record<string, string>; locale: string }
   editorUrl?: string
   embedded?: boolean
+  workspace?: boolean
   /** URL prefix used by static exports hosted below an origin, such as GitHub project pages. */
   basePath?: string
   /** Static builds have no preview event stream. */
   liveReload?: boolean
 }): string {
-  const visibleSpaces = input.site.spaces.filter((space) => hasVisibleNavigation(space.nav))
+  const versions = input.site.versions ?? []
+  const defaultVersion = defaultDocVersion(input.site)
+  const contexts = (versions.length ? versions.map((entry) => entry.version) : [undefined]).map((version) => {
+    const spaces = input.site.spaces.filter((space) => (!versions.length || (space.version ?? defaultVersion) === version) && hasVisibleNavigation(space.nav))
+    return { version, spaces, matching: spaces.find((space) => containsPage(space.nav, input.current)) }
+  })
+  const context = contexts.find((entry) => entry.version === input.docVersion && entry.matching)
+    ?? contexts.find((entry) => entry.version === defaultVersion && entry.matching)
+    ?? contexts.find((entry) => entry.matching)
+    ?? contexts.find((entry) => entry.version === defaultVersion)
+    ?? contexts[0]!
+  const visibleSpaces = context.spaces
   const showTabs = visibleSpaces.length > 1
   const activeSpace =
-    visibleSpaces.find((space) => containsPage(space.nav, input.current)) ??
+    context.matching ??
     visibleSpaces[0]
   const primary = themeColor(input.site, 'primaryColor', '#6366f1')
   const primaryLight = themeColor(input.site, 'lightColor', primary)
@@ -299,16 +314,16 @@ export function doxbrixDocument(input: {
     themeString(input.site, 'favicon', '') ||
     themeString(input.site, 'faviconDark', '')
   const siteName = input.site.name?.trim() || 'Documentation'
-  const tabs = visibleSpaces
+  const tabsFor = (entry: typeof context) => entry.spaces
     .map((space) => {
       const first = firstPage(space.nav)
-      const active = space === activeSpace ? ' active' : ''
+      const active = space === (entry.matching ?? entry.spaces[0]) ? ' active' : ''
       const tabIcon =
         typeof space.icon === 'string' && space.icon.trim()
           ? space.icon
           : spaceIcon(space.name)
       const tabTag =
-        typeof space.tag === 'string' && space.tag
+        space.tag
           ? `<span class="dxb-atlas-tab-tag">${escapeHtml(space.tag)}</span>`
           : ''
       const label = `<span class="dxb-atlas-tab-icon">${brandIcon(tabIcon, 16)}</span><span>${escapeHtml(space.name)}</span>${tabTag}`
@@ -317,11 +332,15 @@ export function doxbrixDocument(input: {
         : `<span class="dxb-atlas-tab${active}">${label}</span>`
     })
     .join('')
-  const first = firstSitePage(input.site) ?? ''
+  const first = firstPageInVersion(input.site, context.version) ?? firstSitePage(input.site) ?? ''
   const logoHref = safeHref(themeString(input.site, 'logoHref', `/${first}`), `/${first}`)
-  const leftnav = activeSpace
-    ? `<aside class="dp-leftnav" aria-label="Documentation navigation"><div class="dp-nav-tree">${navTree(activeSpace.nav, input.current)}</div></aside>`
-    : ''
+  const leftnav = contexts.map((entry) => {
+    const space = entry.matching ?? entry.spaces[0]
+    if (!space) return ''
+    const attrs = versions.length ? ` data-doc-version="${escapeAttr(entry.version!)}" data-current-version-page="${Boolean(entry.matching)}" data-version-eyebrow="${escapeAttr(groupContainingPage(space.nav, input.current) ?? '')}"` : ''
+    return `<aside class="dp-leftnav" aria-label="Documentation navigation"${attrs}${entry !== context ? ' hidden' : ''}>${versionSwitcher(input.site, entry.version)}<div class="dp-nav-tree">${navTree(space.nav, input.current)}</div></aside>`
+  }).join('')
+  const tabs = contexts.filter((entry) => entry.spaces.length > 1).map((entry) => `<div class="dxb-atlas-tabs-bar"${versions.length ? ` data-doc-version="${escapeAttr(entry.version!)}"` : ''}${entry !== context ? ' hidden' : ''}><nav class="dxb-atlas-tabs" aria-label="Documentation spaces">${tabsFor(entry)}</nav></div>`).join('')
   const toc = tocHtml(input.rendered.toc)
   const groupLabel = activeSpace
     ? groupContainingPage(activeSpace.nav, input.current)
@@ -398,7 +417,7 @@ export function doxbrixDocument(input: {
         <button class="dp-theme-toggle" type="button" aria-label="Switch color theme" aria-pressed="${resolvedMode === 'dark'}" data-theme-toggle>${icon(resolvedMode === 'dark' ? 'sun' : 'moon', 17)}</button>
       </div>
     </div></div>
-    ${showTabs ? `<div class="dxb-atlas-tabs-bar"><nav class="dxb-atlas-tabs" aria-label="Documentation spaces">${tabs}</nav></div>` : ''}
+    ${tabs}
   </header>
   <div class="dp-body">
     ${leftnav}
@@ -425,6 +444,14 @@ export function doxbrixDocument(input: {
   </div>
 </div>
 <script>
+  ${input.embedded && input.workspace ? `document.addEventListener('click', function(event) {
+    const link = event.target.closest('a[href]');
+    if (!link) return;
+    const target = new URL(link.href, location.href);
+    if (target.origin !== location.origin || (target.pathname === location.pathname && target.hash)) return;
+    event.preventDefault();
+    parent.postMessage({ type: 'doxloop:preview-navigate', href: target.href }, '*');
+  });` : ''}
   const root = document.querySelector('.dp-root--published');
   let colorTheme = root?.dataset.projectColorTheme || 'system';
   try {
@@ -889,6 +916,7 @@ export function doxbrixDocument(input: {
   });
 </script>
 ${MERMAID_PREVIEW_SCRIPT}
+${versions.length ? versionContextScript(layout.tabsHeight) : ''}
 </body>
 </html>`
   return prefixStaticReferences(document, input.basePath)
@@ -1012,7 +1040,68 @@ function firstPage(nodes: DoxbrixNavNode[]): string | undefined {
   return undefined
 }
 
-function firstSitePage(site: DoxbrixSiteConfig): string | undefined {
+function defaultDocVersion(site: DoxbrixSiteConfig): string | undefined {
+  const versions = site.versions ?? []
+  return (versions.find((entry) => entry.default === true || entry.isDefault === true) ?? versions[0])?.version
+}
+
+function firstPageInVersion(site: DoxbrixSiteConfig, version: string | undefined): string | undefined {
+  for (const space of site.spaces) {
+    if (site.versions?.length && (space.version ?? defaultDocVersion(site)) !== version) continue
+    const first = firstPage(space.nav)
+    if (first) return first
+  }
+  return undefined
+}
+
+// Mirrors the Doxbrix CLI reader: default/isDefault and a sidebar dropdown.
+function versionSwitcher(site: DoxbrixSiteConfig, version: string | undefined): string {
+  const versions = site.versions ?? []
+  if (versions.length < 2) return ''
+  const active = versions.find((entry) => entry.version === version) ?? versions[0]!
+  const label = (entry: typeof active) => `<span class="dp-version-label">${escapeHtml(entry.label ?? entry.version)}</span>${entry.tag ? `<span class="dp-version-tag">${escapeHtml(entry.tag)}</span>` : ''}`
+  const options = versions.map((entry) => {
+    const first = firstPageInVersion(site, entry.version)
+    return first
+      ? `<a class="dp-version-option${entry === active ? ' active' : ''}" href="/${escapeAttr(first)}?version=${escapeAttr(encodeURIComponent(entry.version))}"${entry === active ? ' aria-current="true"' : ''}>${label(entry)}</a>`
+      : `<span class="dp-version-option" aria-disabled="true">${label(entry)}</span>`
+  }).join('')
+  return `<details class="dp-version-switcher"><summary class="dp-version-trigger" aria-label="Documentation version: ${escapeAttr(active.label ?? active.version)}">${label(active)}${icon('chevron-down', 12)}</summary><nav class="dp-version-menu" aria-label="Documentation versions">${options}</nav></details>`
+}
+
+function versionContextScript(tabsHeight: number): string {
+  // Shared pages have one static HTML file. Keep the selected version in their URL
+  // and select the matching pre-rendered navigation for previews and static hosts.
+  return `<script>
+  (() => {
+    const sides = [...document.querySelectorAll('aside[data-doc-version]')];
+    const requested = new URL(location.href).searchParams.get('version');
+    const side = sides.find((entry) => entry.dataset.docVersion === requested && entry.dataset.currentVersionPage === 'true') || sides.find((entry) => !entry.hidden);
+    if (!side) return;
+    const version = side.dataset.docVersion;
+    document.querySelectorAll('[data-doc-version]').forEach((entry) => { entry.hidden = entry.dataset.docVersion !== version; });
+    const tabs = [...document.querySelectorAll('.dxb-atlas-tabs-bar')].find((entry) => !entry.hidden);
+    document.querySelector('.dp-root')?.style.setProperty('--dxb-tabs-height', tabs ? '${tabsHeight}px' : '0px');
+    const eyebrow = document.querySelector('.dxb-atlas-eyebrow');
+    if (eyebrow) eyebrow.textContent = side.dataset.versionEyebrow || '';
+    const logo = document.querySelector('.dp-topnav-logo');
+    const home = side.querySelector('.dp-version-option.active');
+    if (logo && home) logo.href = home.href;
+    const preserve = (link) => {
+      if (!link || link.closest('.dp-version-switcher') || !link.getAttribute('href') || link.getAttribute('href').startsWith('#')) return;
+      const url = new URL(link.href, location.href);
+      if (url.origin !== location.origin || /\\.[a-z0-9]+$/i.test(url.pathname) && !/\\.mdx?$/i.test(url.pathname)) return;
+      if (!url.searchParams.has('version')) { url.searchParams.set('version', version); link.href = url.href; }
+    };
+    document.querySelectorAll('a[href]').forEach(preserve);
+    document.addEventListener('click', (event) => preserve(event.target.closest('a[href]')), true);
+  })();
+  </script>`
+}
+
+export function firstSitePage(site: DoxbrixSiteConfig): string | undefined {
+  const defaultFirst = firstPageInVersion(site, defaultDocVersion(site))
+  if (defaultFirst) return defaultFirst
   for (const space of site.spaces) {
     const first = firstPage(space.nav)
     if (first) return first

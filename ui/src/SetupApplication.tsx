@@ -4,11 +4,12 @@ import './SetupApplication.css'
 import { api, post, NO_TIMEOUT } from './api'
 import { Button, Combo, Field, Input, Note, Segmented, Select, Textarea, Toggle } from './components'
 import { Icon } from './icons'
+import { DocsSiteSourceFields, describeInspection, type DocsSiteInspection } from './DocsSiteSourceFields'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
 import { ImportExistingPanel } from './ProjectSwitcher'
 import { AgentCapabilityMatrix } from './agent-capabilities'
 import { GeneratorPreflightPanel, GeneratorTierBadge, GeneratorTierMatrix } from './generator-tiers'
-import { DEFAULT_READER_OUTCOME, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileStatus, setupDocumentationPlanRequest } from './setup-plan'
+import { DEFAULT_READER_OUTCOME, batchLimitsForScope, describeBatchLimits, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupStepIssue } from './setup-plan'
 import type { GeneratorPreflight, UiJob, UiState } from './types'
 
 const DOXLOOP_LOGO = new URL('../../assets/brand/doxloop-logo-light.png', import.meta.url).href
@@ -20,7 +21,7 @@ type SetupCaptureAuth = { session?: { savedAt: string; origin: string; cookies: 
 
 type SetupSource = {
   name: string
-  sourceKind: 'directory' | 'openapi'
+  sourceKind: 'directory' | 'openapi' | 'docs-site'
   sourceLocation: 'git' | 'local'
   sourcePath: string
   repository: string
@@ -32,9 +33,12 @@ type SetupSource = {
   specInput: 'file' | 'url'
   specContent: string
   openapiSummary?: OpenApiSummary
+  /** docs-site: the completed crawl the source is created from. */
+  inspectionId?: string
+  docsSite?: DocsSiteInspection['summary']
 }
 
-type SourceFlowStep = 'closed' | 'type' | 'source-location' | 'git-access' | 'git-connect' | 'git-select' | 'local' | 'openapi-format' | 'openapi-input'
+type SourceFlowStep = 'closed' | 'type' | 'source-location' | 'git-access' | 'git-connect' | 'git-select' | 'local' | 'openapi-format' | 'openapi-input' | 'docs-site'
 
 type SetupGuidancePreferences = {
   experienceLevel: 'beginner' | 'intermediate' | 'advanced' | 'mixed'
@@ -52,6 +56,16 @@ function repositoryProvider(repository: string): 'github' | 'gitlab' | 'git' {
   if (value.includes('gitlab.com') || value.includes('gitlab.')) return 'gitlab'
   if (value.includes('github.com') || value.includes('github.')) return 'github'
   return 'git'
+}
+
+function docsSiteHostName(url: string): string | undefined {
+  try {
+    const parsed = new URL(url.trim())
+    const section = parsed.pathname.replace(/\/+$/, '').split('/').filter(Boolean).pop()
+    return section && !/^(docs?|documentation|help|guide|guides|manual)$/i.test(section) ? `${parsed.hostname} ${section}` : parsed.hostname
+  } catch {
+    return undefined
+  }
 }
 
 function repositoryProviderIcon(repository: string): string {
@@ -128,6 +142,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   useEffect(() => { setSourceAddedNotice(false) }, [step])
   const [setupSpecFileName, setSetupSpecFileName] = useState('')
   const setupSpecInput = useRef<HTMLInputElement>(null)
+  const [docsSiteInspection, setDocsSiteInspection] = useState<DocsSiteInspection>()
   const [savingSource, setSavingSource] = useState(false)
   const [pathErrors, setPathErrors] = useState({ directory: '', sourcePath: '' })
   // An error belongs to the step it happened on, so it is shown there and
@@ -195,6 +210,21 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   const captureProfile = setupCaptureProfileStatus(form)
   const captureProfileRequired = captureProfile.required
   const captureProfileComplete = captureProfile.complete
+  const captureProfileIssue = captureProfile.issue
+  // Continue and Create stay enabled; on click, the first thing still missing
+  // on a step is reported there instead of leaving a silently disabled button.
+  const stepIssue = (at: number) => setupStepIssue(at, {
+    directory: form.directory,
+    title: form.title,
+    sourceCount: sources.length,
+    sourceDialogOpen: sourceFlowStep !== 'closed',
+    agent: form.agent,
+    agentInstalled: Boolean(selectedAgent),
+    agentLabel: agentLabel(form.agent),
+    screenshots: form.screenshots,
+    applicationBaseUrl: form.applicationBaseUrl,
+    applicationStartPath: form.applicationStartPath,
+  })
   const setupApplication = () => ({
     baseUrl: form.applicationBaseUrl,
     readyPath: form.applicationStartPath,
@@ -222,18 +252,30 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     }, 2_000)
     return () => clearInterval(poll)
   }, [setupAuth?.signIn.active])
-  const testApplication = async () => {
+  const testApplication = async (): Promise<ApplicationReadiness> => {
     setTestingApplication(true)
     clearSetupError()
+    let readiness: ApplicationReadiness
     try {
       const application = { ...setupApplication(), hasCredentials: hasSetupCredentials }
-      setApplicationReadiness(await post<ApplicationReadiness>('/api/setup/application/readiness', application))
+      readiness = await post<ApplicationReadiness>('/api/setup/application/readiness', application)
     } catch (cause) {
-      setApplicationReadiness({ configured: true, reachable: false, status: 'unreachable', message: message(cause) })
+      readiness = { configured: true, reachable: false, status: 'unreachable', message: message(cause) }
     } finally {
       setTestingApplication(false)
     }
+    setApplicationReadiness(readiness)
+    return readiness
   }
+  // Editing any application field clears the last check, so Continue and
+  // Create run the check themselves when it has not passed yet rather than
+  // making the user find the Check page button first.
+  const ensureApplicationReady = async (): Promise<ApplicationReadiness> =>
+    applicationReadiness?.status === 'ready' ? applicationReadiness : testApplication()
+  const readinessIssue = (readiness: ApplicationReadiness): string =>
+    readiness.status === 'authentication-required'
+      ? 'The application page needs sign-in. Under "Does this page require sign-in?" choose Yes, then sign in with the browser or enter test account credentials, and continue again.'
+      : `${readiness.message} Start the application and continue again, or choose No for screenshots.`
   const sourceType = form.sourceKind === 'openapi' ? 'openapi' : form.sourceLocation === 'git' ? 'git' : 'local'
   const filteredSetupSources = sources.map((source, index) => ({ source, index }))
   const updateSourceType = (value: string) => {
@@ -248,7 +290,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   }
   const currentSource = (): SetupSource => ({
     name: form.sourceName,
-    sourceKind: form.sourceKind as 'directory' | 'openapi',
+    sourceKind: form.sourceKind as SetupSource['sourceKind'],
     sourceLocation: form.sourceLocation as 'git' | 'local',
     sourcePath: form.sourcePath,
     repository: form.repository,
@@ -259,6 +301,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     gitSecret: form.gitSecret,
     specInput: form.specInput as 'file' | 'url',
     specContent: form.specContent,
+    ...(form.sourceKind === 'docs-site' && docsSiteInspection?.status === 'completed' ? { inspectionId: docsSiteInspection.id, docsSite: docsSiteInspection.summary } : {}),
   })
   const validatePaths = async (includeSource: boolean, source = currentSource()): Promise<SetupValidation | undefined> => {
     try {
@@ -279,6 +322,8 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   const continueSetup = async () => {
     setValidatingPaths(true)
     try {
+      const issue = stepIssue(step)
+      if (issue) { failStep(step, issue); return }
       if (step === 1) {
         const result = await validatePaths(false)
         if (!result || result.directoryError) return
@@ -287,14 +332,18 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
         for (const source of sources) {
           if (source.sourceKind === 'openapi' && source.specInput === 'file' && source.specContent.trim()) continue
           const result = await validatePaths(true, source)
-          if (!result || result.directoryError || result.sourcePathError) return
+          if (!result) return
+          if (result.directoryError) { setStep(1); return }
+          // The add-source dialog is closed here, so its inline error would
+          // be invisible; report the failing source on the step instead.
+          if (result.sourcePathError) { failStep(2, `${source.name}: ${result.sourcePathError}`); return }
         }
       }
       if (step === 3 && captureProfileRequired) {
         // A plan with screenshots is long; do not start one that will fail
         // at capture time because the application was never reached.
-        if (!captureProfileComplete) { failStep(3, 'Enter the application URL and starting page, or choose No for screenshots.'); return }
-        if (applicationReadiness?.status !== 'ready') { failStep(3, 'Check the application page successfully before continuing, or choose No for screenshots.'); return }
+        const readiness = await ensureApplicationReady()
+        if (readiness.status !== 'ready') { failStep(3, readinessIssue(readiness)); return }
       }
       clearSetupError()
       setStep((value) => value + 1)
@@ -316,6 +365,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     setGitDirectories([])
     setPathErrors((current) => ({ ...current, sourcePath: '' }))
     setSetupSpecFileName('')
+    setDocsSiteInspection(undefined)
   }
   const readSetupSpecification = async (file: File | undefined) => {
     if (!file) return
@@ -327,8 +377,10 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   const addSetupSource = async () => {
     const draft = currentSource()
     const location = draft.sourceKind === 'openapi' ? draft.sourcePath || 'OpenAPI Specification' : draft.sourceLocation === 'git' ? draft.repository : draft.sourcePath
-    const fallback = draft.sourceKind === 'openapi' ? 'OpenAPI Specification' : draft.sourceLocation === 'git' ? 'Git Repository' : 'Local Repository'
-    const segment = location.replace(/[?#].*$/, '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/\.git$/i, '').replace(/\.(json|ya?ml)$/i, '')
+    const fallback = draft.sourceKind === 'openapi' ? 'OpenAPI Specification' : draft.sourceKind === 'docs-site' ? 'Existing Documentation' : draft.sourceLocation === 'git' ? 'Git Repository' : 'Local Repository'
+    const segment = draft.sourceKind === 'docs-site'
+      ? docsSiteHostName(draft.sourcePath)
+      : location.replace(/[?#].*$/, '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/\.git$/i, '').replace(/\.(json|ya?ml)$/i, '')
     const baseName = segment || fallback
     const matching = sources.filter((source) => source.name === baseName || source.name.startsWith(`${baseName} `)).length
     const source = { ...draft, name: matching ? `${baseName} ${matching + 1}` : baseName }
@@ -424,15 +476,24 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     setSubmitting(true)
     clearSetupError()
     try {
-      if (captureProfileRequired && !captureProfileComplete) {
-        setStep(3)
-        failStep(3, 'Enter the application URL and starting page, or choose No for screenshots.')
-        return
+      // The sidebar lets the user revisit and change any earlier step, so
+      // every step is re-validated here and the first problem is shown on
+      // the step it belongs to.
+      for (const at of [1, 2, 3]) {
+        const issue = stepIssue(at)
+        if (issue) {
+          setStep(at)
+          failStep(at, issue)
+          return
+        }
       }
-      if (captureProfileRequired && applicationReadiness?.status !== 'ready') {
-        setStep(3)
-        failStep(3, 'Check the application page successfully before creating a plan with screenshots.')
-        return
+      if (captureProfileRequired) {
+        const readiness = await ensureApplicationReady()
+        if (readiness.status !== 'ready') {
+          setStep(3)
+          failStep(3, readinessIssue(readiness))
+          return
+        }
       }
       if (!projectCreated) {
         const directoryValidation = await validatePaths(false)
@@ -444,8 +505,10 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
         for (const source of sources) {
           if (source.sourceKind === 'openapi' && source.specInput === 'file' && source.specContent.trim()) continue
           const validation = await validatePaths(true, source)
-          if (!validation || validation.sourcePathError) {
+          if (!validation) return
+          if (validation.sourcePathError) {
             setStep(2)
+            failStep(2, `${source.name}: ${validation.sourcePathError}`)
             return
           }
         }
@@ -513,19 +576,19 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
           <header class="setup-home-heading"><span><Icon name="folder" size={34} /></span><div><h1>{mode === 'new' ? "Let's name your workspace" : 'Use existing documentation'}</h1><p>{mode === 'new' ? "This will be your docs' home in Doxloop." : 'Point Doxloop at a documentation site you already have. Nothing in it is changed.'}</p></div></header>
           <div class="setup-mode-choice" role="radiogroup" aria-label="How to start">
             <button type="button" role="radio" aria-checked={mode === 'new'} class={mode === 'new' ? 'selected' : ''} onClick={() => { setMode('new'); clearSetupError() }}><span><Icon name="sparkle" size={20} /></span><strong>Start new</strong><small>Create a fresh documentation site from your sources.</small></button>
-            <button type="button" role="radio" aria-checked={mode === 'existing'} class={mode === 'existing' ? 'selected' : ''} onClick={() => { setMode('existing'); clearSetupError() }}><span><Icon name="folder" size={20} /></span><strong>Use existing documentation folder</strong><small>Adopt a Docusaurus, MkDocs, Hugo, Sphinx, or other site as it is.</small></button>
+            <button type="button" role="radio" aria-checked={mode === 'existing'} class={mode === 'existing' ? 'selected' : ''} onClick={() => { setMode('existing'); clearSetupError() }}><span><Icon name="folder" size={20} /></span><strong>Use existing documentation folder</strong><small>Keep your current generator, or convert Mintlify from a folder or GitHub to Doxbrix.</small></button>
           </div>
           {mode === 'existing' && <div class="setup-import-existing"><ImportExistingPanel onImported={() => onContinue('pages')} /></div>}
           {mode === 'new' && <section class="setup-home-location-field"><Field label="Location" hint="The folder the new workspace is created in. Keep it outside your product source, usually the parent folder of the checkout."><div class="source-folder-input"><Input value={form.parentDirectory || state.cwd} onInput={(value) => update('parentDirectory', value.currentTarget.value)} /><Button icon="folder" busy={browsingLocation} onClick={() => void browseProjectLocation()}>Browse</Button></div></Field></section>}
           {mode === 'new' && <div class="setup-home-fields"><section class="setup-home-field"><span class="setup-home-field-icon workspace"><Icon name="folder" size={25} /></span><Field label="Workspace name" hint="This is the folder where your docs will live."><ValidatedSetupInput value={form.directory} valid={Boolean(form.directory.trim()) && !pathErrors.directory} invalid={Boolean(pathErrors.directory)} onInput={(value) => update('directory', value)} />{pathErrors.directory && <small class="field-error">{pathErrors.directory}</small>}</Field></section><section class="setup-home-field"><span class="setup-home-field-icon title">T<small>T</small></span><Field label="What should we call your docs?" hint="This is the title people will see."><ValidatedSetupInput value={form.title} valid={Boolean(form.title.trim())} onInput={(value) => update('title', value)} /></Field></section></div>}
         </div>}
-        {step === 2 && <><header class="sources-page-header setup-sources-header"><div><h1>Sources</h1><p>Manage all the sources you've connected to create documentation.</p></div><div class="sources-page-tools"><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={sourceMenuOpen} onClick={() => setSourceMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{sourceMenuOpen && <div class="sources-add-menu"><button type="button" onClick={() => { resetSourceDraft(); setForm((current) => ({ ...current, sourceKind: 'directory', sourceLocation: 'git' })); setSourceFlowStep('source-location') }}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => { resetSourceDraft(); setForm((current) => ({ ...current, sourceKind: 'openapi' })); setSourceFlowStep('openapi-format') }}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div></div></header>
-          <section class="sources-data-panel setup-sources-table"><header>All sources ({sources.length})</header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Details</span><span>Status</span><span /></div>{filteredSetupSources.length ? <div class="sources-table-body">{filteredSetupSources.map(({ source, index }) => <div class="sources-data-row" key={`${source.name}-${index}`}><span class="sources-name-cell"><span class={`source-service-icon ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceLocation === 'git' ? `git ${repositoryProvider(source.repository)}` : 'local'}`}><Icon name={source.sourceKind === 'openapi' ? 'braces' : source.sourceLocation === 'git' ? repositoryProviderIcon(source.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.sourceKind === 'openapi' ? source.sourcePath || 'Uploaded OpenAPI specification' : source.sourceLocation === 'git' ? source.repository : source.sourcePath}</small></span></span><span><em class={`source-type-pill ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceLocation}`}>{source.sourceKind === 'openapi' ? 'OpenAPI' : source.sourceLocation === 'git' ? 'Git' : 'Local'}</em></span><span class="source-updated">{source.sourceKind === 'openapi' ? source.openapiSummary ? `${source.openapiSummary.title} ${source.openapiSummary.version} · ${source.openapiSummary.operationCount} operations` : 'Specification' : source.sourceLocation === 'git' ? `${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}` : 'Local folder'}</span><span><em class="source-sync-status"><Icon name="check" size={12} />Validated</em></span><span class="source-row-menu"><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => setSources((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Icon name="trash" size={22} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name={sources.length ? 'search' : 'sources'} size={28} /><strong>{sources.length ? 'No matching sources' : 'No sources added yet'}</strong><small>{sources.length ? 'Try a different name, URL, path, or source type.' : 'Use “Add source” to connect your first source.'}</small></div>}<footer><span>Showing {filteredSetupSources.length ? `1 to ${filteredSetupSources.length}` : '0'} of {sources.length} results</span><span><button disabled><Icon name="chevronRight" size={14} /></button><button disabled><Icon name="chevronRight" size={14} /></button></span></footer></section>
+        {step === 2 && <><header class="sources-page-header setup-sources-header"><div><h1>Sources</h1><p>Manage all the sources you've connected to create documentation.</p></div><div class="sources-page-tools"><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={sourceMenuOpen} onClick={() => setSourceMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{sourceMenuOpen && <div class="sources-add-menu"><button type="button" onClick={() => { resetSourceDraft(); setForm((current) => ({ ...current, sourceKind: 'directory', sourceLocation: 'git' })); setSourceFlowStep('source-location') }}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => { resetSourceDraft(); setForm((current) => ({ ...current, sourceKind: 'openapi' })); setSourceFlowStep('openapi-format') }}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button><button type="button" onClick={() => { resetSourceDraft(); setForm((current) => ({ ...current, sourceKind: 'docs-site' })); setSourceFlowStep('docs-site') }}><span><Icon name="globe" size={20} /></span><span><strong>Existing documentation</strong><small>Rewrite a live docs site</small></span></button></div>}</div></div></header>
+          <section class="sources-data-panel setup-sources-table"><header>All sources ({sources.length})</header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Details</span><span>Status</span><span /></div>{filteredSetupSources.length ? <div class="sources-table-body">{filteredSetupSources.map(({ source, index }) => <div class="sources-data-row" key={`${source.name}-${index}`}><span class="sources-name-cell"><span class={`source-service-icon ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceKind === 'docs-site' ? 'docs-site' : source.sourceLocation === 'git' ? `git ${repositoryProvider(source.repository)}` : 'local'}`}><Icon name={source.sourceKind === 'openapi' ? 'braces' : source.sourceKind === 'docs-site' ? 'globe' : source.sourceLocation === 'git' ? repositoryProviderIcon(source.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.sourceKind === 'openapi' ? source.sourcePath || 'Uploaded OpenAPI specification' : source.sourceKind === 'docs-site' ? source.sourcePath : source.sourceLocation === 'git' ? source.repository : source.sourcePath}</small></span></span><span><em class={`source-type-pill ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceKind === 'docs-site' ? 'docs-site' : source.sourceLocation}`}>{source.sourceKind === 'openapi' ? 'OpenAPI' : source.sourceKind === 'docs-site' ? 'Docs site' : source.sourceLocation === 'git' ? 'Git' : 'Local'}</em></span><span class="source-updated">{source.sourceKind === 'openapi' ? source.openapiSummary ? `${source.openapiSummary.title} ${source.openapiSummary.version} · ${source.openapiSummary.operationCount} operations` : 'Specification' : source.sourceKind === 'docs-site' ? source.docsSite ? `${source.docsSite.pages} pages · ${source.docsSite.words.toLocaleString()} words${source.docsSite.generator ? ` · ${source.docsSite.generator}` : ''}` : 'Existing documentation' : source.sourceLocation === 'git' ? `${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}` : 'Local folder'}</span><span><em class="source-sync-status"><Icon name="check" size={12} />Validated</em></span><span class="source-row-menu"><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => setSources((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Icon name="trash" size={22} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name={sources.length ? 'search' : 'sources'} size={28} /><strong>{sources.length ? 'No matching sources' : 'No sources added yet'}</strong><small>{sources.length ? 'Try a different name, URL, path, or source type.' : 'Use “Add source” to connect your first source.'}</small></div>}<footer><span>Showing {filteredSetupSources.length ? `1 to ${filteredSetupSources.length}` : '0'} of {sources.length} results</span><span><button disabled><Icon name="chevronRight" size={14} /></button><button disabled><Icon name="chevronRight" size={14} /></button></span></footer></section>
           {sourceAddedNotice && <div class="source-added-success"><span><Icon name="check" size={20} /></span><div><strong>Source added successfully!</strong><small>The source will appear in the list.</small></div><button type="button" aria-label="Dismiss" onClick={() => setSourceAddedNotice(false)}><Icon name="close" size={13} /></button></div>}
-          {sourceFlowStep !== 'closed' && <div class="sources-modal-scrim" onClick={() => setSourceFlowStep('closed')}><section class={`sources-reference-dialog ${form.sourceKind === 'openapi' ? 'openapi' : 'source'}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <header>{form.sourceKind === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}<div><h2>{form.sourceKind === 'openapi' ? 'Add OpenAPI spec' : 'Add source code'}</h2><p>{form.sourceKind === 'openapi' ? 'Import your OpenAPI specification from a local file or a public URL.' : 'Choose how you want to connect your source code.'}</p></div><button type="button" aria-label="Close" onClick={() => setSourceFlowStep('closed')}><Icon name="close" size={17} /></button></header>
-            {form.sourceKind === 'directory' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceType === 'git' ? 'selected' : ''} onClick={() => updateSourceType('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceType === 'local' ? 'selected' : ''} onClick={() => updateSourceType('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceType === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={form.authMethod} onChange={(event) => { update('authMethod', event.currentTarget.value); editGitConnection() }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={form.repository} onInput={(event) => { update('repository', event.currentTarget.value); editGitConnection() }} /><RepositoryConnectButton connected={Boolean(gitHead)} busy={gitTesting} disabled={!form.repository.trim() || (form.authMethod === 'credentials' && (!form.gitUsername.trim() || !form.gitSecret.trim()))} onClick={() => void testGitConnection()} /></div></Field>{form.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={form.gitUsername} autocomplete="username" onInput={(event) => { update('gitUsername', event.currentTarget.value); editGitConnection() }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={form.gitSecret} autocomplete="off" onInput={(event) => { update('gitSecret', event.currentTarget.value); editGitConnection() }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={form.branch} disabled={!gitHead || gitTesting} onChange={(event) => void selectGitBranch(event.currentTarget.value)}>{gitBranches.length ? gitBranches.map((branch) => <option key={branch}>{branch}</option>) : <option>{gitTesting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={form.subdirectory} disabled={!gitHead || gitFoldersLoading} onChange={(event) => update('subdirectory', event.currentTarget.value)}><option value="">/</option>{gitDirectories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={form.sourcePath} aria-invalid={Boolean(pathErrors.sourcePath)} onInput={(event) => { update('sourcePath', event.currentTarget.value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} /><Button icon="folder" busy={browsing} onClick={() => void browseSourceDirectory()}>Browse</Button></div></Field>}{pathErrors.sourcePath && <p class="field-error" role="alert">{pathErrors.sourcePath}</p>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={form.specInput === 'file' ? 'active' : ''} onClick={() => update('specInput', 'file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={form.specInput === 'url' ? 'active' : ''} onClick={() => update('specInput', 'url')}><Icon name="external" size={18} />From URL</button></div>{form.specInput === 'file' ? <div class={`openapi-dropzone ${setupSpecFileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSetupSpecification(event.dataTransfer?.files[0]) }}><input ref={setupSpecInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSetupSpecification(event.currentTarget.files?.[0])} /><span><Icon name={setupSpecFileName ? 'check' : 'publish'} size={28} /></span><strong>{setupSpecFileName || 'Drag and drop your OpenAPI file here'}</strong>{!setupSpecFileName && <small>or</small>}<Button onClick={() => setupSpecInput.current?.click()}>{setupSpecFileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><div class="openapi-url-input"><Icon name="external" size={18} /><Input value={form.sourcePath} onInput={(event) => { update('sourcePath', event.currentTarget.value); update('specContent', ''); setSetupSpecFileName('') }} /></div><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
-            <footer><Button onClick={() => setSourceFlowStep('closed')}>Cancel</Button><Button tone="primary" busy={savingSource} disabled={form.sourceKind === 'directory' ? sourceType === 'git' ? !gitHead || gitFoldersLoading : !form.sourcePath.trim() : form.specInput === 'file' ? !form.specContent.trim() : !form.sourcePath.trim()} onClick={() => void addSetupSource()}>Add source</Button></footer>
+          {sourceFlowStep !== 'closed' && <div class="sources-modal-scrim" onClick={() => setSourceFlowStep('closed')}><section class={`sources-reference-dialog ${form.sourceKind === 'openapi' ? 'openapi' : form.sourceKind === 'docs-site' ? 'docs-site' : 'source'}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <header>{form.sourceKind === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}{form.sourceKind === 'docs-site' && <span class="sources-dialog-icon"><Icon name="globe" size={24} /></span>}<div><h2>{form.sourceKind === 'openapi' ? 'Add OpenAPI spec' : form.sourceKind === 'docs-site' ? 'Add existing documentation' : 'Add source code'}</h2><p>{form.sourceKind === 'openapi' ? 'Import your OpenAPI specification from a local file or a public URL.' : form.sourceKind === 'docs-site' ? 'Point Doxloop at the documentation you have today. The agent audits it, verifies it against your other sources, and rewrites it as a new documentation set.' : 'Choose how you want to connect your source code.'}</p></div><button type="button" aria-label="Close" onClick={() => setSourceFlowStep('closed')}><Icon name="close" size={17} /></button></header>
+            {form.sourceKind === 'docs-site' ? <div class="sources-dialog-body"><DocsSiteSourceFields url={form.sourcePath} onUrl={(value) => { update('sourcePath', value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={pathErrors.sourcePath} onError={(message) => setPathErrors((current) => ({ ...current, sourcePath: message }))} /></div> : form.sourceKind === 'directory' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceType === 'git' ? 'selected' : ''} onClick={() => updateSourceType('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceType === 'local' ? 'selected' : ''} onClick={() => updateSourceType('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceType === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={form.authMethod} onChange={(event) => { update('authMethod', event.currentTarget.value); editGitConnection() }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={form.repository} onInput={(event) => { update('repository', event.currentTarget.value); editGitConnection() }} /><RepositoryConnectButton connected={Boolean(gitHead)} busy={gitTesting} disabled={!form.repository.trim() || (form.authMethod === 'credentials' && (!form.gitUsername.trim() || !form.gitSecret.trim()))} onClick={() => void testGitConnection()} /></div></Field>{form.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={form.gitUsername} autocomplete="username" onInput={(event) => { update('gitUsername', event.currentTarget.value); editGitConnection() }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={form.gitSecret} autocomplete="off" onInput={(event) => { update('gitSecret', event.currentTarget.value); editGitConnection() }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={form.branch} disabled={!gitHead || gitTesting} onChange={(event) => void selectGitBranch(event.currentTarget.value)}>{gitBranches.length ? gitBranches.map((branch) => <option key={branch}>{branch}</option>) : <option>{gitTesting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={form.subdirectory} disabled={!gitHead || gitFoldersLoading} onChange={(event) => update('subdirectory', event.currentTarget.value)}><option value="">/</option>{gitDirectories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={form.sourcePath} aria-invalid={Boolean(pathErrors.sourcePath)} onInput={(event) => { update('sourcePath', event.currentTarget.value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} /><Button icon="folder" busy={browsing} onClick={() => void browseSourceDirectory()}>Browse</Button></div></Field>}{pathErrors.sourcePath && <p class="field-error" role="alert">{pathErrors.sourcePath}</p>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={form.specInput === 'file' ? 'active' : ''} onClick={() => update('specInput', 'file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={form.specInput === 'url' ? 'active' : ''} onClick={() => update('specInput', 'url')}><Icon name="external" size={18} />From URL</button></div>{form.specInput === 'file' ? <div class={`openapi-dropzone ${setupSpecFileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSetupSpecification(event.dataTransfer?.files[0]) }}><input ref={setupSpecInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSetupSpecification(event.currentTarget.files?.[0])} /><span><Icon name={setupSpecFileName ? 'check' : 'publish'} size={28} /></span><strong>{setupSpecFileName || 'Drag and drop your OpenAPI file here'}</strong>{!setupSpecFileName && <small>or</small>}<Button onClick={() => setupSpecInput.current?.click()}>{setupSpecFileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><div class="openapi-url-input"><Icon name="external" size={18} /><Input value={form.sourcePath} onInput={(event) => { update('sourcePath', event.currentTarget.value); update('specContent', ''); setSetupSpecFileName('') }} /></div><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
+            <footer><Button onClick={() => setSourceFlowStep('closed')}>Cancel</Button><Button tone="primary" busy={savingSource} disabled={form.sourceKind === 'docs-site' ? docsSiteInspection?.status !== 'completed' || docsSiteInspection.url !== form.sourcePath.trim().replace(/#.*$/, '') && !form.sourcePath.trim() : form.sourceKind === 'directory' ? sourceType === 'git' ? !gitHead || gitFoldersLoading : !form.sourcePath.trim() : form.specInput === 'file' ? !form.specContent.trim() : !form.sourcePath.trim()} onClick={() => void addSetupSource()}>Add source</Button></footer>
           </section></div>}
         </>}
         {step === 3 && <div class="setup-tools-stage"><SetupStepHeading visual="🪄" title="Configure your tools" detail="Choose how Doxloop should generate your documentation." />
@@ -564,7 +627,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
               </div>
               {setupAuth?.signIn.active && <div class="setup-capture-signin-actions"><Note tone={setupAuth.signIn.open ? 'info' : 'warn'}><span>{setupAuth.signIn.open ? <>A Chrome window is open at {setupAuth.signIn.url}. Complete the sign-in there, wait for the signed-in screen, then choose <strong>Save session</strong>.</> : <>The Chrome window was closed. Choose <strong>Save session</strong> to keep the last signed-in state, or start again.</>}</span></Note><div class="setup-capture-signin-buttons"><Button busy={signInBusy === 'cancel'} onClick={() => void runSignIn('cancel', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/cancel'))}>Cancel</Button><Button tone="primary" busy={signInBusy === 'finish'} onClick={() => void runSignIn('finish', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/finish'))}>Save session</Button></div></div>}
             </div>}
-            {!captureProfileComplete ? <Note>Enter the application URL and starting page, or choose No above.</Note> : applicationReadiness?.status !== 'ready' && <Note>Check the page before continuing. This prevents a long plan from starting when screenshots cannot be captured.</Note>}</section>}
+            {captureProfileIssue ? <Note>{captureProfileIssue}</Note> : applicationReadiness?.status !== 'ready' && <Note>Continue checks this page for you; choose Check page to test it now. This prevents a long plan from starting when screenshots cannot be captured.</Note>}</section>}
           {selectedAgent && <div class="setup-success-note"><span><Icon name="check" size={13} /></span><p><strong>Great choice!</strong>This setup works well for most projects and is easy to change later.</p></div>}</div>}
         {step === 4 && <DocumentationGuidance
           audiences={form.audiences}
@@ -582,9 +645,10 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
           <div class="setup-review-grid">
             <section class="setup-review-summary concise" aria-label="Documentation configuration">
               <ReviewSummaryRow icon="file" label="Title"><strong>{form.title}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count"><Icon name="check" size={12} />{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
+              <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count"><Icon name="check" size={12} />{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceKind === 'docs-site' ? 'Existing Documentation' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'docs-site' ? `${source.sourcePath} · ${describeInspection(source.docsSite ? { id: source.inspectionId ?? '', url: source.sourcePath, status: 'completed', progress: { fetched: 0, discovered: 0 }, summary: source.docsSite } : undefined)}` : source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
               <ReviewSummaryRow icon="bot" label="Model"><strong>{form.model || 'Default'}</strong></ReviewSummaryRow>
               <ReviewSummaryRow icon="map" label="Plan"><span class="review-guidance"><strong>{scopeLabel(form.scope)} depth</strong><small>{form.readerOutcome.trim() || DEFAULT_READER_OUTCOME}</small></span></ReviewSummaryRow>
+              <ReviewSummaryRow icon="check" label="Run limits"><span class="review-guidance"><strong>{describeBatchLimits(batchLimitsForScope(form.scope, form.screenshots))}</strong><small>Set by the documentation depth. The plan review lets you raise or lower them before approval.</small></span></ReviewSummaryRow>
               <ReviewSummaryRow icon="camera" label="Screenshots"><span class="review-guidance"><strong>{form.screenshots === 'disabled' ? 'No' : 'Yes — required for this run'}</strong><small>{form.screenshots === 'disabled' ? 'Documentation will be created without product screenshots.' : `${setupApplicationCaptureTarget(form.applicationBaseUrl, form.applicationStartPath)}${form.applicationSignIn === 'yes' ? ` · sign-in: ${[setupAuth?.session ? 'recorded browser session' : '', hasSetupCredentials ? 'test account credentials' : ''].filter(Boolean).join(' and ') || 'none provided yet'}` : ''}`}</small></span></ReviewSummaryRow>
               <ReviewSummaryRow icon="users" label="Guidance"><span class="review-guidance"><strong>{form.audiences.length ? form.audiences.join(', ') : 'Agent will determine the audience'}</strong><small>{form.customInstructions.trim() || 'No custom instructions'}</small></span></ReviewSummaryRow>
             </section>
@@ -600,7 +664,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
             {step === 1 && mode === 'existing'
               ? <span class="setup-existing-hint">Import above to open the folder's pages.</span>
               : step < 5
-              ? <Button tone="primary" busy={validatingPaths} disabled={(step === 1 && (!form.directory.trim() || !form.title.trim() || Boolean(pathErrors.directory))) || (step === 2 && (sources.length === 0 || sourceFlowStep !== 'closed')) || (step === 3 && ((Boolean(form.agent) && !selectedAgent) || (captureProfileRequired && (!captureProfileComplete || applicationReadiness?.status !== 'ready'))))} onClick={() => void continueSetup()}>Continue <Icon name="arrowRight" size={14} /></Button>
+              ? <Button tone="primary" busy={validatingPaths} disabled={submitting} onClick={() => void continueSetup()}>Continue <Icon name="arrowRight" size={14} /></Button>
               : <Button tone="primary" icon="sparkle" busy={submitting} onClick={() => void createDocumentation()}>Create documentation plan</Button>}
           </div>
         </footer>

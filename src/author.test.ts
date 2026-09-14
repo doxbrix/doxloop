@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   editPrompt,
   agentArguments,
+  agentEnvironment,
   agentExitMessage,
   authorPrompt,
   ClaudeStreamLogFormatter,
@@ -16,6 +17,7 @@ import {
   resolveScreenshotIntent,
   runAuthor,
   sourceAccessDirectories,
+  starterReplacements,
 } from './author.js'
 import { closeHistory, historyAvailable } from './db.js'
 import { pathExists } from './fs.js'
@@ -308,6 +310,39 @@ describe('author prompts', () => {
   })
 })
 
+describe('agent environment', () => {
+  test('drops NODE_USE_SYSTEM_CA so Node can start inside the agent sandbox', () => {
+    const env = agentEnvironment('claude', { PATH: '/bin', NODE_USE_SYSTEM_CA: '1' })
+    expect(env).toEqual({ PATH: '/bin' })
+    const plain = { PATH: '/bin' }
+    expect(agentEnvironment('codex', plain)).toBe(plain)
+  })
+})
+
+describe('starter replacements in the file contract', () => {
+  test('tells the writer where a planned update of a starter page belongs', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-starter-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    // A real page with the same name is not a starter and is left to the normal contract.
+    await mkdir(join(root, 'guides'), { recursive: true })
+    await writeFile(join(root, 'guides', 'install.mdx'), '---\ntitle: Install\n---\n\nReal content.\n')
+    const page = (path: string, action = 'update') => ({ path, action, priority: 'must-have' })
+    const contract = await starterReplacements(root, { pages: [
+      page('getting-started/quickstart'),
+      page('getting-started/overview'),
+      page('setup/install'),
+      page('guides/new-page', 'create'),
+    ] as never }, ['index.mdx', 'quickstart.mdx', 'guides/install.mdx'])
+    expect(contract).toContain('"getting-started/quickstart" replaces the generated starter quickstart.mdx: write it at its planned path with the same extension as quickstart.mdx, delete quickstart.mdx')
+    expect(contract).toContain('"getting-started/overview" is the site\'s landing page: write it at index.mdx')
+    expect(contract).not.toContain('setup/install')
+    expect(contract).not.toContain('new-page')
+    // Nothing to say when every planned update already exists at its path.
+    expect(await starterReplacements(root, { pages: [page('quickstart')] as never }, ['quickstart.mdx'])).toBe('')
+  })
+})
+
 describe('agent invocation', () => {
   test('stages multiline prompts in a file for Windows command shims', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doxloop-author-prompt-'))
@@ -407,7 +442,7 @@ describe('agent invocation', () => {
     ])
   })
 
-  test('uses enforced read-only or plan invocations for review', () => {
+  test('uses enforced read-only invocations for review, with the capture browser still callable', () => {
     expect(agentArguments('codex', 'p', { mode: 'review' })).toEqual([
       'exec',
       '--json',
@@ -420,7 +455,9 @@ describe('agent invocation', () => {
     expect(agentArguments('claude', 'p', { mode: 'review' })).toEqual([
       '--print',
       '--permission-mode',
-      'plan',
+      'default',
+      '--disallowedTools',
+      'Bash,Edit,Write,MultiEdit,NotebookEdit',
       '--max-turns',
       '100',
       '--output-format',
@@ -502,7 +539,7 @@ describe('unattended authoring', () => {
     )
     expect(
       agentArguments('claude', 'P', { mode: 'review', nonInteractive: true }),
-    ).toContain('plan')
+    ).toContain('Bash,Edit,Write,MultiEdit,NotebookEdit')
   })
 
   test('grants Claude read access only to configured external source directories', () => {

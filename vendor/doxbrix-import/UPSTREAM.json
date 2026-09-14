@@ -1,0 +1,47 @@
+{
+  "source": "Doxbrix SDK and CLI conversion modules",
+  "version": "0.1.4",
+  "revision": "93b727c7b5617540498d034f1b2a839d125ad3e5",
+  "files": [
+    {
+      "file": "importer.ts",
+      "sha256": "1b021d6509651e7de48fdeb8e2dcd9866fc1db4c6e27508bb58b14b871a071b0"
+    },
+    {
+      "file": "mintlify-openapi.ts",
+      "sha256": "509902e58f2ca2d9353165f170a0e3af7d624c6310c917530ea253c5e9b244a7"
+    },
+    {
+      "file": "importer.test.ts",
+      "sha256": "b5bd0bff3432516a2832581ed7a0bf31fe86f11eac0546c8aadd814e080c4372"
+    },
+    {
+      "file": "docs/import.ts",
+      "sha256": "65c9101568258a21f73bedd0002627ade2af6aa3d6be924a40e4bff19afadbcd"
+    },
+    {
+      "file": "docs/project.ts",
+      "sha256": "19c7ea839459195c5fa9707728bd540bba4c45b2f19bd69ed7f4032bdf2454ad"
+    },
+    {
+      "file": "docs/frontmatter.ts",
+      "sha256": "dacef357d9d5a4c7ec77f24078ccaa7a99abcb45271118e7066dc0ecf47d5afb"
+    },
+    {
+      "file": "docs/manifest.ts",
+      "sha256": "7d5e4fc0a84550509fb508d00f3dc1353803377b682c061b585925d964ce534f"
+    },
+    {
+      "file": "docs/starter.ts",
+      "sha256": "27a830733e9a87ba2875707322fc48bfd7c3d1de56b433fb667c7176c09fdcb3"
+    },
+    {
+      "file": "safe-path.ts",
+      "sha256": "71570233498d6809db3b1f7399c10621f08393fcbe9f339eb37562ee511a71eb"
+    },
+    {
+      "file": "docs/import.test.ts",
+      "sha256": "a801faf4b98e49b2a2df56810254105e01054f8fa291d7b972f7988c60126115"
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstat, readFile, readdir, readlink, writeFile } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { basename, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathExists, readJson } from './fs.js'
 import { diffOpenApi, loadOpenApiSource, openApiChangedIdentifiers } from './openapi.js'
@@ -16,6 +16,12 @@ const SPEC_BASELINE = 'openapi-spec'
  * which files changed, so drift can still be traced to individual pages.
  */
 export const LOCAL_CONTENT_BASELINE = 'local-content'
+/**
+ * Baseline marker for a crawled documentation-site snapshot. The snapshot is
+ * frozen, so a change means the site was re-crawled and the recorded per-page
+ * digests name exactly which existing pages changed.
+ */
+export const DOCS_SITE_BASELINE = 'docs-site'
 
 export const SYNC_STATE_FILE = join('.doxloop', 'sync-state.json')
 
@@ -63,6 +69,17 @@ export async function recordSyncState(
       continue
     }
     const sourcePath = resolve(root, source.path)
+    if (sourceKind(source) === 'docs-site') {
+      if (!(await pathExists(sourcePath))) continue
+      const manifest = await localSourceManifest(sourcePath)
+      state.sources[source.name] = {
+        commit: DOCS_SITE_BASELINE,
+        recordedAt: new Date().toISOString(),
+        contentFingerprint: manifest.fingerprint,
+        files: manifest.files,
+      }
+      continue
+    }
     const commit = await headCommit(sourcePath)
     if (commit) {
       state.sources[source.name] = {
@@ -106,8 +123,22 @@ export async function collectSourceChanges(
       changes.push({ ...source, kind: 'missing-path' })
       continue
     }
+    if (sourceKind(source) === 'docs-site') {
+      changes.push(await collectLocalContentChange(source, path, state, DOCS_SITE_BASELINE))
+      continue
+    }
     const head = await headCommit(path)
     if (!head) {
+      // A remote source materialized from a provider is an immutable snapshot
+      // pinned at the recorded commit: the folder is named after that commit
+      // and nothing inside it can drift, so it is current by construction.
+      // Treating it as a baseline-free plain folder made every page of a
+      // GitHub-sourced project count as unverified.
+      const record = state.sources[source.name]
+      if (source.remote && record && record.commit !== LOCAL_CONTENT_BASELINE && basename(path) === record.commit) {
+        changes.push({ ...source, kind: 'unchanged', baseline: record.commit, head: record.commit, changedFiles: [], uncommittedFiles: [] })
+        continue
+      }
       changes.push(await collectLocalContentChange(source, path, state))
       continue
     }
@@ -152,10 +183,11 @@ async function collectLocalContentChange(
   source: SourceBinding,
   path: string,
   state: SyncState,
+  baseline: string = LOCAL_CONTENT_BASELINE,
 ): Promise<SourceChange> {
   const record = state.sources[source.name]
-  if (!record || record.commit !== LOCAL_CONTENT_BASELINE || !record.files) {
-    return { ...source, kind: 'no-baseline', head: LOCAL_CONTENT_BASELINE, uncommittedFiles: [] }
+  if (!record || record.commit !== baseline || !record.files) {
+    return { ...source, kind: 'no-baseline', head: baseline, uncommittedFiles: [] }
   }
   const manifest = await localSourceManifest(path)
   const changedFiles = record.contentFingerprint === manifest.fingerprint
@@ -164,8 +196,8 @@ async function collectLocalContentChange(
   return {
     ...source,
     kind: changedFiles.length === 0 ? 'unchanged' : 'changed',
-    baseline: LOCAL_CONTENT_BASELINE,
-    head: LOCAL_CONTENT_BASELINE,
+    baseline,
+    head: baseline,
     changedFiles,
     uncommittedFiles: [],
   }
@@ -289,7 +321,7 @@ function unquotePath(value: string): string {
 export function formatSourceChanges(changes: SourceChange[]): string {
   if (changes.length === 0) return ''
   const sections = changes.map((change) => {
-    const heading = `Source "${change.name}" (${change.path})`
+    const heading = `Source "${change.name}" (${change.site?.url ?? change.path})`
     switch (change.kind) {
       case 'missing-path':
         return `${heading}: the configured path does not exist. Report this instead of guessing.`
@@ -304,6 +336,9 @@ Update only documentation affected by this structural delta; the new baseline is
       case 'not-git':
         return `${heading}: not a Git repository, so no change baseline is available. Inspect the source directly.`
       case 'no-baseline':
+        if (change.head === DOCS_SITE_BASELINE) {
+          return `${heading}: existing documentation site, crawled into the read-only snapshot at ${change.path}. No documentation sync baseline is recorded yet; read the snapshot's index.md and page files directly. A baseline is recorded when this task completes.`
+        }
         return withUncommitted(
           `${heading}: no documentation sync baseline is recorded yet. Inspect the source directly; a baseline is recorded when this task completes.`,
           change.uncommittedFiles,
@@ -314,11 +349,17 @@ Update only documentation affected by this structural delta; the new baseline is
           change.uncommittedFiles,
         )
       case 'unchanged':
+        if (change.baseline === DOCS_SITE_BASELINE) {
+          return `${heading}: the existing documentation snapshot at ${change.path} is unchanged since the last documentation sync.`
+        }
         return withUncommitted(
           `${heading}: no source-content changes since the last documentation sync (${change.baseline === LOCAL_CONTENT_BASELINE ? 'compared by content' : short(change.baseline)}).`,
           change.uncommittedFiles,
         )
       case 'changed':
+        if (change.baseline === DOCS_SITE_BASELINE) {
+          return `${heading}: the existing documentation site was re-crawled and these snapshot pages changed:\n${fileList(change.changedFiles)}\nRead the changed pages in the snapshot at ${change.path} and decide whether the rewritten documentation must follow.`
+        }
         if (change.remote) {
           return change.changedFiles.length > 0
             ? `${heading}: the remote repository changed (${short(change.baseline)} -> ${short(change.head)}).\nChanged files reported by ${change.remote.provider}:\n${fileList(change.changedFiles)}\nThe current commit was downloaded into this isolated read-only evidence snapshot; inspect files there directly.`

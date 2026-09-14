@@ -1,7 +1,8 @@
+import { pageEditorPreview } from './page-editor-preview.js'
 import { documentationCollections, createDocumentationCollection } from './documentation-collections.js'
 import { pageComments, savePageComment, searchPageText, auditDocumentation, backfillEvidence, readerVerification, authoringEstimate } from './workspace-tools.js'
 import { updateBulkPageMetadata } from './page-metadata.js'
-import { batchLimits } from './batch-limits.js'
+import { batchLimits, defaultBatchLimits, type BatchScope } from './batch-limits.js'
 import { readPageContent, savePageContent, previewPageContent, changePageLifecycle } from './page-operations.js'
 import { listDirectEdits, undoDirectEdit } from './direct-edit.js'
 import { createHash, randomBytes } from 'node:crypto'
@@ -31,6 +32,7 @@ import {
   readDocumentationPlan,
   resumeDocumentationPlan,
   retryDocumentationPlan,
+  markDocumentationPlanInterrupted,
 } from './documentation-plan.js'
 import { DoxloopError } from './errors.js'
 import { deployCredentialState, saveDeployCredential } from './deploy-credentials.js'
@@ -61,6 +63,7 @@ import {
   validateProjectSourceBoundaries,
 } from './project.js'
 import { importExistingDocumentation, inspectExistingDocumentation } from './project-import.js'
+import { MintlifyImports } from './mintlify-import.js'
 import { forgetProject, listRecentProjects, rememberProject } from './project-registry.js'
 import { effectiveDeployment } from './settings.js'
 import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent } from './screenshot-workflow.js'
@@ -68,12 +71,16 @@ import { checkScreenCaptureBrowser, startCaptureSignIn, type CaptureSignInSessio
 import {
   captureAuthContext,
   captureAuthStatus,
+  loadCaptureSession,
   removeCaptureCredentials,
   removeCaptureSession,
   saveCaptureCredentials,
   saveCaptureSession,
+  sessionCookieHeader,
   type CaptureStorageState,
 } from './capture-auth.js'
+import { DEFAULT_DOCS_CRAWL_PAGE_LIMIT, MAX_DOCS_CRAWL_PAGE_LIMIT, crawlDocumentationSite, docsSiteScope, type DocsSiteSnapshot } from './docs-crawl.js'
+import { docsSiteBinding, materializeDocsSiteSnapshot } from './docs-site.js'
 import { discoverDocumentationSources } from './source-discovery.js'
 import { buildSourceIntelligence } from './source-intelligence.js'
 import { resolveCoverageItem, type CoverageResolutionAction } from './coverage-actions.js'
@@ -93,6 +100,7 @@ import {
   listRemoteDirectories,
   materializeRemoteSource,
   parseGitRepository,
+  parseGitHubRepository,
   portableSourcePath,
   rememberRemoteCredential,
   remoteCredentialEnvironment,
@@ -121,6 +129,7 @@ import {
   syncReviewSourceDiff,
 } from './sync-review.js'
 import type {
+  DocumentationPlanFailure,
   AgentName,
   ApplicationConfig,
   DeploymentConfig,
@@ -164,7 +173,9 @@ interface UiJob {
 }
 
 interface UiRuntime {
+  mintlifyImports: MintlifyImports
   controlCenterUrl?: string
+  editorPreviews?: Map<string, { root: string; html: string; createdAt: number }>
   cwd: string
   root?: string | undefined
   jobs: Map<string, UiJob>
@@ -182,7 +193,25 @@ interface UiRuntime {
   captureSignIn?: { session: CaptureSignInSession; scope: 'project' | 'setup'; origin: string } | undefined
   /** A session recorded during setup, persisted once the project exists. */
   pendingCaptureSession?: { origin: string; savedAt: string; state: CaptureStorageState } | undefined
+  /** Crawls of existing documentation sites, kept in memory until a source is created from them. */
+  docsSiteInspections: Map<string, DocsSiteInspection>
 }
+
+/** One crawl of an existing documentation site started from the Sources UI. */
+interface DocsSiteInspection {
+  id: string
+  url: string
+  status: 'running' | 'completed' | 'failed'
+  startedAt: string
+  finishedAt?: string
+  progress: { fetched: number; discovered: number }
+  snapshot?: DocsSiteSnapshot
+  error?: string
+  controller: AbortController
+}
+
+/** Inspections are discarded after this long so abandoned crawls do not hold page bodies forever. */
+const DOCS_SITE_INSPECTION_TTL_MS = 30 * 60 * 1000
 
 const UI_ROOT = resolve(fileURLToPath(new URL('./ui', import.meta.url)))
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -219,6 +248,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     : await optionalProjectRoot(options.cwd)
   const { jobs, recovered: recoveredJobs } = root ? await loadRuntimeJobs(root) : { jobs: new Map<string, UiJob>(), recovered: false }
   const runtime: UiRuntime = {
+    mintlifyImports: new MintlifyImports(),
     controlCenterUrl: `http://127.0.0.1:${port}`,
     cwd: resolve(options.cwd),
     root,
@@ -226,6 +256,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     jobSubscribers: new Set(),
     jobPersistQueue: Promise.resolve(),
     jobLogQueues: new Map(),
+    docsSiteInspections: new Map(),
   }
   if (recoveredJobs) await persistUiJobs(runtime)
   if (root) await rememberOpenProject(root)
@@ -260,6 +291,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     broadcastJobs(runtime)
     await flushUiJobLogs(runtime)
     await flushUiJobs(runtime)
+    await runtime.mintlifyImports.close()
     for (const response of runtime.jobSubscribers) response.end()
     runtime.jobSubscribers.clear()
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
@@ -350,6 +382,52 @@ async function handleApi(
   if (request.method === 'POST' && url.pathname === '/api/projects/inspect') {
     const body = recordBody(await readJsonBody(request))
     sendJson(response, 200, await inspectExistingDocumentation(resolve(runtime.cwd, stringValue(body.path)), importOverrides(body)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/mintlify/inspect') {
+    const body = recordBody(await readJsonBody(request))
+    const repository = optionalString(body.repository)
+    if (repository) configureGitAccess(body, `https://github.com/${parseGitHubRepository(repository)}.git`)
+    sendJson(response, 200, await runtime.mintlifyImports.inspect({
+      ...(repository ? { repository } : { path: stringValue(body.path) }),
+      ...(optionalString(body.branch) ? { branch: optionalString(body.branch)! } : {}),
+      ...(optionalString(body.subdirectory) ? { subdirectory: optionalString(body.subdirectory)! } : {}),
+    }, runtime.cwd))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/mintlify/discard') {
+    const body = recordBody(await readJsonBody(request))
+    await runtime.mintlifyImports.discard(stringValue(body.id))
+    sendJson(response, 200, { ok: true })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/projects/mintlify/convert') {
+    const body = recordBody(await readJsonBody(request))
+    assertProjectSwitchAllowed(runtime.jobs.values())
+    const imported = await runtime.mintlifyImports.convert(stringValue(body.id), resolve(runtime.cwd, stringValue(body.destination)), body.allowWarnings === true)
+    await switchProject(runtime, imported.root)
+    sendJson(response, 201, { imported })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/docs-site/inspect') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 202, docsSiteInspectionState(await startDocsSiteInspection(runtime, body)))
+    return
+  }
+  const docsSiteInspection = /^\/api\/docs-site\/inspect\/([^/]+)$/.exec(url.pathname)
+  if (docsSiteInspection && request.method === 'GET') {
+    const inspection = runtime.docsSiteInspections.get(decodeURIComponent(docsSiteInspection[1]!))
+    if (!inspection) throw new DoxloopError('The documentation site crawl has expired. Crawl the site again.')
+    sendJson(response, 200, docsSiteInspectionState(inspection))
+    return
+  }
+  if (docsSiteInspection && request.method === 'DELETE') {
+    const inspection = runtime.docsSiteInspections.get(decodeURIComponent(docsSiteInspection[1]!))
+    if (inspection) {
+      inspection.controller.abort()
+      runtime.docsSiteInspections.delete(inspection.id)
+    }
+    sendJson(response, 200, { ok: true })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/projects/import') {
@@ -466,7 +544,7 @@ async function handleApi(
   }
   if (request.method === 'POST' && url.pathname === '/api/sources') {
     const root = requireProject(runtime)
-    await addSourceFromUi(root, await readJsonBody(request))
+    await addSourceFromUi(runtime, root, await readJsonBody(request))
     sendJson(response, 201, await loadProject(root))
     return
   }
@@ -508,6 +586,14 @@ async function handleApi(
     if (!source) throw new DoxloopError('The requested source does not exist.')
     const remote = source.remote ? await testRemoteSource(source.remote) : undefined
     sendJson(response, 200, { health: await connectorForSource(source).health(root, source), ...(remote ? { remote } : {}) })
+    return
+  }
+  const sourceRefresh = /^\/api\/sources\/([^/]+)\/refresh$/.exec(url.pathname)
+  if (sourceRefresh && request.method === 'POST') {
+    const root = requireProject(runtime)
+    assertNoActiveDocumentationJobs(runtime.jobs.values())
+    await refreshDocsSiteSource(runtime, root, decodeURIComponent(sourceRefresh[1]!))
+    sendJson(response, 200, await loadProject(root))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/sync/configure') {
@@ -571,6 +657,31 @@ async function handleApi(
   if (request.method === 'PUT' && url.pathname === '/api/pages/content') {
     const body = recordBody(await readJsonBody(request))
     sendJson(response, 200, await savePageContent(requireProject(runtime), { path: stringValue(body.path), content: rawText(body.content), fingerprint: stringValue(body.fingerprint), evidenceDisposition: body.evidenceDisposition === 'preserved' ? 'preserved' : 'needs-review' }))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pages/editor-preview') {
+    const body = recordBody(await readJsonBody(request))
+    const root = requireProject(runtime)
+    const preview = await pageEditorPreview(root, stringValue(body.path), rawText(body.content), stringValue(body.base))
+    const token = randomBytes(24).toString('hex')
+    const cache = runtime.editorPreviews ??= new Map()
+    for (const [key, value] of cache) if (Date.now() - value.createdAt > 30 * 60_000) cache.delete(key)
+    while (cache.size >= 12) cache.delete(cache.keys().next().value!)
+    cache.set(token, { root, html: preview.html, createdAt: Date.now() })
+    sendJson(response, 200, { url: `/api/pages/editor-preview/${token}`, blocks: preview.blocks })
+    return
+  }
+  if (request.method === 'GET' && /^\/api\/pages\/editor-preview\/[a-f0-9]{48}$/.test(url.pathname)) {
+    const preview = runtime.editorPreviews?.get(url.pathname.split('/').at(-1)!)
+    if (!preview || preview.root !== requireProject(runtime) || Date.now() - preview.createdAt > 30 * 60_000) {
+      send(response, 410, 'text/plain; charset=utf-8', 'This editable preview expired. Switch to source and back to Content to refresh it.', baseHeaders())
+      return
+    }
+    const nonce = randomBytes(18).toString('base64')
+    send(response, 200, 'text/html; charset=utf-8', preview.html.replace(/<script(?=[ >])/g, `<script nonce="${nonce}"`), {
+      ...baseHeaders(),
+      'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src data: https: http://127.0.0.1:* http://localhost:*; base-uri http://127.0.0.1:* http://localhost:*; frame-ancestors 'self'; sandbox allow-scripts`,
+    })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/pages/preview') {
@@ -899,7 +1010,7 @@ async function handleApi(
         ...(optionalString(body.reasoning) ? { reasoning: parseReasoning(optionalString(body.reasoning))! } : {}),
         ...(optionalString(body.effort) ? { effort: parseClaudeEffort(optionalString(body.effort))! } : {}),
         screenshots: screenshotIntent,
-        limits: batchLimits(body.limits, { maxPages: 5, maxScreenshots: screenshotIntent === 'disabled' ? 0 : 8, maxMinutes: 15 }),
+        limits: batchLimits(body.limits, defaultBatchLimits(scope as BatchScope, screenshotIntent !== 'disabled', targetPages)),
       },
     })
     const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', plan.id, '--cwd', root], root, requestedAgent ?? project.defaultAgent, plan.id)
@@ -920,11 +1031,24 @@ async function handleApi(
     sendJson(response, 200, await listDocumentationPlanVersions(requireProject(runtime), planVersionsRoute[1]!))
     return
   }
-  const planAction = /^\/api\/plans\/(plan-[a-z0-9-]+)\/(revise|clarify|approve|generate|resume|continue)$/.exec(url.pathname)
+  const planAction = /^\/api\/plans\/(plan-[a-z0-9-]+)\/(revise|clarify|approve|generate|resume|continue|retry)$/.exec(url.pathname)
   if (request.method === 'POST' && planAction) {
     const root = requireProject(runtime)
     const id = planAction[1]!
     const action = planAction[2]!
+    if (action === 'retry') {
+      // A plan that never got past planning has no pages to approve, so the
+      // approval rules do not apply; the planning stage simply runs again.
+      const plan = await readDocumentationPlan(root, id)
+      if (plan.status !== 'failed' || plan.failure?.stage !== 'propose') {
+        throw new DoxloopError('Only a plan whose planning stage failed can be retried here. Retry generation from the plan review, or ask the agent to revise the plan.')
+      }
+      assertNoActiveDocumentationJob(runtime)
+      await retryDocumentationPlan(root, id, 'propose')
+      const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', id, '--cwd', root], root, plan.execution.agent, id)
+      sendJson(response, 202, publicJob(job))
+      return
+    }
     if (action === 'approve') {
       sendJson(response, 200, await approveDocumentationPlan(root, id))
       return
@@ -1376,6 +1500,7 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     cwd: runtime.cwd,
     root,
     project,
+    mintlifyImport: await readOptionalJson(join(root, '.doxloop', 'mintlify-import.json')),
     effectiveDeployment: effectiveDeployment(project),
     latestDeployment: deployments.find((entry) => entry.status === 'succeeded' && entry.target === effectiveDeployment(project).target && (!effectiveDeployment(project).slug || entry.slug === effectiveDeployment(project).slug)),
     validation,
@@ -1477,7 +1602,7 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
     const itemLocation = optionalString(sourceBody.sourceLocation) ?? 'local'
     const itemPath = optionalString(sourceBody.sourcePath)
     const specificationContent = optionalString(sourceBody.specContent)
-    const baseName = sourceIdentifier(optionalString(sourceBody.name) ?? optionalString(sourceBody.sourceName) ?? (itemKind === 'openapi' ? 'api' : 'product'))
+    const baseName = sourceIdentifier(optionalString(sourceBody.name) ?? optionalString(sourceBody.sourceName) ?? (itemKind === 'openapi' ? 'api' : itemKind === 'docs-site' ? 'docs' : 'product'))
     let name = baseName
     let suffix = 2
     while (usedNames.has(name)) name = `${baseName}-${suffix++}`
@@ -1499,6 +1624,9 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
     } else if (itemKind === 'openapi' && itemPath) {
       const parsed = parseSpec(`${name}=${itemPath}`)
       sources.push(isSpecUrl(parsed.path) ? parsed : { ...parsed, path: portableRelative(root, resolve(runtime.cwd, parsed.path)) })
+    } else if (itemKind === 'docs-site') {
+      const snapshot = await docsSiteSnapshotFromBody(runtime, sourceBody)
+      sources.push(docsSiteBinding(root, name, await materializeDocsSiteSnapshot(root, name, snapshot)))
     }
   }
   await validateProjectSourceBoundaries(root, sources)
@@ -1665,6 +1793,12 @@ async function loadRuntimeJobs(root: string): Promise<{ jobs: Map<string, UiJob>
     job.recovered = true
     job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.')
     recovered = true
+    await reconcileInterruptedPlan(root, job, 'The previous Doxloop UI server stopped before this run completed. Retry the stage to run it again.')
+  }
+  // A plan job that ended while no UI server was watching it (for example a
+  // process killed from a terminal) may also have left its plan mid-stage.
+  for (const job of jobs.values()) {
+    if (job.status === 'failed') await reconcileInterruptedPlan(root, job, 'The run stopped before it reported a result. Retry the stage to run it again.')
   }
   return { jobs, recovered }
 }
@@ -1712,6 +1846,19 @@ async function validateSetupPaths(runtime: UiRuntime, raw: unknown): Promise<Rec
     } else if (sourceKind === 'openapi' && sourceSpecContent) {
       try { openapiSummary = parseOpenApi(sourceSpecContent, 'Uploaded OpenAPI specification').summary }
       catch (error) { sourcePathError = error instanceof Error ? error.message : String(error) }
+    } else if (sourceKind === 'docs-site') {
+      try {
+        if (!sourcePath) throw new DoxloopError('Enter the address of the existing documentation site.')
+        resolvedSourcePath = docsSiteScope(sourcePath).entry
+        const inspectionId = optionalString(body.inspectionId)
+        if (!inspectionId) throw new DoxloopError('Crawl the documentation site before adding it as a source.')
+        // An expired inspection is re-crawled when the project is created.
+        const inspection = runtime.docsSiteInspections.get(inspectionId)
+        if (inspection?.status === 'running') throw new DoxloopError('The documentation site is still being crawled. Wait for the crawl to finish.')
+        if (inspection?.status === 'failed') throw new DoxloopError(`The documentation site crawl failed: ${inspection.error ?? 'unknown error'}`)
+      } catch (error) {
+        sourcePathError = error instanceof Error ? error.message : String(error)
+      }
     } else if (!sourcePath) {
       sourcePathError = sourceKind === 'directory' ? 'Choose a product source directory.' : 'Enter an OpenAPI file path or URL.'
     } else if (root) {
@@ -1811,7 +1958,7 @@ async function updateProjectFromUi(root: string, raw: unknown): Promise<void> {
   await saveProjectSettings(root, update)
 }
 
-async function addSourceFromUi(root: string, raw: unknown): Promise<void> {
+async function addSourceFromUi(runtime: UiRuntime, root: string, raw: unknown): Promise<void> {
   const body = recordBody(raw)
   const project = await loadProject(root)
   const name = stringValue(body.name)
@@ -1840,8 +1987,11 @@ async function addSourceFromUi(root: string, raw: unknown): Promise<void> {
     const remote = remoteSourceFromSetupBody(body)
     const prepared = await materializeRemoteSource(root, { name, remote })
     source = { name, path: portableSourcePath(root, prepared.path), remote, ...(scope ? { scope } : {}) }
+  } else if (kind === 'docs-site') {
+    const snapshot = await docsSiteSnapshotFromBody(runtime, body)
+    source = docsSiteBinding(root, name, await materializeDocsSiteSnapshot(root, name, snapshot), scope)
   } else {
-    throw new DoxloopError('Source type must be directory, git, or openapi.')
+    throw new DoxloopError('Source type must be directory, git, openapi, or docs-site.')
   }
   const sources = [...project.sources, source]
   await validateProjectSourceBoundaries(root, sources)
@@ -1869,6 +2019,8 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
         path: portableRelative(root, resolve(root, location)),
         ...(source.remote ? { remote: source.remote } : {}),
       }
+    } else if (kind === 'docs-site') {
+      throw new DoxloopError('A documentation site source is re-crawled from Sources; to change its address, remove it and add the new site.')
     } else {
       throw new DoxloopError('Source type must be directory or openapi.')
     }
@@ -1910,6 +2062,130 @@ async function updateSourceFromUi(root: string, name: string, raw: unknown): Pro
       remote: nextRemote,
     }
   }
+  await validateProjectSourceBoundaries(root, sources)
+  await saveProjectSettings(root, { sources })
+}
+
+/**
+ * Start crawling an existing documentation site. The crawl runs in the
+ * background and the UI polls its progress; the finished snapshot stays in
+ * memory until a source is created from it or the inspection expires.
+ */
+async function startDocsSiteInspection(runtime: UiRuntime, body: Record<string, unknown>): Promise<DocsSiteInspection> {
+  const url = stringValue(body.url)
+  const { entry } = docsSiteScope(url)
+  const requestedLimit = Number(body.pageLimit)
+  const pageLimit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(MAX_DOCS_CRAWL_PAGE_LIMIT, Math.floor(requestedLimit)) : DEFAULT_DOCS_CRAWL_PAGE_LIMIT
+  for (const [id, existing] of runtime.docsSiteInspections) {
+    if (Date.now() - Date.parse(existing.startedAt) > DOCS_SITE_INSPECTION_TTL_MS) runtime.docsSiteInspections.delete(id)
+  }
+  const running = [...runtime.docsSiteInspections.values()].filter((item) => item.status === 'running')
+  if (running.length >= 2) throw new DoxloopError('Two documentation sites are already being crawled. Wait for one to finish.')
+  const inspection: DocsSiteInspection = {
+    id: randomBytes(8).toString('hex'),
+    url: entry,
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    progress: { fetched: 0, discovered: 0 },
+    controller: new AbortController(),
+  }
+  runtime.docsSiteInspections.set(inspection.id, inspection)
+  const cookieHeader = await docsSiteCookieHeader(runtime, entry)
+  void crawlDocumentationSite(url, {
+    pageLimit,
+    ...(cookieHeader ? { cookieHeader } : {}),
+    signal: inspection.controller.signal,
+    onProgress: (progress) => { inspection.progress = { fetched: progress.fetched, discovered: progress.discovered } },
+  }).then((snapshot) => {
+    inspection.snapshot = snapshot
+    inspection.status = 'completed'
+    inspection.finishedAt = new Date().toISOString()
+    inspection.progress = { fetched: snapshot.totals.pages + snapshot.skipped.length, discovered: snapshot.totals.discovered }
+  }).catch((error: unknown) => {
+    inspection.status = 'failed'
+    inspection.finishedAt = new Date().toISOString()
+    inspection.error = error instanceof Error ? error.message : String(error)
+  })
+  return inspection
+}
+
+function docsSiteInspectionState(inspection: DocsSiteInspection): Record<string, unknown> {
+  const snapshot = inspection.snapshot
+  return {
+    id: inspection.id,
+    url: inspection.url,
+    status: inspection.status,
+    startedAt: inspection.startedAt,
+    ...(inspection.finishedAt ? { finishedAt: inspection.finishedAt } : {}),
+    progress: inspection.progress,
+    ...(inspection.error ? { error: inspection.error } : {}),
+    ...(snapshot ? {
+      summary: {
+        url: snapshot.url,
+        pages: snapshot.totals.pages,
+        words: snapshot.totals.words,
+        images: snapshot.totals.images,
+        discovered: snapshot.totals.discovered,
+        ...(snapshot.generator ? { generator: snapshot.generator } : {}),
+        discovery: snapshot.discovery,
+        truncated: snapshot.truncated,
+        pageLimit: snapshot.pageLimit,
+        skipped: snapshot.skipped.length,
+        brokenLinks: snapshot.brokenLinks.length,
+        warnings: snapshot.warnings,
+        samplePages: snapshot.pages.slice(0, 8).map((page) => ({ path: page.path, title: page.title, words: page.words })),
+      },
+    } : {}),
+  }
+}
+
+/** The crawl a source is created from: a completed inspection, or a fresh synchronous crawl of the URL. */
+async function docsSiteSnapshotFromBody(runtime: UiRuntime, body: Record<string, unknown>): Promise<DocsSiteSnapshot> {
+  const inspectionId = optionalString(body.inspectionId)
+  if (inspectionId) {
+    const inspection = runtime.docsSiteInspections.get(inspectionId)
+    if (inspection?.status === 'completed' && inspection.snapshot) {
+      runtime.docsSiteInspections.delete(inspectionId)
+      return inspection.snapshot
+    }
+    if (inspection?.status === 'running') throw new DoxloopError('The documentation site is still being crawled. Wait for the crawl to finish.')
+    if (inspection?.status === 'failed') throw new DoxloopError(`The documentation site crawl failed: ${inspection.error ?? 'unknown error'}`)
+  }
+  const url = optionalString(body.url) ?? optionalString(body.sourcePath) ?? optionalString(body.path)
+  if (!url) throw new DoxloopError('Enter the address of the existing documentation site.')
+  const cookieHeader = await docsSiteCookieHeader(runtime, url)
+  return crawlDocumentationSite(url, cookieHeader ? { cookieHeader } : {})
+}
+
+/**
+ * A documentation site behind the same sign-in as the captured application
+ * reuses the recorded browser session; cookies are matched by domain, so an
+ * unrelated site receives nothing.
+ */
+async function docsSiteCookieHeader(runtime: UiRuntime, url: string): Promise<string | undefined> {
+  try {
+    if (runtime.root) {
+      const stored = await loadCaptureSession(runtime.root)
+      return sessionCookieHeader(stored?.state, url)
+    }
+    return sessionCookieHeader(runtime.pendingCaptureSession?.state, url)
+  } catch {
+    return undefined
+  }
+}
+
+/** Re-crawl a documentation site source in place; the new snapshot replaces the binding's path and provenance. */
+async function refreshDocsSiteSource(runtime: UiRuntime, root: string, name: string): Promise<void> {
+  const project = await loadProject(root)
+  const index = project.sources.findIndex((source) => source.name === name)
+  const source = project.sources[index]
+  if (!source) throw new DoxloopError(`Source "${name}" does not exist.`)
+  if ((source.kind ?? 'directory') !== 'docs-site' || !source.site) throw new DoxloopError(`Source "${name}" is not a documentation site.`)
+  const cookieHeader = await docsSiteCookieHeader(runtime, source.site.url)
+  const snapshot = await crawlDocumentationSite(source.site.url, cookieHeader ? { cookieHeader } : {})
+  const materialized = await materializeDocsSiteSnapshot(root, name, snapshot)
+  const sources = [...project.sources]
+  sources[index] = docsSiteBinding(root, name, materialized, source.scope)
   await validateProjectSourceBoundaries(root, sources)
   await saveProjectSettings(root, { sources })
 }
@@ -2202,6 +2478,30 @@ function startAgentInstallJob(runtime: UiRuntime, agent: AgentName): UiJob {
   return job
 }
 
+function planStageForJob(type: string): DocumentationPlanFailure['stage'] | undefined {
+  if (type === 'plan:propose') return 'propose'
+  if (type === 'plan:revise') return 'revise'
+  if (type === 'plan:generate' || type === 'plan:continue') return 'generate'
+  return undefined
+}
+
+/**
+ * A plan job that ends without the CLI recording a result (killed, crashed,
+ * or the UI server restarted underneath it) would leave its plan at
+ * "planning" or "generating" with nothing to retry. Record the interruption
+ * on the plan so the review offers a retry; a plan that already recorded its
+ * own outcome is left as it is.
+ */
+async function reconcileInterruptedPlan(root: string | undefined, job: UiJob, message: string): Promise<void> {
+  const stage = planStageForJob(job.type)
+  if (!root || !job.planId || !stage) return
+  try {
+    await markDocumentationPlanInterrupted(root, job.planId, stage, message)
+  } catch {
+    // The job log already carries the failure; the plan file stays as it was.
+  }
+}
+
 function startCliJob(
   runtime: UiRuntime,
   type: string,
@@ -2259,6 +2559,9 @@ function startCliJob(
     job.finishedAt = new Date().toISOString()
     delete job.child
     publishJobs(runtime)
+    if (job.status === 'failed') {
+      void reconcileInterruptedPlan(runtime.root, job, `The run stopped before it reported a result (${signal ? `signal ${signal}` : `exit code ${code ?? 1}`}). Retry the stage to run it again.`)
+    }
   })
   runtime.jobs.set(id, job)
   publishJobs(runtime)

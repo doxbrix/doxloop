@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countPlanPages, formatPlanSection, groupPlanPages, planActionLabel, planApprovalControls } from './plan-review'
+import { countPlanPages, formatPlanSection, groupPlanPages, planActionLabel, planApprovalControls, planPrimaryAction } from './plan-review'
 import type { DocumentationPlanPage } from './types'
 
 const pages: DocumentationPlanPage[] = [
@@ -87,3 +87,12 @@ function page(
 ): DocumentationPlanPage {
   return { id, title, path: id, type, action, priority, purpose: `${title} purpose`, rationale: '', evidence: [], evidenceDetails: [] }
 }
+
+describe('planPrimaryAction', () => {
+  it('retries planning, not generation, when the plan failed before proposing pages', () => {
+    expect(planPrimaryAction({ status: 'failed', failure: { stage: 'propose' } })).toBe('retry-planning')
+    expect(planPrimaryAction({ status: 'failed', failure: { stage: 'generate' } })).toBe('retry-generating')
+    expect(planPrimaryAction({ status: 'approved' })).toBe('generate')
+    expect(planPrimaryAction({ status: 'ready-for-review' })).toBe('approve')
+  })
+})

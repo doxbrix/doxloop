@@ -184,6 +184,8 @@ export function replayInitCommand(plan: InitPlan): string {
   for (const source of plan.sources) {
     if ((source.kind ?? 'directory') === 'openapi') {
       parts.push('--spec', quoteArgument(`${source.name}=${source.path}`))
+    } else if ((source.kind ?? 'directory') === 'docs-site') {
+      parts.push('--docs', quoteArgument(`${source.name}=${source.site?.url ?? source.path}`))
     } else {
       parts.push('--source', quoteArgument(`${source.name}=${source.path}`))
     }

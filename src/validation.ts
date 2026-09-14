@@ -45,7 +45,8 @@ export async function validateProject(root: string): Promise<ValidationResult> {
   if (project.generator === 'doxbrix') {
     const site = await loadSiteConfig(root, project)
     const configFile = relativePath(root, await siteConfigPath(root, project))
-    validateDoxbrixNavigation(site.spaces, pageSet, pages, configFile, issues)
+    const defaultVersion = (site.versions?.find((entry) => entry.default || entry.isDefault) ?? site.versions?.[0])?.version
+    validateDoxbrixNavigation(site.spaces.map((space) => ({ ...space, ...(defaultVersion && !space.version ? { version: defaultVersion } : {}) })), pageSet, pages, configFile, issues)
     await validateDoxbrixTheme(site.theme, contentRoot, configFile, issues)
   } else {
     issues.push(
@@ -224,7 +225,7 @@ export interface DoxbrixNavigationEntry {
 
 /** Flatten Doxbrix navigation in reader order for validation and page discovery. */
 export function readDoxbrixNavigation(
-  spaces: Array<{ name: string; nav: DoxbrixNavNode[] }>,
+  spaces: Array<{ name: string; version?: string; nav: DoxbrixNavNode[] }>,
 ): DoxbrixNavigationEntry[] {
   const entries: DoxbrixNavigationEntry[] = []
   const visit = (nodes: DoxbrixNavNode[], section?: string): void => {
@@ -241,13 +242,15 @@ export function readDoxbrixNavigation(
 }
 
 function validateDoxbrixNavigation(
-  spaces: Array<{ name: string; nav: DoxbrixNavNode[] }>,
+  spaces: Array<{ name: string; version?: string; nav: DoxbrixNavNode[] }>,
   pageSet: Set<string>,
   pages: string[],
   configFile: string,
   issues: ValidationIssue[],
 ): void {
   const navigation = new Set<string>()
+  const versions = new Map<string, Set<string>>()
+  let versionNavigation = new Set<string>()
   if (spaces.length === 0) {
     issues.push(error('navigation-spaces', 'Doxbrix docs.json needs at least one space.', configFile))
   }
@@ -264,12 +267,13 @@ function validateDoxbrixNavigation(
           issues.push(error('navigation-page', `${nodeLocation} needs a page file.`, configFile))
           continue
         }
-        if (navigation.has(node.file)) {
+        if (versionNavigation.has(node.file)) {
           issues.push(
             error('duplicate-navigation', `"${node.file}" appears more than once.`, configFile),
           )
         }
         navigation.add(node.file)
+        versionNavigation.add(node.file)
         if (!pageSet.has(node.file)) {
           issues.push(
             error(
@@ -287,6 +291,11 @@ function validateDoxbrixNavigation(
           continue
         }
         visit(node.items, `group "${node.label}"`)
+        // A group that holds one page is a page with an extra click in front
+        // of it; the planner is told to give every group at least two.
+        if (nodes.filter((sibling) => sibling && typeof sibling === 'object' && sibling.type === 'group').length > 1 && node.items.filter((item) => item && typeof item === 'object' && item.type === 'page').length === 1 && node.items.length === 1) {
+          issues.push(warning('single-page-group', `Navigation group "${node.label}" holds one page; merge it into a neighbouring group or give it the pages that belong with it.`, configFile))
+        }
       } else if (
         !['label', 'divider', 'link', 'api'].includes(node.type)
       ) {
@@ -308,7 +317,20 @@ function validateDoxbrixNavigation(
       )
       continue
     }
+    const version = space.version ?? ''
+    versionNavigation = versions.get(version) ?? new Set<string>()
+    versions.set(version, versionNavigation)
+    const before = versionNavigation.size
     visit(space.nav, `space "${space.name}"`)
+    // A top-level space is a destination in the site header. One that holds
+    // a handful of pages splits a reader journey for no gain; the planner is
+    // asked for at least five pages before it promotes a surface to a space.
+    if (spaces.length > 1 && versionNavigation.size - before < 5) {
+      issues.push(warning('thin-space', `Space "${space.name}" holds ${versionNavigation.size - before} page${versionNavigation.size - before === 1 ? '' : 's'}; fold it into another space as a group, or give it the pages that make it a real reader surface.`, configFile))
+    }
+    if (/^(?:documentation|docs|reference)$/i.test(space.name.trim()) && spaces.length > 1) {
+      issues.push(warning('generic-space-name', `Space "${space.name}" is a generic label; name spaces after the product's reader surfaces (for example "Guides", "API", "Self-hosting").`, configFile))
+    }
   }
 
   for (const id of pages) {
@@ -551,7 +573,7 @@ function validateDoxbrixComponents(
   }
 
   if (issues.length === 0) {
-    issues.push(...validateDoxbrixApiEndpoints(masked, file))
+    issues.push(...validateDoxbrixApiEndpoints(masked, file, content))
   }
   return issues
 }
@@ -700,9 +722,16 @@ function maskDoxbrixCode(content: string): string {
   return masked.join('\n')
 }
 
+/**
+ * `content` has its code spans and fences masked to spaces (same length, same
+ * offsets) so component tags inside examples are not parsed; `raw` is the
+ * unmasked page, consulted only where the example itself is the payload — a
+ * fenced SVG or RSS body inside <Response> is a body, not an empty one.
+ */
 function validateDoxbrixApiEndpoints(
   content: string,
   file: string,
+  raw: string = content,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   for (const [index, match] of [
@@ -711,6 +740,7 @@ function validateDoxbrixApiEndpoints(
     const label = `API endpoint ${index + 1}`
     const attributes = componentAttributes(match[1] ?? '')
     const body = match[2] ?? ''
+    const bodyOffset = (match.index ?? 0) + match[0].length - body.length - '</ApiEndpoint>'.length
     const method = stringAttribute(attributes.method).toUpperCase()
     const path = stringAttribute(attributes.path)
     const baseUrl = stringAttribute(attributes.baseUrl)
@@ -797,7 +827,9 @@ function validateDoxbrixApiEndpoints(
     }
 
     for (const placeholder of path.matchAll(/\{([^}]+)}/g)) {
-      const name = placeholder[1] ?? ''
+      // A gRPC-gateway template names its variable before an "=" pattern:
+      // "/api/v1/{name=memos/*}" is the path parameter "name".
+      const name = (placeholder[1] ?? '').split('=')[0]!.trim()
       if (!pathParameters.has(name)) {
         issues.push(
           error(
@@ -843,7 +875,10 @@ function validateDoxbrixApiEndpoints(
           ),
         )
       }
-      if ((responseMatch[2] ?? '').trim() === '') {
+      const responseBody = responseMatch[2] ?? ''
+      const responseOffset = bodyOffset + (responseMatch.index ?? 0) + responseMatch[0].length - responseBody.length - '</Response>'.length
+      const rawResponseBody = raw.slice(responseOffset, responseOffset + responseBody.length)
+      if (responseBody.trim() === '' && rawResponseBody.trim() === '') {
         issues.push(
           error(
             'api-endpoint-response',
@@ -911,7 +946,9 @@ export function hasDiagram(raw: string): boolean {
 
 const PROCEDURAL_TYPES = new Set(['how-to', 'tutorial', 'getting-started'])
 /** Minimum prose words before a page reads as a stub rather than documentation. */
-const MINIMUM_WORDS: Record<string, number> = { reference: 120, concept: 250, procedure: 250, other: 150 }
+// A five-step UI guide with prerequisites, verification, and troubleshooting
+// runs past 350 words; the earlier 250 let 300-word skeletons through.
+const MINIMUM_WORDS: Record<string, number> = { reference: 200, concept: 300, procedure: 350, other: 200 }
 const MINIMUM_STEPS = 3
 
 /**

@@ -14,6 +14,27 @@ afterEach(async () => {
 })
 
 describe('Doxbrix static build', () => {
+  test('uses the visible navigation homepage instead of an alphabetically earlier imported page', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-build-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+    config.spaces = [{ name: 'Guides', version: 'v2', nav: [
+      { type: 'group', label: 'Imported pages', hidden: true, items: [{ type: 'page', file: 'AAA-audit' }] },
+      { type: 'page', file: 'quickstart' }, { type: 'page', file: 'index' },
+    ] }]
+    config.spaces.push({ name: 'Guides', version: 'v1', nav: [{ type: 'page', file: 'index' }] })
+    config.versions = [{ version: 'v1' }, { version: 'v2', isDefault: true }]
+    config.spaces.reverse()
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+    await writeFile(join(root, 'AAA-audit.md'), '---\ntitle: Internal audit\n---\nNot the homepage.')
+    await writeFile(join(root, 'quickstart.mdx'), '---\ntitle: Start here\ndescription: Begin using the product.\n---\nWelcome.')
+    await buildDoxbrixStaticSite({ root })
+    const html = await readFile(join(root, 'build', 'index.html'), 'utf8')
+    expect(html).toContain('<title>Start here')
+    expect(html).toContain('aria-label="Documentation version: v2"')
+  })
+
   test('writes pages, assets, search, sitemap, robots, and project-site URLs', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-build-'))
     roots.push(parent)

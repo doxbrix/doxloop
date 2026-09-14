@@ -7,6 +7,20 @@ uses semantic versioning after its first stable release.
 
 ### Added
 
+- **Rewrite existing documentation.** **Add source → Existing documentation**
+  (in the setup wizard and on **Sources**) takes the address of the docs you
+  publish today. Doxloop crawls the site through its sitemap, `llms.txt`, and
+  links into a read-only Markdown snapshot, and the planner audits it against
+  your other sources: the plan review gains an **Existing documentation
+  audit** with coverage gaps, contradicted claims, obsolete and preserved
+  content, findings, and a decision for every crawled page (rewrite, merge,
+  preserve, or drop). Approving the plan records redirects from every old page
+  to the page that absorbs it. With only the site connected the agent
+  restructures and rewrites what the pages already say and marks every page
+  `inferred` until a product source is connected. The CLI accepts
+  `--docs <url>` on `init` and `create`, and the globe action on **Sources**
+  re-crawls a site. See [docs/existing-documentation.md](docs/existing-documentation.md).
+
 - **Screenshots behind a login.** **Settings → Visual evidence → Application
   sign-in** (and the **Does this page require sign-in?** step of the setup
   wizard) gets the capture browser past a login page two ways. **Sign in with
@@ -108,6 +122,110 @@ uses semantic versioning after its first stable release.
 
 ### Fixed
 
+- **Saved sign-in reached the planner but not the writer.** Generation runs
+  in a throwaway workspace under `.doxloop/runs`, and the capture browser's
+  session and credentials are keyed by project path, so the authoring run
+  started its capture server without them. The agent typed the secret names
+  literally, the sign-in failed, and every screenshot guide ended text-only.
+  Proposal runs now load the sign-in material from the project, and a
+  secrets file orphaned by a killed run is swept before the next run starts.
+- **Comprehensive depth produced a five-page batch.** The setup wizard sent
+  every new plan with the small-batch limits (five pages, eight screenshots,
+  15 minutes) whatever depth was chosen, and the plan review showed the cap
+  only after planning had already trimmed the structure to fit. New plans now
+  take their limits from the depth, the wizard's Review step shows them, and
+  changing the depth on the Update page resets the run limits to match.
+- **A comprehensive plan no longer dies in the corrective pass.** Planning
+  was cut off at the 20-minute default even when the batch allowed 120, and
+  when the pass that repairs failed planning gates stopped, the complete
+  first proposal was thrown away. Planning now runs as long as the batch's
+  minutes unless a limit is configured, keeps the first proposal with its
+  advisories when the corrective pass does not finish.
+- **The Claude planner can open the application.** Planning used Claude
+  Code's plan mode, which refuses the capture browser's navigation, so the
+  planner spent its turns on blocked calls and never saw the screens it was
+  planning screenshots for. Planning now runs read-only by denying the
+  writing tools instead, so the capture browser works during planning as it
+  already did for Codex.
+- **A plan that failed while planning can be retried from its page.** The
+  plan review used to offer only "Retry generating", disabled because the
+  failed plan had no pages and no screenshot guide yet. It now offers
+  **Retry planning**, which runs the planning stage again with the same
+  brief.
+- **A killed planning or generation run no longer strands its plan.** A
+  process that was killed, crashed, or lost its UI server used to leave the
+  plan at "planning" or "generating" with nothing to retry. The UI now
+  records the interruption on the plan when the job ends and when it starts
+  up, so the review offers the retry.
+- **Planning continues from the reply it already has.** The planner's reply
+  is saved the moment it arrives, so a run stopped by its time limit, a
+  crash, or the user resumes from that reply instead of repeating the whole
+  planning pass. The saved reply is used only for the same brief, settings,
+  and source snapshot, and is discarded once the plan reaches review.
+- **Planning is faster.** A comprehensive plan used to spend most of its
+  time clicking through the application and then minutes emitting a very
+  long reply. The planner now explores the application within a fixed
+  budget of browser calls, using the source's routes and labels as the
+  inventory of screens; it is asked for a compact reply; and it runs at
+  medium effort, since planning is an inventory task over evidence Doxloop
+  has already extracted (authoring keeps the run's effort). The corrective
+  pass, which costs as much as the first proposal because the agent returns
+  the whole plan again, now runs only for findings that would block
+  approval; thin or missing screenshot coverage is reported as an advisory
+  on the plan review instead, where **Update plan** can ask for more. A
+  "recommended" screenshot label in a required-screenshot run is corrected
+  in place rather than sent back for a second pass, and the planner is told
+  to fit its captures inside the batch's screenshot maximum instead of
+  leaving the reviewer to trim. A batch now allows three screenshots per
+  page it may write (15 for a starter, 36 for a standard, 120 for a
+  comprehensive run, up to 300): the planner is asked for a capture of every
+  screen-changing step, so the old one-per-page cap left every real plan
+  over its limit at approval.
+- **The writer can validate its own work again, and finished runs are no
+  longer thrown away.** Inside the agent's sandbox, every Node process died
+  with "SecItemCopyMatching failed -67674" before printing anything whenever
+  the shell exported `NODE_USE_SYSTEM_CA=1` (it makes Node read the macOS
+  Keychain trust store at startup, which the sandbox denies), so `doxloop
+  test` never ran, the writer never saw its thin-page warnings, and it either
+  built substitute checks or left the warnings for the reviewer. Doxloop now
+  strips that variable from the agent's environment. A measured comprehensive
+  run (33 pages, 34 screenshots) took 35 minutes, one of them tool execution;
+  the rest is the model, at about 18 seconds per screenshot and 28 per page,
+  with six of ten output tokens hidden reasoning at **Effort: high**. Running
+  the same brief at medium was a tenth faster and noticeably shallower — a
+  fifth fewer words, two troubleshooting sections instead of ten, translation
+  keys quoted in place of displayed labels — so high stays the default; the
+  capture guide asks for one screenshot straight after the action that
+  produces a state, with accessibility snapshots only where the next click
+  needs a reference. Three Doxloop checks then refused that run's complete
+  output, each for a reason no reviewer would accept: an evidence map whose
+  page confidence said `contradicted` (a claim-level word; it now reads as
+  `needs-human`), 27 `api-endpoint-path-param` errors for gRPC-gateway paths
+  such as `/api/v1/{name=memos/*}` (the variable is `name`), and a "page
+  outside the approved batch" failure for the starter `index.mdx` the brief
+  itself requires the agent to replace. A guide that captured one more
+  distinct state than the plan approved is kept as extra evidence rather than
+  failing the run. **Continue the interrupted run** tells the agent to fix
+  the errors first and then the warnings on pages it wrote. And the file
+  contract now says outright which planned page replaces which generated
+  starter file and where it belongs — a plan that put the starter
+  quickstart's replacement at `getting-started/quickstart` used to leave the
+  writer keeping `quickstart.mdx` in place while every link pointed at the
+  planned path.
+- **The corrective planning pass rarely runs, and is cheap when it does.**
+  Three comprehensive runs in a row paid a second planning pass — six to
+  twenty minutes, twice ending in a failed plan — for slips no reviewer would
+  have sent back: a start path with a hash (`/setting#member`, how a
+  single-page application addresses a tab), a guide whose visual purpose was
+  written in the page's rationale, or a workflow left out while the same
+  steps were spelled out in the capture sequence. A hash is now a valid start
+  path, and the other slips are repaired in place and noted on the log. When
+  the pass does run, it is scoped to the named findings and told not to sign
+  in and explore the application again, which it used to do from scratch;
+  the first proposal travels as compact JSON. And a reviewer who chose **Use
+  recommended defaults** for planner questions gets those decisions in the
+  first pass — the planner is told to decide and record them — instead of a
+  third pass that re-sent the whole plan to apply its own recommendations.
 - **The setup wizard explains a rejected source folder.** Starting `doxloop ui`
   inside the product checkout and adding that folder as a source used to fail
   with no message, because the new workspace defaults to a folder inside the

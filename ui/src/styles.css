@@ -2073,3 +2073,65 @@ body:has(.shell .reference-sidebar-nav) { background: #f7f8fb; }
 .setup-generator-preflight-checks li.warning { color: var(--warn, #c2410c); }
 .setup-generator-preflight-checks li.fail { color: var(--danger, #b91c1c); }
 .setup-generator-preflight-checks li strong { color: var(--heading, #111827); font-weight: 600; }
+
+/* Existing documentation (docs-site) sources */
+.source-service-icon.docs-site { color: #b45f06; background: #fdf1e2; }
+.source-type-pill.docs-site { color: #9a5b12; background: #fbefdf; }
+.sources-reference-dialog.docs-site { width: min(600px, 100%); }
+.docs-site-fields { display: grid; gap: 12px; }
+.docs-site-url-input { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.docs-site-url-input > .icon { color: #64718b; }
+.docs-site-progress { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #d8dde8; border-radius: 8px; background: #f6f8fb; }
+.docs-site-progress strong { display: block; color: var(--heading); font-size: 13px; }
+.docs-site-progress small { color: #62708a; font-size: 12px; }
+.docs-site-summary { display: grid; gap: 10px; padding: 14px; border: 1px solid #cfe6d8; border-radius: 8px; background: #f2faf5; }
+.docs-site-summary header { display: flex; align-items: flex-start; gap: 10px; }
+.docs-site-summary header strong { display: block; color: var(--heading); font-size: 13.5px; }
+.docs-site-summary header small { color: #4f6a5b; font-size: 12px; line-height: 17px; }
+.docs-site-summary-icon { display: grid; flex: 0 0 auto; width: 26px; height: 26px; place-items: center; border-radius: 50%; color: #169462; background: #ddf6eb; }
+.docs-site-sample-pages { display: grid; gap: 4px; margin: 0; padding: 0 0 0 36px; list-style: none; }
+.docs-site-sample-pages li { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; color: var(--heading); }
+.docs-site-sample-pages li small { flex: 0 0 auto; color: #62708a; font-size: 11.5px; }
+.docs-site-sample-pages .docs-site-more { color: #62708a; font-style: italic; }
+.docs-site-notes { display: grid; gap: 4px; margin: 0; padding: 0 0 0 36px; color: #8a5a12; font-size: 12px; line-height: 17px; }
+.docs-site-notes li { list-style: disc; margin-left: 14px; }
+
+/* Plan review: existing documentation audit */
+.plan-existing-docs { display: grid; gap: 16px; }
+.plan-existing-docs-source { display: grid; gap: 12px; }
+.plan-existing-docs-source > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.plan-existing-docs-source > header h3 { font-size: 14px; color: var(--heading); }
+.plan-existing-docs-source > header small { color: #62708a; font-size: 12px; }
+.plan-existing-docs-source > p { color: var(--text); font-size: 13.5px; line-height: 20px; }
+.plan-existing-docs-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.plan-existing-docs-stats > div { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid #e0e4ec; border-radius: 8px; background: #fafbfd; }
+.plan-existing-docs-stats strong { font-size: 18px; color: var(--heading); }
+.plan-existing-docs-stats span { color: #62708a; font-size: 11.5px; }
+.plan-existing-docs-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.plan-existing-docs-columns section { display: grid; gap: 6px; padding: 12px; border: 1px solid #e0e4ec; border-radius: 8px; }
+.plan-existing-docs-columns h4 { font-size: 12px; color: var(--heading); text-transform: uppercase; letter-spacing: .04em; }
+.plan-existing-docs-columns ul { display: grid; gap: 4px; margin: 0; padding: 0 0 0 16px; font-size: 12.5px; line-height: 18px; }
+.plan-existing-docs-columns .empty { color: #8a94a8; font-style: italic; font-size: 12.5px; }
+.plan-existing-docs-columns section.gaps { border-color: #f1d3a0; background: #fff9f0; }
+.plan-existing-docs-columns section.contradicted { border-color: #f0b7b7; background: #fff5f5; }
+.plan-existing-docs-columns section.obsolete { border-color: #dcdfe6; background: #f7f8fb; }
+.plan-existing-docs-columns section.preserved { border-color: #cfe6d8; background: #f2faf5; }
+.plan-existing-docs-findings { display: grid; gap: 8px; }
+.plan-existing-docs-findings article { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 10px 12px; border: 1px solid #e0e4ec; border-radius: 8px; }
+.plan-existing-docs-findings article strong { display: block; font-size: 13px; color: var(--heading); }
+.plan-existing-docs-findings article p { margin: 2px 0 0; font-size: 12.5px; line-height: 18px; color: var(--text); }
+.plan-existing-docs-findings article small { display: block; margin-top: 4px; color: #62708a; font-size: 11.5px; }
+.severity-pill { align-self: start; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: capitalize; }
+.severity-pill.blocker { color: #a12525; background: #fde8e8; }
+.severity-pill.major { color: #9a5b12; background: #fbefdf; }
+.severity-pill.minor { color: #45566f; background: #eef1f6; }
+.plan-existing-docs-dispositions summary { cursor: pointer; font-size: 13px; color: var(--heading); }
+.plan-existing-docs-dispositions table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 12.5px; }
+.plan-existing-docs-dispositions th, .plan-existing-docs-dispositions td { padding: 6px 8px; border-bottom: 1px solid #e6e9f0; text-align: left; vertical-align: top; }
+.plan-existing-docs-dispositions th { color: #62708a; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.plan-existing-docs-dispositions td small { display: block; color: #62708a; }
+.disposition-pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: capitalize; }
+.disposition-pill.rewrite { color: #1d5fb8; background: #e6f0fc; }
+.disposition-pill.merge { color: #6b4fbb; background: #f0ebfa; }
+.disposition-pill.preserve { color: #169462; background: #ddf6eb; }
+.disposition-pill.drop { color: #7a8398; background: #eef1f6; }

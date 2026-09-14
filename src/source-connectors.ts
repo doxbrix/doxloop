@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { lstat, readdir } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
+import { describeDocsSite, readDocsSiteManifest } from './docs-site.js'
 import { DoxloopError } from './errors.js'
 import { loadOpenApiSource } from './openapi.js'
 import { isSpecUrl, sourceKind } from './project.js'
@@ -36,7 +37,8 @@ export interface SourceConnector {
 }
 
 export function connectorForSource(source: SourceBinding): SourceConnector {
-  return sourceKind(source) === 'openapi' ? openApiConnector : directoryConnector
+  const kind = sourceKind(source)
+  return kind === 'openapi' ? openApiConnector : kind === 'docs-site' ? docsSiteConnector : directoryConnector
 }
 
 export async function sourceHealth(root: string, sources: SourceBinding[]): Promise<SourceHealth[]> {
@@ -188,6 +190,74 @@ const directoryConnector: SourceConnector = {
       revision: head ?? snapshot.revision,
       summary: `${inventory.metadata.entries ?? 0} top-level entries available`,
       details: source.remote ? [`Monitored from ${source.remote.provider}:${redacted.remote?.repository}@${source.remote.branch}`] : ['Local read-only directory'],
+      ...(source.scope ? { scope: source.scope } : {}),
+    }
+  },
+}
+
+/**
+ * An existing documentation website, crawled into a Markdown snapshot. The
+ * snapshot is frozen at crawl time, so health reports what was crawled and
+ * change detection compares snapshot contents; a re-crawl replaces the folder.
+ */
+const docsSiteConnector: SourceConnector = {
+  id: 'docs-site',
+  version: SOURCE_CONNECTOR_API_VERSION,
+  async validate(root, source) { await readDocsSiteManifest(root, source) },
+  async inventory(root, source) {
+    const manifest = await readDocsSiteManifest(root, source)
+    return {
+      identifiers: manifest.pages.map((page) => page.file).sort(),
+      metadata: {
+        url: manifest.url,
+        pages: manifest.totals.pages,
+        words: manifest.totals.words,
+        crawledAt: manifest.crawledAt,
+        ...(manifest.generator ? { generator: manifest.generator } : {}),
+      },
+    }
+  },
+  async snapshot(root, source) {
+    const manifest = await readDocsSiteManifest(root, source)
+    return { revision: manifest.hash, capturedAt: manifest.crawledAt }
+  },
+  async detectChanges(previous, current) { return { changed: previous?.revision !== current.revision, identifiers: [] } },
+  evidenceIdentifiers() { return [] },
+  redact(source) {
+    if (!source.site) return source
+    try {
+      const url = new URL(source.site.url)
+      url.search = url.search ? '?…' : ''
+      return { ...source, site: { ...source.site, url: url.toString() } }
+    } catch { return source }
+  },
+  async health(root, source) {
+    const manifest = await readDocsSiteManifest(root, source)
+    const baseline = (await readSyncState(root)).sources[source.name]
+    const checkedAt = new Date().toISOString()
+    const site = source.site ?? { url: manifest.url, crawledAt: manifest.crawledAt, pages: manifest.totals.pages, words: manifest.totals.words, hash: manifest.hash }
+    const stale = source.site !== undefined && source.site.hash !== manifest.hash
+    return {
+      name: source.name,
+      connector: this.id,
+      status: stale ? 'warning' : 'healthy',
+      checkedAt,
+      lastSuccessfulAt: checkedAt,
+      ...(baseline?.recordedAt ? { lastMonitoringAt: baseline.recordedAt } : {}),
+      location: this.redact(source).site?.url ?? manifest.url,
+      provider: 'https',
+      monitored: false,
+      revision: manifest.hash,
+      summary: stale ? `Snapshot on disk differs from the recorded crawl; re-crawl the site.` : describeDocsSite(site),
+      details: [
+        `Existing documentation site: ${manifest.url}`,
+        `${manifest.totals.pages} pages, ${manifest.totals.words} words${manifest.generator ? `, ${manifest.generator}` : ''}`,
+        `Discovered through ${manifest.discovery.length > 0 ? manifest.discovery.join(', ') : 'the entry page'}`,
+        ...(manifest.truncated ? [`Crawl stopped at the ${manifest.pageLimit}-page limit.`] : []),
+        ...(manifest.brokenLinks.length > 0 ? [`${manifest.brokenLinks.length} broken internal links`] : []),
+        'Frozen at crawl time; use Re-crawl to refresh.',
+      ],
+      docsSite: { ...site, brokenLinks: manifest.brokenLinks.length },
       ...(source.scope ? { scope: source.scope } : {}),
     }
   },

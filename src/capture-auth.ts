@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DoxloopError } from './errors.js'
@@ -154,12 +154,44 @@ export async function prepareCaptureAuth(root: string): Promise<CaptureAuthMater
     material.storageStatePath = path
   }
   if (credentials) {
+    await removeStaleSecretsFiles(directory)
     const path = join(directory, `secrets-${process.pid}-${Date.now()}.env`)
     await writePrivateFile(path, `${CAPTURE_USERNAME_SECRET}=${dotenvValue(credentials.username)}\n${CAPTURE_PASSWORD_SECRET}=${dotenvValue(credentials.password)}\n`)
     material.secretsPath = path
     material.cleanup = () => rm(path, { force: true })
   }
   return material
+}
+
+/**
+ * A run that is killed never reaches its cleanup, so its secrets file would
+ * outlive it. Files named for a process that no longer exists are removed
+ * before a new one is written; a live run's file is left alone.
+ */
+async function removeStaleSecretsFiles(directory: string): Promise<void> {
+  let entries: string[]
+  try {
+    entries = await readdir(directory)
+  } catch {
+    return
+  }
+  await Promise.all(entries.map(async (entry) => {
+    const match = /^secrets-(\d+)-\d+\.env$/.exec(entry)
+    if (!match) return
+    const pid = Number(match[1])
+    if (pid === process.pid || processAlive(pid)) return
+    await rm(join(directory, entry), { force: true })
+  }))
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
 }
 
 /**

@@ -336,6 +336,7 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
     const exitCode = await (options.author ?? runAuthor)({
       onFailure: (detail) => { failureDetail = detail },
       root: workspace,
+      captureAuthRoot: options.root,
       mode: editRequest ? 'update' : persisted.mode,
       nonInteractive: true,
       recordHistory: false,
@@ -516,9 +517,14 @@ async function finalizeProposalWorkspace(input: {
       const planned = matchPlanPage(context.plan, page.path)
       if (!planned) {
         // Every brief tells the agent to replace generated starter pages, and
-        // the plan may put a starter's replacement at a new path. Removing the
-        // scaffold is part of the approved work, not an expansion of it.
-        if (page.kind === 'deleted' && await isStarterFile(join(directory, BEFORE, page.path))) continue
+        // the plan may put a starter's replacement at a new path or leave the
+        // starter out altogether. Removing the scaffold, or rewriting it in
+        // place when the site needs the file (a landing page), is part of the
+        // approved work, not an expansion of it.
+        if ((page.kind === 'deleted' || page.kind === 'modified') && await isStarterFile(join(directory, BEFORE, page.path))) {
+          if (page.kind === 'modified') counted += 1
+          continue
+        }
         outside.push(`${page.path} (${page.kind}, not in the plan)`)
         continue
       }
@@ -778,6 +784,7 @@ async function resumeSyncRunLocked(root: string, id: string, options: ResumeSync
     const exitCode = await (options.author ?? runAuthor)({
       onFailure: (detail) => { failureDetail = detail },
       root: workspace,
+      captureAuthRoot: root,
       mode: authoring.mode,
       nonInteractive: true,
       recordHistory: false,
@@ -878,7 +885,11 @@ async function continuationBrief(
   let pageProgress = ''
   try {
     const validation = await validateProject(workspace)
-    if (validation.errors > 0) validationText = formatValidation(validation)
+    // Warnings travel with the errors: the resumed run that fixed its
+    // thin-page warnings produced the documentation the reviewer preferred,
+    // and a writer that could not run validation in its sandbox has never
+    // seen them.
+    if (validation.errors > 0 || validation.warnings > 0) validationText = formatValidation(validation)
     const files = await listDocumentationPages(workspace)
     const invalid = new Set(validation.issues.filter((issue) => issue.severity === 'error').map((issue) => issue.file))
     pageProgress = `Existing pages (${files.length}; passing structural validation is not a factual verification):\n${files.map((page) => `${page.path}: ${invalid.has(page.path) ? 'needs validation fixes' : 'present; preserve unless incomplete'}`).join('\n')}`
@@ -895,7 +906,7 @@ async function continuationBrief(
     progress.lines.length > 0
       ? `Screenshot manifest progress (${progress.verified} verified, ${progress.unfinished} unfinished):\n${progress.lines.join('\n')}`
       : '',
-    validationText ? `Documentation validation currently reports:\n${validationText}` : '',
+    validationText ? `Documentation validation currently reports the following. Fix every error first; then resolve the thin-page, thin-procedure, and other warnings on pages this run wrote, bringing each such page to the depth contract. Leave pages with no finding as they are:\n${validationText}` : '',
     intent === 'enabled'
       ? 'Screenshots are required: every unfinished guide above needs at least one verified, embedded capture, or a specific text-only reason on each step whose state genuinely cannot be reached.'
       : '',

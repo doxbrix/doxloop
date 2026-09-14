@@ -81,6 +81,8 @@ import {
   assertNewProjectDirectory,
   findProjectRoot,
   isSpecUrl,
+  isUnmaterializedDocsSite,
+  parseDocsSite,
   loadProject,
   parseDesignReference,
   parseSource,
@@ -90,6 +92,8 @@ import {
   scaffoldProject,
   validateProjectSourceBoundaries,
 } from './project.js'
+import { crawlDocumentationSite } from './docs-crawl.js'
+import { describeDocsSite, docsSiteBinding, materializeDocsSiteSnapshot } from './docs-site.js'
 import { importExistingDocumentation } from './project-import.js'
 import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
 import { listPages as listDocumentationPages } from './pages.js'
@@ -105,6 +109,7 @@ import { collectSourceChanges, formatSourceChanges } from './sync.js'
 import { buildSourceIntelligence, formatSourceIntelligence } from './source-intelligence.js'
 import { formatQualityReport, runQuality } from './quality-gates.js'
 import type {
+  SourceBinding,
   GeneratorName,
   ParsedArgs,
   SourceChange,
@@ -182,7 +187,8 @@ async function main(): Promise<number> {
       if (
         flag(args, 'source') !== undefined ||
         flag(args, 'output') !== undefined ||
-        flags(args, 'spec').length > 0
+        flags(args, 'spec').length > 0 ||
+        flags(args, 'docs').length > 0
       ) {
         return createProjectCommand(args, cwd)
       }
@@ -418,6 +424,7 @@ async function initCommand(args: ParsedArgs, cwd: string): Promise<number> {
   let sources = [
     ...flags(args, 'source').map(parseSource),
     ...flags(args, 'spec').map(parseSpec),
+    ...flags(args, 'docs').map(parseDocsSite),
   ]
   let title = flag(args, 'title')
   let generator = parseGenerator(flag(args, 'generator'))
@@ -473,7 +480,7 @@ async function initCommand(args: ParsedArgs, cwd: string): Promise<number> {
  */
 async function importExistingCommand(args: ParsedArgs, cwd: string): Promise<number> {
   if (args.positionals.length > 1) throw new UsageError('The init command accepts one documentation directory.')
-  if (flags(args, 'source').length > 0 || flags(args, 'spec').length > 0 || flags(args, 'reference').length > 0) {
+  if (flags(args, 'source').length > 0 || flags(args, 'spec').length > 0 || flags(args, 'docs').length > 0 || flags(args, 'reference').length > 0) {
     throw new UsageError('`doxloop init --existing` adopts the folder as it is. Connect sources afterwards from the control center.')
   }
   const generator = parseGenerator(flag(args, 'generator'))
@@ -510,14 +517,15 @@ async function initializeProject(
   designReferences: ReturnType<typeof parseDesignReference>[] = [],
 ): Promise<string> {
   const projectRoot = resolve(cwd, plan.directory)
-  await validateProjectSourceBoundaries(projectRoot, plan.sources)
+  const sources = await materializeDocsSiteSources(projectRoot, plan.sources)
+  await validateProjectSourceBoundaries(projectRoot, sources)
   if (plan.generator !== 'doxbrix') {
     await ensureGeneratorAvailable(args, projectRoot, plan.generator)
   }
   const root = await scaffoldProject({
     directory: projectRoot,
     ...(plan.title ? { title: plan.title } : {}),
-    sources: plan.sources,
+    sources,
     designReferences,
     generator: plan.generator,
   })
@@ -527,6 +535,36 @@ async function initializeProject(
     process.stdout.write(`${install.action}: ${install.path}\n`)
   }
   return root
+}
+
+/**
+ * Crawl every `--docs` site into its read-only snapshot before the project is
+ * validated, so the binding stored in project.json points at the snapshot
+ * folder rather than the URL.
+ */
+async function materializeDocsSiteSources(projectRoot: string, sources: SourceBinding[]): Promise<SourceBinding[]> {
+  const output: SourceBinding[] = []
+  for (const source of sources) {
+    if (!isUnmaterializedDocsSite(source)) {
+      output.push(source)
+      continue
+    }
+    process.stdout.write(`Crawling existing documentation at ${source.path}…\n`)
+    let lastReport = 0
+    const snapshot = await crawlDocumentationSite(source.path, {
+      onProgress: ({ fetched, discovered }) => {
+        if (fetched - lastReport >= 10) {
+          lastReport = fetched
+          process.stdout.write(`  ${fetched} pages read, ${discovered} discovered\n`)
+        }
+      },
+    })
+    const materialized = await materializeDocsSiteSnapshot(projectRoot, source.name, snapshot)
+    for (const warning of snapshot.warnings) process.stdout.write(`  Warning: ${warning}\n`)
+    process.stdout.write(`  ${describeDocsSite(materialized.site)} → ${materialized.path}\n`)
+    output.push(docsSiteBinding(projectRoot, source.name, materialized, source.scope))
+  }
+  return output
 }
 
 async function ensureGeneratorAvailable(
@@ -560,9 +598,10 @@ async function createProjectCommand(
   const source = flag(args, 'source')
   const output = flag(args, 'output')
   const specs = flags(args, 'spec').map(parseSpec)
-  if (!output || (!source && specs.length === 0)) {
+  const docsSites = flags(args, 'docs').map(parseDocsSite)
+  if (!output || (!source && specs.length === 0 && docsSites.length === 0)) {
     throw new UsageError(
-      'Creating a new documentation project requires `--output <documentation-directory>` plus `--source <product-directory>`, `--spec <openapi-file-or-url>`, or both.',
+      'Creating a new documentation project requires `--output <documentation-directory>` plus `--source <product-directory>`, `--spec <openapi-file-or-url>`, `--docs <existing-documentation-url>`, or a combination.',
     )
   }
   if (flags(args, 'source').length > 1 || flags(args, 'output').length > 1) {
@@ -575,21 +614,25 @@ async function createProjectCommand(
     ? await resolveSeparateProjectLayout({ cwd, source, output })
     : undefined
   const projectRoot = layout?.projectRoot ?? resolve(cwd, output)
-  const sources = [
-    ...(layout ? [layout.sourceBinding] : []),
-    ...specs.map((spec) => projectRelativeSpec(spec, cwd, projectRoot)),
-  ]
   const print = booleanFlag(args, 'print')
   const designReferences = flags(args, 'reference').map(parseDesignReference)
 
   if (!layout) await assertNewProjectDirectory(projectRoot)
+  const sources = await materializeDocsSiteSources(projectRoot, [
+    ...(layout ? [layout.sourceBinding] : []),
+    ...specs.map((spec) => projectRelativeSpec(spec, cwd, projectRoot)),
+    ...docsSites,
+  ])
   await validateProjectSourceBoundaries(projectRoot, sources)
 
-  const sourceText = layout
+  const docsText = docsSites.length > 0
+    ? `Existing documentation:\n${docsSites.map((site) => `  ${site.path}`).join('\n')}\n  Crawled into a read-only snapshot and rewritten; the site itself is never changed.\n\n`
+    : ''
+  const sourceText = (layout
     ? `Product source:\n  ${layout.sourceRoot}\n  Read-only — product files will not be changed or deployed.\n\n`
     : specs.length > 0
       ? `API specification${specs.length === 1 ? '' : 's'}:\n${specs.map((spec) => `  ${spec.path}`).join('\n')}\n  Read-only API evidence.\n\n`
-      : ''
+      : '') + docsText
   process.stdout.write(
     `Welcome to Doxloop\n\n${sourceText}Documentation project:\n  ${projectRoot}\n  Only this project can be previewed or deployed.\n\n`,
   )
@@ -1173,13 +1216,13 @@ async function historyCommand(args: ParsedArgs, cwd: string): Promise<number> {
 
 function validateCommandArguments(args: ParsedArgs): void {
   const allowed: Record<string, string[]> = {
-    init: ['title', 'source', 'spec', 'reference', 'generator', 'existing', 'content-dir'],
+    init: ['title', 'source', 'spec', 'docs', 'reference', 'generator', 'existing', 'content-dir'],
     agent: ['agent'],
     generator: [],
     doctor: ['source', 'output', 'agent'],
     audit: ['format', 'backfill-evidence'],
     demo: ['port', 'no-open', 'no-preview', 'keep'],
-    create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'output'],
+    create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'docs', 'output'],
     update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
     plan: ['id', 'feedback', 'strategy'],
@@ -1354,6 +1397,7 @@ Options:
   --title <title>          Documentation site title
   --source <name=path>     Add a local product source; may be repeated
   --spec <name=file|url>   Add an OpenAPI specification as API evidence; may be repeated
+  --docs <name=url>        Crawl an existing documentation site to rewrite; may be repeated
   --reference <url>        Add a documentation design reference; may be repeated
   --generator <name>       Generator: ${GENERATOR_CATALOG.map((entry) => entry.id).join(', ')}
   --existing               Adopt the existing documentation in [directory] (default: current folder)
@@ -1365,6 +1409,7 @@ Examples:
   doxloop init
   doxloop init my-docs --source product=../my-app
   doxloop init api-docs --spec https://example.com/openapi.json
+  doxloop init new-docs --source product=../my-app --docs https://docs.example.com
   doxloop init --existing ./website
 `
   }
@@ -1417,10 +1462,10 @@ Options:
   --no-screenshots         Do not capture application screenshots
 `
     const createUsage = command === 'create'
-      ? `\nRun inside a Doxloop project to answer a short set of authoring questions.\nWhen run inside a detected product repository, Doxloop offers the complete setup\nwizard first. No flags are required for interactive use.\n\nOptional automation form:\n  doxloop create --source <product-directory> --output <documentation-directory> [request]\n  doxloop create --spec <openapi-file-or-url> --output <documentation-directory> [request]\n`
+      ? `\nRun inside a Doxloop project to answer a short set of authoring questions.\nWhen run inside a detected product repository, Doxloop offers the complete setup\nwizard first. No flags are required for interactive use.\n\nOptional automation form:\n  doxloop create --source <product-directory> --output <documentation-directory> [request]\n  doxloop create --spec <openapi-file-or-url> --output <documentation-directory> [request]\n  doxloop create --docs <existing-documentation-url> [--source <product-directory>] --output <documentation-directory> [request]\n`
       : ''
     const createOptions = command === 'create'
-      ? `  --source <directory>      Read-only product source for a new documentation project\n  --spec <name=file|url>    OpenAPI specification used as read-only API evidence\n  --output <directory>      New, separate documentation project directory\n`
+      ? `  --source <directory>      Read-only product source for a new documentation project\n  --spec <name=file|url>    OpenAPI specification used as read-only API evidence\n  --docs <name=url>         Existing documentation site to crawl and rewrite\n  --output <directory>      New, separate documentation project directory\n`
       : ''
     return `Usage: doxloop ${command} [request] [options]
 ${createUsage}

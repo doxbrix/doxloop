@@ -12,7 +12,26 @@ export type GeneratorName =
   | 'jekyll'
   | 'static'
 
-export type SourceKind = 'directory' | 'openapi'
+export type SourceKind = 'directory' | 'openapi' | 'docs-site'
+
+/**
+ * Provenance of an existing documentation website bound as a `docs-site`
+ * source. The binding's `path` is the read-only Markdown snapshot Doxloop
+ * crawled from `url`; the agent reads that snapshot as evidence of the
+ * documentation being rewritten.
+ */
+export interface DocsSiteSource {
+  url: string
+  crawledAt: string
+  pages: number
+  words: number
+  /** Content hash of the crawled pages; changes when a re-crawl finds different content. */
+  hash: string
+  /** Documentation generator detected from the site, when recognizable. */
+  generator?: string
+  /** True when discovery found more pages than the crawl limit allowed. */
+  truncated?: boolean
+}
 
 export interface RemoteSource {
   /** `github` is retained for projects created before generic Git support. */
@@ -33,6 +52,8 @@ export interface SourceBinding {
   path: string
   kind?: SourceKind
   remote?: RemoteSource
+  /** Present on `docs-site` sources: the crawled documentation website. */
+  site?: DocsSiteSource
   /** Optional ownership boundary for monorepos and multi-source documentation. */
   scope?: {
     space?: string
@@ -280,6 +301,52 @@ export interface DocumentationPlanTarget {
   navigationFiles: string[]
 }
 
+/** What the planner decided to do with one page of an existing documentation site. */
+export type ExistingDocumentationDisposition = 'rewrite' | 'merge' | 'preserve' | 'drop'
+
+export interface ExistingDocumentationPageDisposition {
+  /** Snapshot-relative page file, such as `pages/guides/install.md`. */
+  path: string
+  title?: string
+  /** Original URL on the existing site, used to derive redirects. */
+  url?: string
+  disposition: ExistingDocumentationDisposition
+  /** Planned page ids that absorb this page. Empty for `drop`. */
+  into: string[]
+  reason: string
+}
+
+export interface ExistingDocumentationFinding {
+  severity: ReviewFindingSeverity
+  title: string
+  description: string
+  /** Snapshot-relative page files the finding applies to. */
+  pages: string[]
+}
+
+/**
+ * The planner's audit of one `docs-site` source: how well the existing
+ * documentation covers the product, what it gets wrong, and where every
+ * existing page lands in the new plan. Reviewed before generation.
+ */
+export interface ExistingDocumentationAssessment {
+  source: string
+  summary: string
+  strengths: string[]
+  findings: ExistingDocumentationFinding[]
+  coverage: {
+    /** Product surfaces found in code sources that the existing documentation never covers. */
+    gaps: string[]
+    /** Existing pages or claims that describe behavior no longer present in the product. */
+    obsolete: string[]
+    /** Existing knowledge that code cannot show and the rewrite must carry over. */
+    preserved: string[]
+    /** Existing claims the product sources contradict; the rewrite corrects them. */
+    contradicted: string[]
+  }
+  pages: ExistingDocumentationPageDisposition[]
+}
+
 export interface DocumentationPlanFailure {
   stage: 'propose' | 'revise' | 'generate'
   /** The preserved proposal workspace a generation failure left behind. */
@@ -352,6 +419,8 @@ export interface DocumentationPlan {
   failure?: DocumentationPlanFailure
   /** Non-blocking findings a reviewer should weigh before approving. */
   advisories?: string[]
+  /** Present when a `docs-site` source is configured: one audit per existing documentation site. */
+  existingDocumentation?: ExistingDocumentationAssessment[]
 }
 
 /**
@@ -412,6 +481,7 @@ export type DoxbrixNavNode =
 
 export interface DoxbrixSpace {
   name: string
+  version?: string
   slug?: string
   locale?: string
   parent?: string
@@ -422,6 +492,7 @@ export interface DoxbrixSpace {
 
 export interface DoxbrixSiteConfig {
   version: 1
+  versions?: Array<{ version: string; label?: string; tag?: string; default?: boolean; isDefault?: boolean }>
   name?: string
   description?: string
   spaces: DoxbrixSpace[]
@@ -742,6 +813,8 @@ export interface SourceHealth {
   summary: string
   details: string[]
   openapi?: OpenApiSummary
+  /** Present for `docs-site` sources. */
+  docsSite?: DocsSiteSource & { brokenLinks: number }
   scope?: SourceBinding['scope']
 }
 

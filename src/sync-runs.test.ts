@@ -813,14 +813,36 @@ describe('sync review runs', () => {
       'deleted:quickstart.mdx',
     ])
 
-    // Touching a real page the plan never mentioned is still outside the batch, and the failure says which page.
-    const failed = await createSyncRun(await options(async (workspace) => writeFile(
+    // The starter landing page is not in the plan either, and a landing page
+    // cannot be deleted; rewriting it without the starter marker is the
+    // replacement the brief demands, not an expansion of the batch.
+    await writeFile(
+      join(root, 'index.mdx'),
+      '---\ntitle: Documentation\ndescription: Starter landing page.\n---\n\n<!-- doxloop:starter-page -->\n\nReplace this starter with a real landing page.\n',
+    )
+    const replaceLanding = (workspace: string) => writeFile(
       join(workspace, 'index.mdx'),
-      '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is now 20.\n',
-    )))
+      '---\ntitle: Product documentation\ndescription: Start here.\n---\n\nChoose your first task.\n',
+    )
+    const replaced = await createSyncRun(await options(replaceLanding))
+    expect(replaced.error).toBeUndefined()
+    expect(replaced.status).toBe('awaiting-review')
+    expect(replaced.changes.filter((change) => change.category === 'page').map((change) => `${change.kind}:${change.path}`)).toContain('modified:index.mdx')
+
+    // Touching a real page the plan never mentioned is still outside the batch, and the failure says which page.
+    const failed = await createSyncRun(await options(async (workspace) => {
+      await replaceLanding(workspace)
+      await mkdir(join(workspace, 'concepts'), { recursive: true })
+      await writeFile(
+        join(workspace, 'concepts', 'limits.mdx'),
+        '---\ntitle: Limits\ndescription: Understand the current product limit.\n---\n\nThe limit is now 20.\n',
+      )
+      const navigationPath = join(workspace, 'docs.json')
+      await writeFile(navigationPath, (await readFile(navigationPath, 'utf8')).replace('"file": "getting-started/quickstart"', '"file": "getting-started/quickstart", "title": "Quickstart", "icon": "bolt" }, { "type": "page", "file": "concepts/limits"'))
+    }))
     expect(failed.status).toBe('failed')
     expect(failed.error).toContain('exceeded the approved page batch')
-    expect(failed.error).toContain('index.mdx (modified, not in the plan)')
+    expect(failed.error).toContain('concepts/limits.mdx (added, not in the plan)')
     expect(failed.error).not.toContain('quickstart.mdx')
   }, 30_000)
 
@@ -835,8 +857,9 @@ describe('sync review runs', () => {
       sourceChanges: await collectSourceChanges(root, project.sources),
       authoring: { mode: 'update', request: 'Document the raised limit.', screenshots: 'auto' },
       author: async (options) => {
-        // Half the work lands, then the agent dies like a timed-out run.
-        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Updated\ndescription: The limit changed.\n---\n\nThe limit is now 20.\n')
+        // Half the work lands, then the agent dies like a timed-out run. The
+        // page it left is thin (a warning) and points at a missing page (an error).
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Updated\ndescription: The limit changed.\n---\n\nThe limit is now 20. See [details](/concepts/limits).\n')
         await writeFile(join(options.root, 'notes.txt'), 'partial\n')
         return 1
       },
@@ -852,6 +875,8 @@ describe('sync review runs', () => {
         expect(options.mode).toBe('update')
         expect(options.screenshots).toBe('auto')
         sawPartialWork = (await readFile(join(options.root, 'notes.txt'), 'utf8')) === 'partial\n'
+        // The continuation fixes the named error and leaves the rest alone.
+        await writeFile(join(options.root, 'index.mdx'), '---\ntitle: Updated\ndescription: The limit changed.\n---\n\nThe limit is now 20.\n')
         await writeFile(join(options.root, 'quickstart.mdx'), '---\ntitle: Quickstart\ndescription: Updated setup.\n---\n\nFollow the new setup with limit 20.\n')
         await recordSyncState(options.root, (await loadProject(options.root)).sources)
         return 0
@@ -862,6 +887,10 @@ describe('sync review runs', () => {
     expect(continuation).toContain('exited with status 1')
     expect(continuation).toContain('Document the raised limit.')
     expect(continuation).not.toContain('sources changed')
+    // The brief names the errors to fix first and the warnings to resolve after.
+    expect(continuation).toContain('error broken-link index.mdx')
+    expect(continuation).toContain('Fix every error first')
+    expect(continuation).toContain('warning thin-page')
     expect(resumed.id).toBe(failed.id)
     expect(resumed.status).toBe('awaiting-review')
     expect(resumed.resumedAt).toBeDefined()

@@ -89,6 +89,13 @@ Read this reference before creating or moving documentation pages.
   local file path or an HTTP(S) URL. Read it as authoritative API evidence for
   endpoints, parameters, schemas, and examples. A source without `kind` is a
   read-only local directory.
+- A source with `"kind": "docs-site"` is an existing documentation website
+  that Doxloop crawled into a read-only Markdown snapshot at `path`; `site`
+  records the original `url`, page count, crawl time, and detected generator.
+  It is the documentation being rewritten: evidence of reader intent,
+  terminology, and knowledge code cannot show, never authoritative for product
+  facts when a product source exists, and never text to copy. Follow
+  [existing-documentation.md](existing-documentation.md).
 - Respect `source.scope`. Pages grounded in a scoped source must stay below its
   `routePrefix` and should use its `space` and `navigationGroup`. A page outside
   that boundary is allowed only when it matches `sharedPages`; never move one

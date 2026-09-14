@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,15 @@ import {
   screenshotPlanningInstructions,
   documentationPlanClarificationFeedback,
   DEFAULT_PLANNING_TIMEOUT_MINUTES,
+  markDocumentationPlanInterrupted,
+  repairMechanicalPlanIssues,
+  gateRevisionInstructions,
+  planningEffort,
+  planningTimeoutForBatch,
+  proposalCheckpointKey,
+  readProposalCheckpoint,
+  writeProposalCheckpoint,
+  clearProposalCheckpoint,
   planningTimeoutMinutes,
   proposeDocumentationPlan,
   planWritingRequirements,
@@ -157,11 +166,12 @@ describe('documentation plan workflow', () => {
     expect(screenshotCoverageAdvisory(thin, { screenshots: 'auto' })).toBeUndefined()
   })
 
-  test('tells the planner to reveal single-page screens by interacting, not by guessing routes', () => {
+  test('tells the planner to reveal single-page screens by interacting, within a fixed browser budget', () => {
     const instructions = screenshotPlanningInstructions()
     expect(instructions).toContain('single-page applications where every screen shares one URL')
-    expect(instructions).toContain('Do not submit, create, delete, deploy, publish, send')
-    expect(instructions).toContain('only after you actually attempted to reach it')
+    expect(instructions).toContain('at most 12 doxloop_capture calls in total during planning')
+    expect(instructions).toContain('Do not fill forms, submit, create, delete, deploy, publish, send')
+    expect(instructions).toContain('only after you attempted to reach it within the budget')
     expect(instructions).not.toContain('include at least one complete screenshot-enabled UI guide')
   })
 
@@ -591,6 +601,52 @@ describe('documentation plan workflow', () => {
     await expect(ignoreDocumentationPlanError(root, created.id)).rejects.toThrow('Retry planning')
   })
 
+  test('reads a plan as generated once its failed proposal was continued from the proposal itself', async () => {
+    const { root } = await fixture()
+    const created = await createDocumentationPlan(root, { mode: 'create', scope: 'standard', execution: { screenshots: false } })
+    const proposed = await applyDocumentationPlanProposal(root, created.id, proposal)
+    const approved = await approveDocumentationPlan(root, proposed.id)
+    // Generation failed validation; the reviewer resumed the proposal from the
+    // Proposals panel (not the plan), and that resume applied the pages.
+    const proposalId = 'run-20260913t044845z-ed50d5'
+    await mkdir(join(root, '.doxloop', 'runs', proposalId), { recursive: true })
+    await writeFile(
+      join(root, '.doxloop', 'runs', proposalId, 'run.json'),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        id: proposalId,
+        status: 'applied',
+        mode: 'create',
+        trigger: 'manual',
+        createdAt: new Date().toISOString(),
+        summary: 'Continuing the interrupted documentation run',
+        sourceSummary: '',
+        stalePages: [],
+        changes: [],
+        revisionRequests: [],
+        humanEdits: [],
+        planId: created.id,
+      }, null, 2)}\n`,
+    )
+    await writeFile(
+      join(root, '.doxloop', 'plans', created.id, 'plan.json'),
+      `${JSON.stringify({
+        ...approved,
+        status: 'failed',
+        error: 'The documentation agent exited with status 1.',
+        failure: { stage: 'generate', proposalId, resumable: true, ignorable: true },
+      }, null, 2)}\n`,
+    )
+
+    const plan = await readDocumentationPlan(root, created.id)
+    expect(plan).toMatchObject({ status: 'generated', proposalId })
+    expect(plan.error).toBeUndefined()
+    expect(plan.failure).toBeUndefined()
+    // Recovery controls rendered before the refresh resolve without an error.
+    await expect(continueDocumentationPlanGeneration(root, created.id, 'ignore-errors')).resolves.toMatchObject({ status: 'generated', proposalId })
+    await expect(continueDocumentationPlanGeneration(root, created.id, 'resume')).resolves.toMatchObject({ status: 'generated', proposalId })
+  })
+
   test('treats stale recovery actions as successful after generation already completed', async () => {
     const { root } = await fixture()
     const created = await createDocumentationPlan(root, { mode: 'create', scope: 'standard', execution: { screenshots: false } })
@@ -640,6 +696,12 @@ describe('planning time budget', () => {
     expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [], budget: { maxMinutes: 45 } } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: '5' })).toBe(5)
     expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [] } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: 'soon' })).toBe(20)
     expect(planningTimeoutMinutes({ sync: { mode: 'check', on: [], watch: [], ignore: [] } }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: '0' })).toBe(20)
+    // A batch's own minutes bound planning when nothing explicit is configured; explicit limits are honoured but capped by the batch.
+    const bare = { sync: { mode: 'check' as const, on: [], watch: [], ignore: [] } }
+    expect(planningTimeoutForBatch(bare, { maxMinutes: 120 }, {})).toBe(120)
+    expect(planningTimeoutForBatch(bare, { maxMinutes: 15 }, {})).toBe(20)
+    expect(planningTimeoutForBatch(bare, { maxMinutes: 120 }, { DOXLOOP_PLAN_TIMEOUT_MINUTES: '30' })).toBe(30)
+    expect(planningTimeoutForBatch({ sync: { ...bare.sync, budget: { maxMinutes: 200 } } }, { maxMinutes: 120 }, {})).toBe(120)
   })
 
   test('stops a planner that never answers and records a named failure', async () => {
@@ -667,6 +729,39 @@ describe('planning time budget', () => {
   }, 30_000)
 })
 
+describe('clarification defaults', () => {
+  test('a reviewer who chose recommended defaults gets a plan from one planning pass', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-plan-defaults-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const executable = join(parent, 'codex')
+    const promptLog = join(parent, 'prompts.log')
+    const reply = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `<doxloop-plan>${JSON.stringify({ ...proposal, pages: proposal.pages.map((page) => ({ ...page, evidence: [], evidenceDetails: [] })) })}</doxloop-plan>` } })
+    // Records each prompt it receives, then answers with a question-free plan.
+    await writeFile(executable, `#!/bin/sh\nfor last; do :; done\nprintf '%s\\n---\\n' "$last" >> "${promptLog}"\n/bin/cat <<'EOF_PLAN'\n${reply}\nEOF_PLAN\n`)
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const created = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', clarificationMode: 'defaults', execution: { agent: 'codex', screenshots: false } })
+    const planned = await proposeDocumentationPlan(root, created.id)
+    expect(planned.status).toBe('ready-for-review')
+    const prompts = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('decide open questions by their safe default instead of asking')
+    expect(prompts[0]).not.toContain('Use at most three questions')
+
+    // A reviewer who wants to answer in the review screen keeps the question rule.
+    const asked = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', clarificationMode: 'review', execution: { agent: 'codex', screenshots: false } })
+    await proposeDocumentationPlan(root, asked.id)
+    const second = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(second).toHaveLength(2)
+    expect(second[1]).toContain('Use at most three questions')
+  }, 30_000)
+})
+
 describe('diagram requirements', () => {
   test('defaults concept pages to a required diagram and keeps reviewer overrides', async () => {
     const { root } = await fixture()
@@ -686,4 +781,95 @@ describe('diagram requirements', () => {
     expect(planWritingRequirements(ready)).toContain('- Reference (reference/events)')
     expect(planWritingRequirements(ready)).not.toContain('Plain concept')
   })
+})
+
+describe('proposal checkpoints', () => {
+  test('a saved planner reply is reused only for the same brief and source snapshot', async () => {
+    const { root } = await fixture()
+    const created = await createDocumentationPlan(root, { mode: 'update', scope: 'standard', execution: { screenshots: 'disabled' } })
+    const key = proposalCheckpointKey(created, 'snapshot-a')
+    expect(await readProposalCheckpoint(root, created.id, key)).toBeUndefined()
+    await writeProposalCheckpoint(root, created.id, { key, pass: 'proposal', raw: { pages: [] } })
+    expect(await readProposalCheckpoint(root, created.id, key)).toMatchObject({ key, pass: 'proposal', raw: { pages: [] } })
+    // A changed source snapshot, brief, or feedback is a different question.
+    expect(await readProposalCheckpoint(root, created.id, proposalCheckpointKey(created, 'snapshot-b'))).toBeUndefined()
+    expect(proposalCheckpointKey(created, 'snapshot-a', 'add a glossary')).not.toBe(key)
+    expect(proposalCheckpointKey({ ...created, request: 'Something else' }, 'snapshot-a')).not.toBe(key)
+    await clearProposalCheckpoint(root, created.id)
+    expect(await readProposalCheckpoint(root, created.id, key)).toBeUndefined()
+  })
+})
+
+test('planning runs at medium effort at most; authoring keeps the run effort', () => {
+  expect(planningEffort('high')).toBe('medium')
+  expect(planningEffort('max')).toBe('medium')
+  expect(planningEffort('medium')).toBe('medium')
+  expect(planningEffort('low')).toBe('low')
+})
+
+test('a planning process that ends without a result leaves a failed plan the reviewer can retry', async () => {
+  const { root } = await fixture()
+  const created = await createDocumentationPlan(root, { mode: 'update', scope: 'standard', execution: { screenshots: 'disabled' } })
+  expect(created.status).toBe('planning')
+  const failed = await markDocumentationPlanInterrupted(root, created.id, 'propose', 'The planning run stopped before it finished.')
+  expect(failed).toMatchObject({ status: 'failed', error: 'The planning run stopped before it finished.', failure: { stage: 'propose', resumable: false, ignorable: false } })
+  expect((await readDocumentationPlan(root, created.id)).status).toBe('failed')
+  // A plan that already reached a result is left alone.
+  expect(await markDocumentationPlanInterrupted(root, created.id, 'propose', 'again')).toBeUndefined()
+  expect((await readDocumentationPlan(root, created.id)).error).toBe('The planning run stopped before it finished.')
+})
+
+test('screenshot-guide slips that only cost a second planning pass are repaired locally', () => {
+  vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+  const sequence = [
+    'Open Settings — the Member tab is visible — orients the reader.',
+    'Click Create — the Create user dialog is open — shows the required fields.',
+    'Fill the form — the fields hold safe values — shows what to enter.',
+    'Save — the new member row is visible — proves the result.',
+  ]
+  const raw = { pages: [
+    // Purpose written on the page, start path with an SPA hash, no workflow: the
+    // memos runs paid 6–20 minutes of corrective planning for exactly these.
+    { id: 'members', title: 'Members', type: 'how-to', rationale: 'Confirmed Member tab; CreateUserDialog shows role assignment.', purpose: 'Create and remove users.', visuals: { mode: 'required', estimatedCaptures: 4, startPath: '/setting#member', captureSequence: sequence } },
+    { id: 'relative', title: 'Relative', type: 'how-to', purpose: 'Open the dashboard.', visuals: { mode: 'required', rationale: 'Shows the dashboard.', estimatedCaptures: 4, startPath: 'dashboard', workflow: 'Open the dashboard and inspect each panel.', captureSequence: sequence } },
+    { id: 'text', title: 'Text', type: 'concept', purpose: 'Explain the model.', visuals: { mode: 'none', estimatedCaptures: 0 } },
+  ] }
+  const repaired = repairMechanicalPlanIssues(raw, { screenshots: 'enabled' }) as { pages: Array<{ visuals: Record<string, unknown> }> }
+  expect(repaired.pages[0]!.visuals).toMatchObject({
+    mode: 'required',
+    rationale: 'Confirmed Member tab; CreateUserDialog shows role assignment.',
+    startPath: '/setting#member',
+    workflow: 'Open Settings; Click Create; Fill the form; Save',
+  })
+  expect(repaired.pages[1]!.visuals).toMatchObject({ startPath: '/dashboard', workflow: 'Open the dashboard and inspect each panel.' })
+  expect(repaired.pages[2]!.visuals).toEqual({ mode: 'none', estimatedCaptures: 0 })
+  const normalized = repaired.pages.map((page, index) => ({ ...raw.pages[index]!, priority: 'must-have', action: 'create', ...page }))
+  expect(requiredScreenshotPlanIssue({ pages: normalized as never }, { screenshots: 'enabled' })).toBeUndefined()
+  // Nothing to repair in a run without screenshots.
+  expect(repairMechanicalPlanIssues(raw, { screenshots: 'disabled' })).toBe(raw)
+})
+
+test('the corrective planning pass fixes the named findings without re-exploring the application', () => {
+  const first = { pages: [{ id: 'a', visuals: { mode: 'required', startPath: 'setting' } }] }
+  const scoped = gateRevisionInstructions('Required screenshot guides are incomplete. "A": missing ordered workflow.', first)
+  expect(scoped).toContain('do not sign in or explore it again')
+  expect(scoped).toContain('Keep every page, capability, navigation entry, and field that the findings do not name unchanged')
+  expect(scoped).toContain(JSON.stringify(first))
+  expect(scoped).not.toContain(JSON.stringify(first, null, 2))
+  // A proposal with no screenshot guide at all genuinely needs the browser.
+  const exploring = gateRevisionInstructions('Required screenshot mode needs at least one complete screenshot-enabled visible UI guide; the proposal planned no application screenshots.', first)
+  expect(exploring).toContain('doxloop_capture')
+  expect(exploring).not.toContain('do not sign in or explore it again')
+})
+
+test('a "recommended" label in required screenshot mode is repaired without a second planning pass', () => {
+  const raw = { pages: [
+    { id: 'a', visuals: { mode: 'recommended', estimatedCaptures: 2 } },
+    { id: 'b', visuals: { mode: 'required', estimatedCaptures: 3 } },
+    { id: 'c', visuals: { mode: 'none', estimatedCaptures: 0 } },
+  ] }
+  const repaired = repairMechanicalPlanIssues(raw, { screenshots: 'enabled' }) as typeof raw
+  expect(repaired.pages.map((page) => page.visuals.mode)).toEqual(['required', 'required', 'none'])
+  // Automatic mode keeps best-effort visuals as the planner wrote them.
+  expect((repairMechanicalPlanIssues(raw, { screenshots: 'auto' }) as typeof raw).pages[0]!.visuals.mode).toBe('recommended')
 })

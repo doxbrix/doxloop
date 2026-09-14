@@ -2,6 +2,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { installSkill } from './agents.js'
+import { mintlifyMarker } from './mintlify-detect.js'
 import { DoxloopError } from './errors.js'
 import { EVIDENCE_MAP_FILE, readEvidenceMap, writeEvidenceMap } from './evidence.js'
 import { ensureGitignoreEntries, pathExists, resolveContainedDirectory } from './fs.js'
@@ -23,6 +24,7 @@ import type { AgentName, DoxloopProject, EvidenceMap, GeneratorName } from './ty
 const INSPECTION_PAGE_SAMPLE = 25
 
 export interface ExistingDocumentationInspection {
+  conversion?: 'mintlify'
   root: string
   /** `.doxloop/project.json` already exists here; open it instead of importing. */
   alreadyProject: boolean
@@ -66,6 +68,7 @@ export async function inspectExistingDocumentation(
   overrides: { generator?: GeneratorName; contentDir?: string } = {},
 ): Promise<ExistingDocumentationInspection> {
   const root = await resolveImportDirectory(directory)
+  const mintlify = await mintlifyMarker(root)
   const alreadyProject = await pathExists(join(root, PROJECT_FILE))
   const detection = await detectDocumentationGenerator(root)
   const detected = overrides.generator
@@ -78,6 +81,7 @@ export async function inspectExistingDocumentation(
   const pages = generator && contentDir !== undefined ? await listDocumentationPageFiles(root, generator, contentDir) : []
   const generatorPackage = generator ? generatorPackageName(generator) : undefined
   return {
+    ...(mintlify ? { conversion: 'mintlify' as const } : {}),
     root,
     alreadyProject,
     detection,
@@ -109,6 +113,7 @@ export async function importExistingDocumentation(
     ...(options.generator ? { generator: options.generator } : {}),
     ...(options.contentDir !== undefined ? { contentDir: options.contentDir } : {}),
   })
+  if (inspection.conversion === 'mintlify') throw new DoxloopError('Mintlify must be converted to a new Doxbrix project. Use Import existing documentation → Mintlify to Doxbrix in the control center.')
   const generator = inspection.generator
   if (!generator) {
     throw new DoxloopError(

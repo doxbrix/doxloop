@@ -104,7 +104,7 @@ export function formatProjectSettings(root: string, project: DoxloopProject): st
       : project.sources
           .map(
             (source) =>
-              `${source.name}: ${(source.kind ?? 'directory') === 'openapi' ? 'OpenAPI ' : ''}${source.path}`,
+              `${source.name}: ${(source.kind ?? 'directory') === 'openapi' ? 'OpenAPI ' : (source.kind ?? 'directory') === 'docs-site' ? 'Docs site ' : ''}${source.site?.url ?? source.path}`,
           )
           .join('\n  ')
   const deployment = effectiveDeployment(project)
@@ -173,7 +173,7 @@ async function editEvidence(
         : project.sources
             .map(
               (source) =>
-                `${source.name}: ${(source.kind ?? 'directory') === 'openapi' ? 'OpenAPI — ' : ''}${source.path}`,
+                `${source.name}: ${(source.kind ?? 'directory') === 'openapi' ? 'OpenAPI — ' : (source.kind ?? 'directory') === 'docs-site' ? 'Docs site — ' : ''}${source.site?.url ?? source.path}`,
             )
             .join('\n'),
     )

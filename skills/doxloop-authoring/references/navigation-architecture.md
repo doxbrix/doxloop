@@ -25,22 +25,33 @@ whether the destination exists and what it says.
 Use top navigation for major documentation surfaces, not for every content
 group. Keep approximately five primary items and preserve project conventions.
 
-| Slot | Default label | Include when |
+| Slot | Example labels | Include when |
 | --- | --- | --- |
-| Primary | Documentation | always for a documentation site |
-| Reference surface | API, SDKs, CLI, or Reference | a substantial maintained lookup surface exists |
-| Integration surface | Integrations | integrations are a primary product destination |
+| Primary | Guides, Monitoring, Using Umami, or the product name | always; name it for what readers do with the product |
+| Reference surface | API, Tracker & API, CLI, Configuration | a lookup surface with at least five substantial pages exists |
+| Operator surface | Self-hosting, Administration, Operations | installing, securing, and maintaining the product is a distinct reader job with at least five pages |
+| Integration surface | Integrations, Notification providers | integrations are a primary product destination |
 | Lifecycle | Release notes | release-visible change is maintained |
 | Help | Support | a verified support destination exists |
+
+Name spaces after this product's reader surfaces and audiences as the evidence
+shows them. A generic "Documentation" and "Reference" pair says nothing about
+the product and splits the reader journey for no gain; Doxloop reports a
+`generic-space-name` warning for it. Promote a surface to its own space only
+when it holds at least five substantial pages (`thin-space` warns below that);
+otherwise keep it as a group inside the primary space. Every group holds at
+least two pages (`single-page-group` warns otherwise), and a troubleshooting
+or maintenance page sits with the workflows it supports, not in a reference
+space.
 
 Search, version, locale, theme, repository, status, and product-dashboard links
 are utilities. Place them in generator-native utility controls or secondary
 links instead of displacing the primary reader journey. Never invent a support,
 status, repository, changelog, or product URL.
 
-Promote at most two product surfaces such as API, SDKs, CLI, Integrations, or
-Administration. Keep the rest inside Documentation. Use one stable label for a
-destination across desktop, mobile, breadcrumbs, and side navigation.
+Promote at most two product surfaces beyond the primary space. Use one stable
+label for a destination across desktop, mobile, breadcrumbs, and side
+navigation.
 
 ## Common left-navigation grammar
 

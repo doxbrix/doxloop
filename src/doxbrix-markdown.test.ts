@@ -1,7 +1,18 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { renderMarkdown } from './doxbrix-markdown.js'
 
 describe('Doxbrix Markdown rendering', () => {
+  test('preserves content after Mintlify code fences with titles and indented headings', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const result = renderMarkdown('```python Python SDK\nprint("hello")\n```\n\n  ## Verify\n\nThe final instruction.\n')
+      expect(result.html).toContain('hello')
+      expect(result.html).toContain('The final instruction.')
+      expect(result.toc).toContainEqual(expect.objectContaining({ title: 'Verify' }))
+      expect(stderr).not.toHaveBeenCalled()
+    } finally { stderr.mockRestore() }
+  })
+
   test('renders native rich components with reader classes', () => {
     const result = renderMarkdown(`# Overview
 

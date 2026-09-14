@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   doxbrixDocument,
+  firstSitePage,
   previewErrorPage,
 } from './preview.js'
 import {
@@ -19,6 +20,22 @@ afterEach(async () => {
 })
 
 describe('generator preview', () => {
+  test.each(['default', 'isDefault'] as const)('honors %s documentation versions and retains shared-page context', (flag) => {
+    const site = { version: 1 as const, versions: [
+      { version: 'v1', label: '1.0', tag: 'Legacy' }, { version: 'v2', label: '2.0', tag: 'Latest', [flag]: true },
+    ], spaces: [
+      { name: 'Guides', version: 'v1', nav: [{ type: 'page' as const, file: 'old/intro' }, { type: 'page' as const, file: 'shared' }] },
+      { name: 'Guides', nav: [{ type: 'page' as const, file: 'intro' }, { type: 'page' as const, file: 'shared' }] },
+    ] }
+    expect(firstSitePage(site)).toBe('intro')
+    const html = doxbrixDocument({ site, title: 'Shared', current: 'shared', docVersion: 'v1', rendered: { html: 'Shared docs', toc: [] }, basePath: '/docs', liveReload: false })
+    expect(html).toContain('href="/docs/old/intro?version=v1"')
+    expect(html).toContain('dp-version-tag">Latest</span>')
+    expect(html).toMatch(/<aside[^>]*data-doc-version="v1"[^>]*(?<!hidden)>/)
+    expect(html).toMatch(/<aside[^>]*data-doc-version="v2"[^>]* hidden>/)
+    expect(html).not.toContain('dxb-atlas-tabs-bar" data-doc-version')
+  })
+
   test('marks an embedded page preview so reader navigation can be hidden', () => {
     const html = doxbrixDocument({
       site: { version: 1, spaces: [{ name: 'Docs', nav: [{ type: 'page', file: 'index' }] }] },

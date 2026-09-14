@@ -2,16 +2,22 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { matchesAnyGlob } from './globs.js'
+import { readDocsSiteManifest } from './docs-site.js'
 import { loadOpenApiSource } from './openapi.js'
 import { loadPages, loadProject, sourceKind } from './project.js'
 import { sourceSnapshotFingerprints } from './sync.js'
-import type { DoxloopProject, SourceBinding } from './types.js'
+import type { DoxloopProject, SourceBinding, SourceKind } from './types.js'
 
 const DISCOVERY_SCHEMA_VERSION = 1 as const
 /** Bump when inventory rules change so cached inventories are rebuilt. */
-const DISCOVERY_RULES_VERSION = 2
+const DISCOVERY_RULES_VERSION = 3
 const DISCOVERY_CACHE_DIRECTORY = join('.doxloop', 'cache', 'discovery')
-const MAX_FILES_PER_SOURCE = 500
+/**
+ * Inspectable text files per source. The cap applies after product code is
+ * placed first, so a repository whose `public/` folder holds hundreds of
+ * icons still has its `src/` routes, screens, and configuration inventoried.
+ */
+const MAX_FILES_PER_SOURCE = 2500
 /**
  * Inventory rows sent to the planner. Public-surface kinds are kept ahead of
  * file-level kinds so a large repository's documentation and test files do not
@@ -20,7 +26,15 @@ const MAX_FILES_PER_SOURCE = 500
 const MAX_SIGNALS_PER_SOURCE = 800
 const KIND_PRIORITY: DiscoveryEvidenceKind[] = ['package', 'command', 'route', 'operation', 'export', 'configuration', 'authentication', 'authorization', 'error', 'event', 'integration', 'example', 'documentation', 'test', 'asset']
 const MAX_FILE_BYTES = 128 * 1024
-const MAX_TEXT_BYTES_PER_SOURCE = 4 * 1024 * 1024
+const MAX_TEXT_BYTES_PER_SOURCE = 12 * 1024 * 1024
+/**
+ * Inspection order. Product code carries the public surface; prose, examples,
+ * and tests are supporting evidence; assets never produce a signal worth a
+ * reader's attention, so they are inventoried last and never inspected.
+ */
+const ROLE_PRIORITY: Record<SourceFileRole, number> = { code: 0, other: 1, infrastructure: 2, documentation: 3, example: 4, test: 5, fixture: 6, asset: 7 }
+/** English UI message catalogs that hold the strings a reader actually sees. */
+const LABEL_CATALOG_PATH = /(^|\/)(?:lang|langs|locales?|i18n|intl\/messages|intl|translations?|messages|l10n)\/(?:en|en[-_][A-Za-z]{2})\.(?:json|ya?ml)$/i
 
 const TEXT_EXTENSIONS = new Set([
   '.c', '.cc', '.cpp', '.cs', '.go', '.graphql', '.gql', '.h', '.hpp', '.html',
@@ -61,7 +75,7 @@ export interface DiscoveryEvidence {
 
 export interface SourceDiscoveryResult {
   name: string
-  kind: 'directory' | 'openapi'
+  kind: SourceKind
   location: string
   revision: string | null
   filesScanned: number
@@ -70,6 +84,12 @@ export interface SourceDiscoveryResult {
   languages: string[]
   packageNames: string[]
   evidence: DiscoveryEvidence[]
+  /**
+   * English UI message catalogs (for example `src/lang/en.json` or
+   * `public/intl/messages/en-US.json`). Authors quote displayed strings from
+   * these files instead of translation keys or guessed labels.
+   */
+  uiLabelCatalogs: string[]
   warnings: string[]
   scope?: SourceBinding['scope']
 }
@@ -131,7 +151,10 @@ export async function discoverDocumentationSources(root: string): Promise<Discov
   const pages = await safeExistingPages(root, project)
   const existingPages = pages.map((page) => portable(relative(root, page)))
   const navigationFiles = await existingNavigationFiles(root, project)
-  const publicSignals = sources.reduce((total, source) => total + source.evidence.length, 0)
+  // Pages of an existing documentation site describe the product second-hand.
+  // They are listed so the planner can account for every one of them, but they
+  // are not public product surface and must not inflate the suggested size.
+  const publicSignals = sources.filter((source) => source.kind !== 'docs-site').reduce((total, source) => total + source.evidence.length, 0)
   const inventory: DocumentationDiscoveryInventory = {
     schemaVersion: DISCOVERY_SCHEMA_VERSION,
     cacheKey,
@@ -163,23 +186,36 @@ async function discoverSource(
   revision: string | null,
 ): Promise<SourceDiscoveryResult> {
   if (sourceKind(source) === 'openapi') return discoverOpenApiSource(root, source, revision)
+  if (sourceKind(source) === 'docs-site') return discoverDocsSiteSource(root, source, revision)
   const sourceRoot = resolve(root, source.path)
   const files = await safeSourceFiles(sourceRoot, project.sync.ignore)
   const evidence: DiscoveryEvidence[] = []
   const languages = new Set<string>()
   const packageNames = new Set<string>()
   const warnings: string[] = []
+  const uiLabelCatalogs: string[] = []
   let textBytes = 0
   let filesScanned = 0
-  const candidates = files.slice(0, MAX_FILES_PER_SOURCE)
+  // Only text files can yield a signal, and product code must be read before
+  // anything else: an alphabetical cap once spent the whole budget on a
+  // `public/` folder of icons and never opened `src/`.
+  const inspectable = files
+    .map((path) => ({ path, sourcePath: portable(relative(sourceRoot, path)) }))
+    .filter(({ path, sourcePath }) => TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || sourcePath.toLowerCase().endsWith('.env.example'))
+    .map((entry) => ({ ...entry, role: classifySourceFile(entry.sourcePath) }))
+    .filter((entry) => entry.role !== 'asset' || LABEL_CATALOG_PATH.test(entry.sourcePath))
+    .sort((left, right) => ROLE_PRIORITY[left.role] - ROLE_PRIORITY[right.role] || left.sourcePath.localeCompare(right.sourcePath))
+  const candidates = inspectable.slice(0, MAX_FILES_PER_SOURCE)
   // Package entry points decide which exports count as public surface, and a
   // package manifest can sort after the code it describes, so read them first.
-  const entryPoints = await packageEntryPoints(sourceRoot, candidates)
-  for (const path of candidates) {
-    const sourcePath = portable(relative(sourceRoot, path))
+  const entryPoints = await packageEntryPoints(sourceRoot, candidates.map((entry) => entry.path))
+  let budgetExhausted = false
+  for (const { path, sourcePath } of candidates) {
     const extension = extname(path).toLowerCase()
+    if (LABEL_CATALOG_PATH.test(sourcePath)) uiLabelCatalogs.push(sourcePath)
     const size = (await lstat(path)).size
-    if ((!TEXT_EXTENSIONS.has(extension) && !sourcePath.toLowerCase().endsWith('.env.example')) || size > MAX_FILE_BYTES || textBytes + size > MAX_TEXT_BYTES_PER_SOURCE) continue
+    if (size > MAX_FILE_BYTES) continue
+    if (textBytes + size > MAX_TEXT_BYTES_PER_SOURCE) { budgetExhausted = true; break }
     let content: string
     try {
       content = await readFile(path, 'utf8')
@@ -191,8 +227,9 @@ async function discoverSource(
     languages.add(languageForExtension(extension))
     inspectTextFile(source.name, sourcePath, content, evidence, packageNames, entryPoints)
   }
-  if (files.length > MAX_FILES_PER_SOURCE) warnings.push(`Inventory limited to the first ${MAX_FILES_PER_SOURCE} safe files.`)
-  if (textBytes >= MAX_TEXT_BYTES_PER_SOURCE) warnings.push('Inventory text budget reached before every safe file could be inspected.')
+  const truncated = inspectable.length > MAX_FILES_PER_SOURCE || budgetExhausted
+  if (inspectable.length > MAX_FILES_PER_SOURCE) warnings.push(`Inventory inspected ${filesScanned} of ${inspectable.length} inspectable files; product code was read first and supporting files were cut off.`)
+  if (budgetExhausted) warnings.push(`Inventory text budget reached after ${filesScanned} of ${inspectable.length} inspectable files; product code was read first.`)
   return {
     name: source.name,
     kind: 'directory',
@@ -200,10 +237,11 @@ async function discoverSource(
     revision,
     filesScanned,
     filesAvailable: files.length,
-    truncated: files.length > MAX_FILES_PER_SOURCE || textBytes >= MAX_TEXT_BYTES_PER_SOURCE,
+    truncated,
     languages: [...languages].filter(Boolean).sort(),
     packageNames: [...packageNames].sort(),
     evidence: uniqueEvidence(evidence),
+    uiLabelCatalogs: uiLabelCatalogs.sort(),
     warnings,
     ...(source.scope ? { scope: source.scope } : {}),
   }
@@ -239,7 +277,38 @@ async function discoverOpenApiSource(root: string, source: SourceBinding, revisi
     languages: ['OpenAPI'],
     packageNames: [],
     evidence: uniqueEvidence(evidence),
+    uiLabelCatalogs: [],
     warnings: [],
+    ...(source.scope ? { scope: source.scope } : {}),
+  }
+}
+
+/**
+ * One `documentation` row per crawled page, labeled with the page title, so
+ * the planner sees the whole existing site map without opening every file.
+ * The snapshot's `index.md` carries the same table with original URLs.
+ */
+async function discoverDocsSiteSource(root: string, source: SourceBinding, revision: string | null): Promise<SourceDiscoveryResult> {
+  const manifest = await readDocsSiteManifest(root, source)
+  const evidence: DiscoveryEvidence[] = [
+    { source: source.name, path: 'index.md', kind: 'documentation', label: `Existing documentation site ${manifest.url} (${manifest.totals.pages} pages)` },
+    ...manifest.pages.slice(0, MAX_SIGNALS_PER_SOURCE - 1).map((page): DiscoveryEvidence => ({ source: source.name, path: page.file, kind: 'documentation', label: page.title })),
+  ]
+  const warnings = [...manifest.warnings]
+  if (manifest.brokenLinks.length > 0) warnings.push(`${manifest.brokenLinks.length} internal links on the existing site point at pages that failed to load; see index.md.`)
+  return {
+    name: source.name,
+    kind: 'docs-site',
+    location: manifest.url,
+    revision: revision ?? manifest.hash,
+    filesScanned: manifest.pages.length,
+    filesAvailable: manifest.pages.length,
+    truncated: Boolean(manifest.truncated),
+    languages: ['Markdown'],
+    packageNames: [],
+    evidence,
+    uiLabelCatalogs: [],
+    warnings,
     ...(source.scope ? { scope: source.scope } : {}),
   }
 }
@@ -291,9 +360,16 @@ async function walk(root: string, directory: string, ignoredGlobs: string[], fil
  * reader-facing behavior, and counting every such line turned a 16-page site
  * into a "30% covered" one with a hundred junk gaps to resolve by hand.
  */
-export type SourceFileRole = 'code' | 'documentation' | 'test' | 'example' | 'fixture' | 'asset' | 'other'
+export type SourceFileRole = 'code' | 'infrastructure' | 'documentation' | 'test' | 'example' | 'fixture' | 'asset' | 'other'
 
 const FIXTURE_PATH = /(^|\/)(?:evals?|evaluations?|fixtures?|__fixtures__|__mocks__|mocks?|testdata|test-data|snapshots?|__snapshots__|e2e|benchmarks?|playground|sandbox|scripts?|tools?|\.?storybook|stories)(\/|$)/i
+/**
+ * Deployment, database, and maintenance code. Its environment variables are
+ * real operator configuration, but a migration that creates an `api_key`
+ * table or a helper that exits with status 1 is not a reader-facing
+ * authentication surface or command.
+ */
+const INFRASTRUCTURE_PATH = /(^|\/)(?:db|database|migrations?|migrate|seeds?|prisma|drizzle|docker|podman|k8s|kubernetes|helm|charts?|deploy|deployment|infra|infrastructure|terraform|ansible|extra|extras|ci|\.github|\.gitlab|\.circleci)(\/|$)/i
 const TEST_PATH = /(^|\/)(?:__tests__|tests?|specs?)(\/|$)|\.(?:test|spec|stories)\.[^.]+$/i
 const EXAMPLE_PATH = /(^|\/)(?:examples?|demos?|samples?|recipes?)(\/|$)/i
 const DOCUMENTATION_PATH = /(^|\/)(?:docs?|documentation|skills?|prompts?|references?|guides?|wiki|adr|rfcs?|proposals?)(\/|$)|\.(?:md|mdx|rst|txt)$/i
@@ -306,7 +382,40 @@ export function classifySourceFile(path: string): SourceFileRole {
   if (EXAMPLE_PATH.test(path)) return 'example'
   if (DOCUMENTATION_PATH.test(path)) return 'documentation'
   if (ASSET_PATH.test(path)) return 'asset'
+  if (INFRASTRUCTURE_PATH.test(path)) return 'infrastructure'
   return CODE_EXTENSIONS.has(extname(path).toLowerCase()) ? 'code' : 'other'
+}
+
+/**
+ * Framework-owned HTTP routes that no `app.get(...)` line declares. A Next.js
+ * App Router handler lives at `app/api/users/[id]/route.ts` and exports one
+ * function per method, so the route is derived from the file path.
+ */
+export function frameworkRoutes(path: string, content: string): string[] {
+  const match = /(?:^|\/)app\/(.*?)\/?route\.(?:ts|tsx|js|jsx|mjs)$/.exec(path)
+  if (!match) return []
+  const route = `/${match[1]!
+    .split('/')
+    .filter((segment) => segment && !/^\(.*\)$/.test(segment) && !/^@/.test(segment))
+    .map((segment) => segment.replace(/^\[\[?\.\.\.([^\]]+)\]?\]$/, ':$1*').replace(/^\[([^\]]+)\]$/, ':$1'))
+    .join('/')}`
+  const methods = [...content.matchAll(/\bexport\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/g)].map((item) => item[1]!)
+  const aliased = [...content.matchAll(/\bexport\s*\{[^}]*\b(?:as\s+)?(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b[^}]*\}/g)].map((item) => item[1]!)
+  return [...new Set([...methods, ...aliased])].map((method) => `${method} ${route}`)
+}
+
+/**
+ * Lines that mention authentication or providers without being behavior:
+ * comments, markup, translated UI strings, and SQL. A Vue template that
+ * renders `$t("Add API Key")` is a label, not an authentication surface.
+ */
+function isProseLine(line: string, inTemplate: boolean): boolean {
+  const trimmed = line.trim()
+  return inTemplate
+    || /^(?:\/\/|#|\*|\/\*|<!--|--|\{\/\*)/.test(trimmed)
+    || /^<[A-Za-z!/]/.test(trimmed)
+    || /\$t\(|\bt\(\s*['"`]|i18n|\btranslate\(/.test(trimmed)
+    || /^\s*(?:CREATE|ALTER|DROP|INSERT|UPDATE|SELECT)\s/i.test(trimmed)
 }
 
 /**
@@ -363,7 +472,10 @@ function inspectTextFile(
     if (name) evidence.push({ source, path, kind: 'package', label: name })
     for (const command of Object.keys(record(json?.bin))) evidence.push({ source, path, kind: 'command', label: command })
     for (const exported of Object.keys(record(json?.exports))) evidence.push({ source, path, kind: 'export', label: exported })
-    for (const script of Object.keys(record(json?.scripts)).filter((item) => /^(start|dev|serve|build|test|lint|migrate|deploy)/.test(item))) {
+    // Operator-facing scripts only. A repository's forty `test-*`, `lint`,
+    // and `build-docker-nightly` scripts are contributor tooling, and each
+    // one counted as an undocumented public command.
+    for (const script of Object.keys(record(json?.scripts)).filter((item) => /^(?:start|dev|serve|build|migrate|deploy|preview|setup)(?::[a-z0-9-]+)?$/.test(item))) {
       evidence.push({ source, path, kind: 'command', label: `npm run ${script}` })
     }
   }
@@ -371,7 +483,6 @@ function inspectTextFile(
     role === 'example' ? 'example'
       : role === 'test' || role === 'fixture' ? 'test'
         : role === 'documentation' ? 'documentation'
-          : role === 'asset' ? 'asset'
             : undefined
   if (fileKind) evidence.push({ source, path, kind: fileKind, label: path })
   // Key extraction applies to data configuration files (YAML, TOML, JSON,
@@ -380,13 +491,29 @@ function inspectTextFile(
   const configurationFile = role !== 'code' && /(?:^|\/)(?:config|configuration|settings)(?:[./_-]|$)|\.env\.example$/i.test(path)
   // Prose, fixtures, tests, and examples are evidence about behavior, never
   // behavior themselves. Only product code and configuration files below.
-  if (role !== 'code' && !(role === 'other' && configurationFile)) return
+  if (role !== 'code' && role !== 'infrastructure' && !(role === 'other' && configurationFile)) return
+  // Deployment and database code contributes operator configuration only.
+  if (role === 'infrastructure') {
+    content.split(/\r?\n/).forEach((line, index) => {
+      for (const match of line.matchAll(/\b(?:process\.env\.|env\[['"`]|ENV\[['"`])([A-Z][A-Z0-9_]{2,})/g)) {
+        evidence.push({ source, path, kind: 'configuration', label: match[1]!, line: index + 1 })
+      }
+    })
+    return
+  }
+  for (const route of frameworkRoutes(path, content)) evidence.push({ source, path, kind: 'route', label: route })
   const publicExports = isPublicEntryPoint(path, entryPoints)
   // One signal per keyword family per file: "this module authenticates" is a
   // public-surface fact; the forty lines that mention a token are not.
   const seenKeywords = new Set<string>()
   const lines = content.split(/\r?\n/)
+  let inTemplate = false
   lines.forEach((line, index) => {
+    if (path.endsWith('.vue')) {
+      if (/^\s*<template\b/.test(line)) inTemplate = true
+      else if (/^\s*<\/template>/.test(line)) inTemplate = false
+    }
+    const prose = isProseLine(line, inTemplate)
     const exported = /\bexport\s+(?:default\s+)?(?:async\s+)?(?:class|function|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)/.exec(line)?.[1]
       ?? /\bpub\s+(?:async\s+)?(?:fn|struct|enum|trait|type)\s+([A-Za-z_][\w]*)/.exec(line)?.[1]
     if (exported && publicExports) evidence.push({ source, path, kind: 'export', label: exported, line: index + 1 })
@@ -404,8 +531,9 @@ function inspectTextFile(
     const option = /(?:add_argument|addOption|option)\(\s*['"`](-{1,2}[a-z0-9][\w-]*)/i.exec(line)?.[1]
       ?? /\b(?:flag\.(?:String|Bool|Int|Duration)|StringVar|BoolVar|IntVar)\s*\([^,]*,?\s*['"`]([a-z0-9][\w-]*)/i.exec(line)?.[1]
     if (option) evidence.push({ source, path, kind: 'command', label: option, line: index + 1 })
-    const exit = /\b(?:process\.exit|sys\.exit|exit)\(\s*(\d{1,3})\s*\)/.exec(line)?.[1]
-    if (exit) evidence.push({ source, path, kind: 'command', label: `exit ${exit}`, line: index + 1 })
+    // Comments, markup, and translated strings mention these words without
+    // implementing anything; keyword families below apply to code lines only.
+    if (prose) return
     const authentication = /\b(oauth2?|oidc|sso|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authenticate|authentication|sign[ -]?in|login)(?:\b|(?=[A-Z_]))/i.exec(line)?.[1]
     if (authentication && keywordOnce(seenKeywords, 'authentication', authentication)) evidence.push({ source, path, kind: 'authentication', label: conciseLabel(line, authentication), line: index + 1 })
     // Bare "scope", "policy", and "role" are ordinary vocabulary in most code;

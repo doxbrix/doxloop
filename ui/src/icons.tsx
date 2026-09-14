@@ -5,6 +5,22 @@
  */
 
 const PATHS: Record<string, string> = {
+  terminal: 'M3 4h18v16H3zM6 8l4 4-4 4M13 16h5',
+  code: 'M8 6 2 12l6 6M16 6l6 6-6 6M14 3l-4 18',
+  server: 'M3 3h18v7H3zM3 14h18v7H3zM7 6.5h.01M7 17.5h.01M16 6.5h2M16 17.5h2',
+  package: 'M12 2 22 7v10l-10 5L2 17V7zM2 7l10 5 10-5M12 12v10M7 4.5l10 5V15',
+  plug: 'M8 2v5M16 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5',
+  wrench: 'M14 7a5 5 0 0 0-6 6l-5 5a2.1 2.1 0 0 0 3 3l5-5a5 5 0 0 0 6-6l-3 3-3-3z',
+  workflow: 'M3 3h6v6H3zM15 15h6v6h-6zM9 6h6a3 3 0 0 1 3 3v6M6 9v9h9',
+  history: 'M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2',
+  eyeOff: 'M3 3l18 18M10.6 5.1 12 5c6 0 10 7 10 7a20 20 0 0 1-3 3.8M6.3 6.3A24 24 0 0 0 2 12s4 7 10 7a13 13 0 0 0 5.7-1.7M10 10a3 3 0 0 0 4 4',
+  download: 'M12 3v12M7 10l5 5 5-5M3 16v5h18v-5',
+  layers: 'M12 2 2 7l10 5 10-5zM2 12l10 5 10-5M2 17l10 5 10-5',
+  rocket: 'M14 4c3-2 6-1 6-1s1 3-1 6l-7 7-4-4zM8 12H4l-2 4h7M12 16v4l4-2v-5M7 17l-3 3M16 7h.01',
+  compass: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM16 8l-2 6-6 2 2-6z',
+  globe: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18',
+  eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
+  undo: 'M9 5 4 10l5 5M4 10h10a6 6 0 0 1 0 12',
   overview: 'M3.5 3.5h7v7h-7zM13.5 3.5h7v7h-7zM3.5 13.5h7v7h-7zM13.5 13.5h7v7h-7z',
   update: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z',
   review: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11',
@@ -89,7 +105,8 @@ export function Icon({ name, size = 16, class: className }: { name: string; size
     <path fill="#e24329" d="M33.8 14.5h-9.2l3.9-11.9c.2-.6 1.1-.6 1.3 0z" />
     <path fill="#fc6d26" d="m18 34.8 6.6-20.3h9.2z" />
   </svg>
-  const path = PATHS[name] ?? PATHS.info!
+  const aliases: Record<string, string> = { bolt: 'zap', database: 'sources' }
+  const path = PATHS[name] ?? PATHS[aliases[name] ?? ''] ?? PATHS.info!
   return <svg
     class={`icon ${className ?? ''}`}
     viewBox="0 0 24 24"

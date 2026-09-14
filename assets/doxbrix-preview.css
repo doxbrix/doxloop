@@ -6914,3 +6914,19 @@ body.dxb-search-open { overflow: hidden; }
   color: var(--dp-page-text);
   font-weight: 600;
 }
+
+/* Editing is controlled by the parent workspace in embedded previews. */
+.dp-root--embedded .dp-edit-page { display: none; }
+/* Doc-version selector follows the DocsAI CLI reader's sidebar layout. */
+[data-doc-version][hidden] { display: none !important; }
+.dp-version-switcher { margin: 16px 12px 0; flex-shrink: 0; }
+.dp-version-trigger { list-style: none; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 8px; color: inherit; background: color-mix(in srgb, currentColor 4%, transparent); font-size: 13px; font-weight: 600; cursor: pointer; }
+.dp-version-trigger::-webkit-details-marker { display: none; }
+.dp-version-trigger:hover, .dp-version-trigger:focus-visible { border-color: var(--project-primary, #6366f1); }
+.dp-version-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-version-tag { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--project-primary, #6366f1) 14%, transparent); color: var(--project-primary, #6366f1); font-size: 11px; font-weight: 600; }
+.dp-version-menu { margin-top: 4px; padding: 4px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 8px; }
+.dp-version-option { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: inherit; font-size: 13px; text-decoration: none; }
+.dp-version-option:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+.dp-version-option.active { color: var(--project-primary, #6366f1); font-weight: 600; }
+.dp-version-option[aria-disabled] { opacity: .5; }

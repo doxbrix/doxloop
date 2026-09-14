@@ -1,23 +1,26 @@
 import { Comments, BulkMetadata, AuditTools, Estimate, Collections } from './WorkspaceTools'
 import { TextEditor, PageTools } from './TextEditor'
+import { PageContentEditor } from './PageContentEditor'
+import './PagesEditor.css'
 import { workspaceStatus, coverageRefreshKey } from './workspace-status'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import './WorkspaceApplication.css'
 import './ContentTools.css'
-import { api, patch, post, put, remove } from './api'
+import { NO_TIMEOUT, api, patch, post, put, remove } from './api'
 import {
   Badge, Button, Combo, Empty, Field, Input, KeyValues, Lines, Note, PageHeader,
   Panel, Segmented, Select, Stat, Table, Tabs, Textarea, Toggle, parseTerms, splitComma, termText, timeText,
 } from './components'
 import { Icon } from './icons'
+import { DocsSiteSourceFields, type DocsSiteInspection } from './DocsSiteSourceFields'
 import { settledPageEditJobs, settledPlanJobs } from './job-transitions'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
-import { countPlanPages, groupPlanPages, planActionLabel, planApprovalControls, type PlanPageFilter } from './plan-review'
+import { countPlanPages, groupPlanPages, planActionLabel, planApprovalControls, planPrimaryAction, type PlanPageFilter } from './plan-review'
 import { canonicalWorkspacePath, workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceParams, type WorkspaceRoute } from './routes'
 import { setLocation, useSearchParams } from './url-state'
 import { PollFailureTracker } from './polling'
 import { useSeededForm } from './form-sync'
-import { screenshotIntentFromChoice } from './setup-plan'
+import { batchLimitsForScope, screenshotIntentFromChoice } from './setup-plan'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { AgentCapabilityMatrix } from './agent-capabilities'
 import { ProposalRationaleDrawer, ProposalRenderedDiff, ProposalSourceDiff } from './proposal-diff'
@@ -268,6 +271,7 @@ export function WorkspaceApplication({
   }, [jobsRunning])
 
   const navigate = (next: WorkspaceRoute, params: WorkspaceParams = {}) => {
+    if (!window.dispatchEvent(new Event('doxloop:before-navigation', { cancelable: true }))) return
     history.pushState({}, '', workspacePath(next, params))
     setPage(next)
     setNavOpen(false)
@@ -443,6 +447,7 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
         <div><dt>Coding agent</dt><dd><i class={`ov-dot ${agentTone}`} />{agent ? `${agentLabel(agent.name)} ${agentSignInLabel(agent.authentication.status)}` : 'None detected'}</dd><button type="button" class="ov-fact-link" onClick={() => navigate('settings', { section: 'general' })}>Agent settings</button></div>
         <div><dt>Activity</dt><dd><i class={`ov-dot ${running ? 'info' : 'neutral'}`} />{running ? `${running} task${running === 1 ? '' : 's'} running` : 'Idle'}</dd></div>
         <div><dt>Last checked</dt><dd>{latestTimestamp ? timeText(latestTimestamp) : 'Not yet'}</dd></div>
+        {state.root && <div><dt>Project folder</dt><dd title={state.root}><code>{state.root}</code></dd></div>}
       </dl>
     </section>
 
@@ -559,7 +564,10 @@ function RepositoryFolderSelect({ value, directories, loading, connected, onChan
 function SourcesReference({ state, act, navigate }: { state: UiState; act: Action; navigate: (page: WorkspaceRoute) => void }) {
   const project = state.project!
   const [menuOpen, setMenuOpen] = useState(false)
-  const [dialog, setDialog] = useState<'source' | 'openapi' | null>(null)
+  const [dialog, setDialog] = useState<'source' | 'openapi' | 'docs-site' | null>(null)
+  const [docsSiteInspection, setDocsSiteInspection] = useState<DocsSiteInspection>()
+  const [docsSiteError, setDocsSiteError] = useState('')
+  const [recrawling, setRecrawling] = useState('')
   const [monitoringOpen, setMonitoringOpen] = useState(false)
   const [scopeSource, setScopeSource] = useState<Source | null>(null)
   const [sourceMode, setSourceMode] = useState<'git' | 'local'>('git')
@@ -583,8 +591,10 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
     setHead('')
     setSourceMode('git')
     setOpenapiMode('file')
+    setDocsSiteInspection(undefined)
+    setDocsSiteError('')
   }
-  const openDialog = (next: 'source' | 'openapi') => {
+  const openDialog = (next: 'source' | 'openapi' | 'docs-site') => {
     resetAdd()
     setMenuOpen(false)
     setDialog(next)
@@ -632,24 +642,39 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
   }
   const addSource = async () => {
     const location = dialog === 'openapi' ? add.path || add.fileName || 'openapi' : sourceMode === 'git' ? add.repository : add.path
-    const rawName = location.replace(/[?#].*$/, '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/\.git$/i, '').replace(/\.(json|ya?ml)$/i, '') || 'source'
-    const name = rawName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+    const rawName = dialog === 'docs-site'
+      ? (() => { try { return new URL(add.path.trim()).hostname.replace(/^www\./, '').replace(/^docs\./, 'docs-') } catch { return 'docs' } })()
+      : location.replace(/[?#].*$/, '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/\.git$/i, '').replace(/\.(json|ya?ml)$/i, '') || 'source'
+    const name = rawName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'docs'
     setSaving(true)
     try {
       const scope = add.space.trim() || add.routePrefix.trim() || add.navigationGroup.trim() || add.sharedPages.trim() ? { space: add.space.trim() || undefined, routePrefix: add.routePrefix.trim() || undefined, navigationGroup: add.navigationGroup.trim() || undefined, sharedPages: splitComma(add.sharedPages) } : undefined
-      const body = dialog === 'openapi'
+      const body = dialog === 'docs-site'
+        ? { kind: 'docs-site', name, url: add.path.trim(), inspectionId: docsSiteInspection?.id, scope }
+        : dialog === 'openapi'
         ? { kind: 'openapi', name, path: openapiMode === 'url' ? add.path : undefined, specContent: openapiMode === 'file' ? add.specContent : undefined, scope }
         : sourceMode === 'git'
           ? { kind: 'git', name, ...add, scope }
           : { kind: 'directory', name, path: add.path, scope }
-      const result = await act(() => post('/api/sources', body), 'Source added')
+      const result = await act(() => post('/api/sources', body, dialog === 'docs-site' ? NO_TIMEOUT : undefined), 'Source added')
       if (result !== undefined) closeDialog()
     } finally {
       setSaving(false)
     }
   }
+  const recrawlSource = async (source: Source) => {
+    if (!confirm(`Re-crawl ${source.site?.url ?? source.name}? The new snapshot replaces the current one; the next update compares them and names the pages that changed.`)) return
+    setRecrawling(source.name)
+    try {
+      await act(() => post(`/api/sources/${encodeURIComponent(source.name)}/refresh`, {}, NO_TIMEOUT), 'Documentation site re-crawled')
+      await loadIntelligence()
+    } finally {
+      setRecrawling('')
+    }
+  }
   const remoteSourceCount = filtered.filter((source) => Boolean(source.remote)).length
   const openapiSourceCount = filtered.filter((source) => source.kind === 'openapi').length
+  const docsSiteSourceCount = filtered.filter((source) => source.kind === 'docs-site').length
   const measuredCoverage = intelligence?.coverage.metrics.filter((metric) => metric.status !== 'unknown') ?? []
   const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
   const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
@@ -658,11 +683,11 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
   const coverageAssessment = overallCoverage === null ? 'Awaiting discovery' : overallCoverage >= 90 ? 'Strong coverage' : overallCoverage >= 70 ? 'Good foundation' : overallCoverage >= 40 ? 'Coverage gaps remain' : 'Needs attention'
   const selectedCoverageMetric = intelligence?.coverage.metrics.find((metric) => metric.id === coverageMetricId)
   return <div class="sources-reference-page">
-    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<><Button icon="bell" onClick={() => setMonitoringOpen(true)}>Monitoring</Button><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button></div>}</div></>} />
+    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<><Button icon="bell" onClick={() => setMonitoringOpen(true)}>Monitoring</Button><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button><button type="button" onClick={() => openDialog('docs-site')}><span><Icon name="globe" size={20} /></span><span><strong>Existing documentation</strong><small>Rewrite a live docs site</small></span></button></div>}</div></>} />
     <section class="sources-library">
       <header class="sources-library-header">
         <div><h2>Connected sources</h2><p>Evidence Doxloop can read when it creates and updates your documentation.</p></div>
-        <div class="sources-library-summary"><span><strong>{filtered.length}</strong> connected</span><i /><span><strong>{remoteSourceCount}</strong> remote</span><i /><span><strong>{openapiSourceCount}</strong> API</span></div>
+        <div class="sources-library-summary"><span><strong>{filtered.length}</strong> connected</span><i /><span><strong>{remoteSourceCount}</strong> remote</span><i /><span><strong>{openapiSourceCount}</strong> API</span>{docsSiteSourceCount > 0 && <><i /><span><strong>{docsSiteSourceCount}</strong> existing docs</span></>}</div>
       </header>
       {filtered.length ? <div class="sources-library-table" role="table" aria-label="Connected sources">
         <div class="sources-library-table-head" role="row">
@@ -670,9 +695,12 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
         </div>
         <div class="sources-library-table-body" role="rowgroup">{filtered.map((source) => {
           const health = intelligence?.health.find((item) => item.name === source.name)
-          const type = source.kind === 'openapi' ? 'OpenAPI' : source.remote ? 'Git' : 'Local'
+          const type = source.kind === 'openapi' ? 'OpenAPI' : source.kind === 'docs-site' ? 'Docs site' : source.remote ? 'Git' : 'Local'
+          const docsSite = health?.docsSite ?? source.site
           const detail = health?.openapi
             ? `v${health.openapi.version} · ${health.openapi.operationCount} operations · ${health.openapi.schemas.length} schemas`
+            : source.kind === 'docs-site'
+              ? docsSite ? `${docsSite.pages} pages · ${docsSite.words.toLocaleString()} words${docsSite.generator ? ` · ${docsSite.generator}` : ''} · crawled ${new Date(docsSite.crawledAt).toLocaleDateString()}` : 'Existing documentation'
             : health?.branch
               ? `${health.branch}${health.subdirectory ? ` / ${health.subdirectory}` : ''}${health.revision ? ` · ${health.revision.slice(0, 10)}` : ''}`
               : source.scope?.routePrefix
@@ -680,11 +708,11 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
                 : 'Project-wide evidence'
           const status = health ? health.status === 'healthy' ? 'Available' : health.status === 'warning' ? 'Needs attention' : 'Unavailable' : 'Checking…'
           return <div class="sources-library-row" role="row" key={source.name}>
-            <div class="sources-library-name" role="cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small title={source.remote ? source.remote.repository : source.path}>{source.remote ? source.remote.repository : source.path}</small></span></div>
-            <div role="cell"><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.remote ? 'git' : 'local'}`}>{type}</em></div>
-            <div class="sources-library-detail" role="cell"><strong>{detail}</strong>{source.scope?.routePrefix && health?.openapi && <small>Owns /{source.scope.routePrefix.replace(/^\//, '')}</small>}{health?.status === 'error' && <small class="source-health-error">{health.summary}</small>}</div>
+            <div class="sources-library-name" role="cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.kind === 'docs-site' ? 'docs-site' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.kind === 'docs-site' ? 'globe' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small title={source.site?.url ?? (source.remote ? source.remote.repository : source.path)}>{source.site?.url ?? (source.remote ? source.remote.repository : source.path)}</small></span></div>
+            <div role="cell"><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.kind === 'docs-site' ? 'docs-site' : source.remote ? 'git' : 'local'}`}>{type}</em></div>
+            <div class="sources-library-detail" role="cell"><strong>{detail}</strong>{source.scope?.routePrefix && health?.openapi && <small>Owns /{source.scope.routePrefix.replace(/^\//, '')}</small>}{source.kind === 'docs-site' && health?.docsSite && health.docsSite.brokenLinks > 0 && <small>{health.docsSite.brokenLinks} broken internal links on the site</small>}{source.kind === 'docs-site' && health?.status === 'warning' && <small class="source-health-error">{health.summary}</small>}{health?.status === 'error' && <small class="source-health-error">{health.summary}</small>}</div>
             <div class="sources-library-status" role="cell"><span class={`source-connection-status ${health?.status ?? ''}`} title={health ? `Checked ${new Date(health.checkedAt).toLocaleString()}${health.lastMonitoringAt ? ` · Last monitoring check ${new Date(health.lastMonitoringAt).toLocaleString()}` : ''}` : ''}><i />{status}</span>{health && <small>Checked {new Date(health.checkedAt).toLocaleDateString()}</small>}</div>
-            <span class="source-row-menu" role="cell"><button type="button" aria-label={`Test ${source.name}`} title="Test connection" disabled={checkingSource === source.name} onClick={() => { setCheckingSource(source.name); void act(() => post(`/api/sources/${encodeURIComponent(source.name)}/test`), 'Source connection checked').then(() => loadIntelligence()).finally(() => setCheckingSource('')) }}><Icon name="refresh" size={18} /></button><button type="button" aria-label={`Configure documentation ownership for ${source.name}`} title="Documentation ownership" onClick={() => setScopeSource(source)}><Icon name="map" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span>
+            <span class="source-row-menu" role="cell">{source.kind === 'docs-site' && <button type="button" aria-label={`Re-crawl ${source.name}`} title="Re-crawl the documentation site" disabled={recrawling === source.name} onClick={() => void recrawlSource(source)}><Icon name={recrawling === source.name ? 'clock' : 'globe'} size={18} /></button>}<button type="button" aria-label={`Test ${source.name}`} title="Test connection" disabled={checkingSource === source.name} onClick={() => { setCheckingSource(source.name); void act(() => post(`/api/sources/${encodeURIComponent(source.name)}/test`), 'Source connection checked').then(() => loadIntelligence()).finally(() => setCheckingSource('')) }}><Icon name="refresh" size={18} /></button><button type="button" aria-label={`Configure documentation ownership for ${source.name}`} title="Documentation ownership" onClick={() => setScopeSource(source)}><Icon name="map" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span>
           </div>
         })}</div>
       </div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
@@ -736,12 +764,44 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
     />}
     {scopeSource && <SourceScopeDialog source={scopeSource} act={act} onClose={() => setScopeSource(null)} />}
     {dialog && <div class="sources-modal-scrim" onClick={closeDialog}><section class={`sources-reference-dialog ${dialog}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-      <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
-      {dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><Input value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
+      <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}{dialog === 'docs-site' && <span class="sources-dialog-icon"><Icon name="globe" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : dialog === 'docs-site' ? 'Add existing documentation' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : dialog === 'docs-site' ? 'Point Doxloop at the documentation you have today. The agent audits it, verifies it against your other sources, and rewrites it as a new documentation set.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
+      {dialog === 'docs-site' ? <div class="sources-dialog-body"><DocsSiteSourceFields url={add.path} onUrl={(value) => { setAdd({ ...add, path: value }); setDocsSiteError('') }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={docsSiteError} onError={setDocsSiteError} /></div> : dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><Input value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
       <details class="source-scope-fields"><summary>Documentation ownership (optional)</summary><div><Field label="Route prefix"><Input value={add.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setAdd({ ...add, routePrefix: event.currentTarget.value })} /></Field><Field label="Navigation group"><Input value={add.navigationGroup} placeholder="API reference" onInput={(event) => setAdd({ ...add, navigationGroup: event.currentTarget.value })} /></Field><Field label="Space"><Input value={add.space} placeholder="Developers" onInput={(event) => setAdd({ ...add, space: event.currentTarget.value })} /></Field><Field label="Shared pages" hint="Comma-separated page paths or globs"><Input value={add.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setAdd({ ...add, sharedPages: event.currentTarget.value })} /></Field></div></details>
-      <footer><Button onClick={closeDialog}>Cancel</Button><Button tone="primary" busy={saving} disabled={dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()} onClick={() => void addSource()}>Add source</Button></footer>
+      <footer><Button onClick={closeDialog}>Cancel</Button><Button tone="primary" busy={saving} disabled={dialog === 'docs-site' ? docsSiteInspection?.status !== 'completed' : dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()} onClick={() => void addSource()}>Add source</Button></footer>
     </section></div>}
   </div>
+}
+
+function ExistingDocumentationAudit({ assessments, pages }: { assessments: NonNullable<DocumentationPlan['existingDocumentation']>; pages: DocumentationPlanPage[] }) {
+  const titles = new Map(pages.map((page) => [page.id, page.title]))
+  return <div class="plan-existing-docs">{assessments.map((assessment) => {
+    const counts = { rewrite: 0, merge: 0, preserve: 0, drop: 0 }
+    for (const page of assessment.pages) counts[page.disposition] += 1
+    const blockers = assessment.findings.filter((finding) => finding.severity === 'blocker').length
+    return <section class="plan-existing-docs-source" key={assessment.source}>
+      <header><h3>{assessment.source}</h3><small>{assessment.pages.length} existing page{assessment.pages.length === 1 ? '' : 's'} assessed · {assessment.findings.length} finding{assessment.findings.length === 1 ? '' : 's'}{blockers ? ` (${blockers} blocking)` : ''}</small></header>
+      {assessment.summary && <p>{assessment.summary}</p>}
+      <div class="plan-existing-docs-stats">
+        <div><strong>{counts.rewrite}</strong><span>pages rewritten</span></div>
+        <div><strong>{counts.merge}</strong><span>pages merged</span></div>
+        <div><strong>{counts.preserve}</strong><span>pages preserved</span></div>
+        <div><strong>{counts.drop}</strong><span>pages dropped</span></div>
+        <div><strong>{assessment.coverage.gaps.length}</strong><span>coverage gaps filled</span></div>
+        <div><strong>{assessment.coverage.contradicted.length}</strong><span>claims corrected</span></div>
+      </div>
+      <div class="plan-existing-docs-columns">
+        <section class="gaps"><h4>Not covered today</h4>{assessment.coverage.gaps.length ? <ul>{assessment.coverage.gaps.map((item) => <li key={item}>{item}</li>)}</ul> : <span class="empty">No gaps against the product sources.</span>}</section>
+        <section class="contradicted"><h4>Contradicted by the product</h4>{assessment.coverage.contradicted.length ? <ul>{assessment.coverage.contradicted.map((item) => <li key={item}>{item}</li>)}</ul> : <span class="empty">No claims contradicted.</span>}</section>
+        <section class="obsolete"><h4>Obsolete</h4>{assessment.coverage.obsolete.length ? <ul>{assessment.coverage.obsolete.map((item) => <li key={item}>{item}</li>)}</ul> : <span class="empty">Nothing obsolete found.</span>}</section>
+        <section class="preserved"><h4>Kept from the existing docs</h4>{assessment.coverage.preserved.length ? <ul>{assessment.coverage.preserved.map((item) => <li key={item}>{item}</li>)}</ul> : <span class="empty">Nothing marked for preservation.</span>}</section>
+      </div>
+      {assessment.strengths.length > 0 && <Note tone="info">Strengths kept: {assessment.strengths.join(' · ')}</Note>}
+      {assessment.findings.length > 0 && <div class="plan-existing-docs-findings">{assessment.findings.map((finding) => <article key={finding.title}><span class={`severity-pill ${finding.severity}`}>{finding.severity}</span><div><strong>{finding.title}</strong>{finding.description && <p>{finding.description}</p>}{finding.pages.length > 0 && <small>{finding.pages.join(', ')}</small>}</div></article>)}</div>}
+      {assessment.pages.length > 0 && <details class="plan-existing-docs-dispositions"><summary>Where each existing page lands ({assessment.pages.length})</summary>
+        <table><thead><tr><th>Existing page</th><th>Decision</th><th>New page</th><th>Why</th></tr></thead><tbody>{assessment.pages.map((page) => <tr key={page.path}><td>{page.title ?? page.path}<small>{page.url ?? page.path}</small></td><td><span class={`disposition-pill ${page.disposition}`}>{page.disposition}</span></td><td>{page.into.length ? page.into.map((id) => titles.get(id) ?? id).join(', ') : '—'}</td><td>{page.reason}</td></tr>)}</tbody></table>
+      </details>}
+    </section>
+  })}</div>
 }
 
 /**
@@ -895,6 +955,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   const [submitting, setSubmitting] = useState(false)
   const [discovery, setDiscovery] = useState<PlanDiscoverySummary>()
   const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
+  const [checkingCapture, setCheckingCapture] = useState(false)
   const [gitSources, setGitSources] = useState<string[]>([])
   const [contentType, setContentType] = useState<'documentation' | 'release-notes'>('documentation')
   const [release, setRelease] = useState<ReleaseTemplateForm>({ source: '', version: '', from: '', to: '' })
@@ -936,16 +997,33 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
       .catch(() => { if (active) setCaptureReadiness(undefined) })
     return () => { active = false }
   }, [form.screenshots, state.project?.application?.baseUrl])
+  // The application is often started after this form is already open, so the
+  // result fetched on load goes stale; both the Check again link and the
+  // plan button ask again instead of trusting it.
+  const refreshCaptureReadiness = async (): Promise<ApplicationReadiness | undefined> => {
+    setCheckingCapture(true)
+    let readiness: ApplicationReadiness | undefined
+    try { readiness = await api<ApplicationReadiness>('/api/application/readiness') }
+    catch { readiness = undefined }
+    finally { setCheckingCapture(false) }
+    setCaptureReadiness(readiness)
+    return readiness
+  }
 
   useEffect(() => {
     setShowNewPlan(shouldShowAuthoringForm(state))
   }, [state.documentationPlan?.id, state.documentationPlan?.status, state.documentationPlan?.proposalId, validRuns(state.runs).map((run) => `${run.id}:${run.status}`).join('|')])
 
   const startPlan = async () => {
-    if (runBusy) return
-    if (form.screenshots === 'enabled' && captureReadiness?.status !== 'ready') {
-      onError('Screenshots are selected. Configure and start the application, then wait for the page check to succeed before planning.')
-      return
+    if (runBusy || checkingCapture) return
+    if (form.screenshots === 'enabled') {
+      const readiness = captureReadiness?.status === 'ready' ? captureReadiness : await refreshCaptureReadiness()
+      if (readiness?.status !== 'ready') {
+        onError(readiness
+          ? `Screenshots are required for this run, but the application check did not pass: ${readiness.message}`
+          : 'Screenshots are required for this run, but Doxloop could not check the application. Start it, then try again.')
+        return
+      }
     }
     if (contentType === 'release-notes' && (!release.version.trim() || !release.from.trim() || !release.to.trim())) {
       onError('Release notes need a version label and the two Git refs that bound the release.')
@@ -1012,7 +1090,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
                 ['comprehensive', 'Comprehensive', 'Complete evidence-supported public surface'],
               ] as const).map(([value, label, detail]) => {
                 const estimate = discovery?.suggestedPages[value]
-                return <button type="button" key={value} class={form.scope === value ? 'active' : ''} aria-pressed={form.scope === value} onClick={() => setForm({ ...form, scope: value })}><span><strong>{label}</strong><small>{detail}</small></span><b>{estimate ? `About ${estimate} pages` : 'Estimating…'}</b></button>
+                return <button type="button" key={value} class={form.scope === value ? 'active' : ''} aria-pressed={form.scope === value} onClick={() => setForm({ ...form, scope: value, limits: batchLimitsForScope(value, form.screenshots) })}><span><strong>{label}</strong><small>{detail}</small></span><b>{estimate ? `About ${estimate} pages` : 'Estimating…'}</b></button>
               })}
             </div>
             {discovery && <small class="plan-scope-evidence">Based on {discovery.publicSignals} public source signal{discovery.publicSignals === 1 ? '' : 's'}. Small products stay small; unsupported topics are never added as filler.</small>}
@@ -1045,11 +1123,11 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
             <section class="screenshot-run-choice" aria-label="Application screenshot behavior">
               <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
               <div><strong>Add product screenshots?</strong><small>Optional. If you choose Yes, Doxloop must capture and verify the planned images before it can finish.</small></div>
-              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? Math.max(5, form.limits.maxScreenshots) : 0 } })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
-              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}</small>}
+              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? (form.limits.maxScreenshots || batchLimitsForScope(form.scope as 'starter' | 'standard' | 'comprehensive' | 'custom', 'auto').maxScreenshots) : 0 } })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
+              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}{captureReadiness.configured && captureReadiness.status !== 'ready' && <> <button type="button" disabled={checkingCapture} onClick={() => void refreshCaptureReadiness()}>{checkingCapture ? 'Checking…' : 'Check again'}</button></>}</small>}
             </section>
             <details class="batch-limits-control"><summary>Run limits: {form.limits.maxPages} pages · {form.limits.maxScreenshots} screenshots · {form.limits.maxMinutes} minutes</summary><div class="batch-limits-fields"><label>Batch page limit<input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label><Button onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button>{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}</div><Estimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /></details>
-            <footer><Button disabled={runBusy || (form.screenshots === 'enabled' && captureReadiness?.status !== 'ready')} busy={submitting} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Start or configure the application before planning with screenshots.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
+            <footer><Button disabled={runBusy} busy={submitting || checkingCapture} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Screenshots are required for this run. Planning checks the application again when you start; start or configure it first.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
           </section>
         </Panel>
       </div>}
@@ -1083,6 +1161,7 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   const [revising, setRevising] = useState(false)
   const [approving, setApproving] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [retryingPlanning, setRetryingPlanning] = useState(false)
   const [resuming, setResuming] = useState(false)
   const [continuing, setContinuing] = useState<'resume' | 'ignore-errors'>()
   const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
@@ -1131,7 +1210,10 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   const captureReady = !captureRequired || (captureReadiness?.reachable === true && incompleteCapturePages.length === 0)
   // Name the single thing standing between the reviewer and approval, so a
   // disabled button is never a dead end.
-  const approvalBlocker = draft.questions.length > 0
+  const primaryAction = planPrimaryAction(plan)
+  const approvalBlocker = primaryAction === 'retry-planning'
+    ? 'Planning stopped before it proposed any pages. Retry planning to run it again with the same brief.'
+    : draft.questions.length > 0
     ? 'Resolve the required questions before approval.'
     : changed
       ? 'Save your direct edits, then approve the updated plan.'
@@ -1247,6 +1329,14 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
       )
     } finally { setContinuing(undefined) }
   }
+  const retryPlanning = async () => {
+    setRetryingPlanning(true)
+    try {
+      await act(() => post<UiJob>(`/api/plans/${plan.id}/retry`), 'Planning restarted')
+    } finally {
+      setRetryingPlanning(false)
+    }
+  }
   const approveAndGenerate = async () => {
     setApproving(plan.status !== 'approved')
     try {
@@ -1348,6 +1438,9 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
       </Panel>}
       <Panel title="Batch limits" description="Approval and proposal validation enforce these maxima. Mark extra pages Later to keep them out of this run."><div class="form-grid">{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 })[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }), [key]: Number(event.currentTarget.value) } } })} /></Field>)}</div></Panel>
+      {plan.existingDocumentation && plan.existingDocumentation.length > 0 && <Panel class="plan-existing-docs-panel" title="Existing documentation audit" description="What the agent found in the documentation being rewritten, and where every existing page lands in this plan.">
+        <ExistingDocumentationAudit assessments={plan.existingDocumentation} pages={draft.pages} />
+      </Panel>}
       <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
         <div class="plan-screenshot-summary">
           <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
@@ -1399,7 +1492,9 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
       </Panel>
       <footer class="plan-approval-bar">
         <span><Icon name={approvalBlocker ? 'help' : 'lock'} size={16} /><small>{approvalBlocker ?? (unresolvedCapabilities > 0 ? `${unresolvedCapabilities} coverage ${unresolvedCapabilities === 1 ? 'item needs' : 'items need'} a decision; you can save and continue if intentionally deferred.` : 'Nothing will be written until you approve this exact plan.')}</small></span>
-        <div>{approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}<Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : plan.status === 'approved' ? `Generate ${generationTarget}` : plan.status === 'failed' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button></div>
+        <div>{approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}{primaryAction === 'retry-planning'
+          ? <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
+          : <Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : primaryAction === 'generate' ? `Generate ${generationTarget}` : primaryAction === 'retry-generating' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button>}</div>
       </footer>
       {selectedPage && <div class="plan-page-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelectedPageId(undefined) }}>
         <aside class="plan-page-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-page-drawer-title">
@@ -1716,7 +1811,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const [collectionFilter, setCollectionFilter] = useState('')
   const [query, setQuery] = useState('')
   const [matches, setMatches] = useState<Array<{ path: string; line: number; section: string; excerpt: string }>>([])
-  const [focusLine, setFocusLine] = useState(Number(initial.get('line')) || (initial.get('edit') ? 1 : 0))
+  const [focusLine, setFocusLine] = useState(Number(initial.get('line')) || 0)
   useEffect(() => { let current = true; if (!query) { setMatches([]); return } api<typeof matches>(`/api/pages/search?q=${encodeURIComponent(query)}`).then((value) => { if (current) setMatches(value) }).catch((cause) => { if (current) onError(cause.message) }); return () => { current = false } }, [query, state.runs])
   const [selectedPaths, setSelectedPaths] = useState<string[]>(() => initial.get('path') ? [initial.get('path')!] : [])
   const [runId, setRunId] = useState(initial.get('run') ?? '')
@@ -1731,9 +1826,31 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const [reasoning, setReasoning] = useState(defaultAgent === 'codex' ? initialReasoning : '')
   const [effort, setEffort] = useState(defaultAgent === 'claude' ? initialReasoning : '')
   const [agentOpen, setAgentOpen] = useState(false)
+  const [agentPanelOpen, setAgentPanelOpen] = useState(Boolean(initial.get('run')))
+  const [editingContent, setEditingContent] = useState(Boolean(initial.get('edit') || initial.get('line')))
+  const [contentDirty, setContentDirty] = useState(false)
+  const [contentBusy, setContentBusy] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [pageOptionsOpen, setPageOptionsOpen] = useState(false)
+  const [pageListOpen, setPageListOpen] = useState(false)
+  const navigationOpen = true
+  const [navigationDirty, setNavigationDirty] = useState(false)
+  const [navigationBusy, setNavigationBusy] = useState(false)
+  const canLeaveNavigation = () => {
+    if (!navigationDirty && !navigationBusy) return true
+    onError('Save or discard your navigation changes before leaving the navigation editor.')
+    return false
+  }
+  const contentLocked = contentDirty || contentBusy
+  const canLeaveContent = () => {
+    if (!contentLocked) return true
+    onError('Save or discard your content edits before changing pages or starting an agent edit.')
+    return false
+  }
+
   const [submitting, setSubmitting] = useState(false)
   const [reviewView, setReviewView] = useState<'rendered' | 'source'>('rendered')
-  const [reviewLayout, setReviewLayout] = useState<'split' | 'unified'>('split')
+  const [reviewLayout, setReviewLayout] = useState<'split' | 'unified'>('unified')
   const [onlyChanges, setOnlyChanges] = useState(true)
   const [reviewChangeId, setReviewChangeId] = useState('')
   const [refining, setRefining] = useState(false)
@@ -1751,6 +1868,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const textarea = useRef<HTMLTextAreaElement>(null)
   const refineInput = useRef<HTMLTextAreaElement>(null)
   const listbox = useRef<HTMLDivElement>(null)
+  const nativePreview = useRef<HTMLIFrameElement>(null)
 
   const editRuns = validRuns(state.runs).filter((run) => run.editRequest)
   const proposal = resolveEditRun(editRuns, runId)
@@ -1780,6 +1898,14 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const instructionReady = instruction.trim().length >= MIN_EDIT_INSTRUCTION
   const composerLabel = selected.length > 1 ? `What should change on these ${selected.length} pages?` : 'What should change on this page?'
 
+  useEffect(() => { if (activeJob || reviewable || failed) setAgentPanelOpen(true) }, [activeJob?.id, reviewable, failed])
+  useEffect(() => { setContentDirty(false); setContentBusy(false); setPageOptionsOpen(false) }, [activePage?.path])
+  useEffect(() => {
+    const guard = (event: Event) => { if (contentLocked || navigationDirty || navigationBusy) { event.preventDefault(); if (!canLeaveContent()) return; canLeaveNavigation() } }
+    addEventListener('doxloop:before-navigation', guard)
+    return () => removeEventListener('doxloop:before-navigation', guard)
+  }, [contentLocked, navigationDirty, navigationBusy])
+
   const refreshPages = async () => {
     try { setPages(await api<PageSummary[]>('/api/pages')) }
     catch (cause) { onError(message(cause)) }
@@ -1789,6 +1915,11 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   useEffect(() => {
     const syncUrl = () => {
       const params = new URLSearchParams(location.search)
+      if (contentLocked || navigationDirty || navigationBusy) {
+        updateUrl(selectedPaths, runId)
+        if (canLeaveContent()) canLeaveNavigation()
+        return
+      }
       setRunId(params.get('run') ?? '')
       setViewState(pagesViewFrom(params.get('view')))
       const nextPath = params.get('path')
@@ -1796,7 +1927,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
     }
     addEventListener('popstate', syncUrl)
     return () => removeEventListener('popstate', syncUrl)
-  }, [])
+  }, [contentLocked, navigationDirty, navigationBusy, navigationOpen, view, selectedPaths, runId])
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 150)
     return () => clearTimeout(timer)
@@ -1846,6 +1977,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
     history.replaceState({}, '', `/pages${params.size ? `?${params}` : ''}`)
   }
   const setView = (next: PagesView) => {
+    if (!canLeaveContent() || !canLeaveNavigation()) return
     setViewState(next)
     updateUrl(selectedPaths, proposal && selectedPaths[0] && proposalPaths.includes(selectedPaths[0]) ? proposal.id : '', next)
   }
@@ -1855,11 +1987,30 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
     setRefinement('')
   }
   const chooseSingle = (path: string) => {
+    if (!canLeaveContent()) return
+    setFocusLine(0); setEditingContent(false)
     setSelectedPaths([path])
     setHistoryEntries(null)
     updateUrl([path], proposal && proposalPaths.includes(path) ? proposal.id : '')
   }
+  useEffect(() => {
+    const navigatePreview = (event: MessageEvent) => {
+      if (!previewUrl || event.source !== nativePreview.current?.contentWindow || event.origin !== new URL(previewUrl).origin || event.data?.type !== 'doxloop:preview-navigate' || typeof event.data.href !== 'string') return
+      try {
+        const href = new URL(event.data.href)
+        if (href.origin !== new URL(previewUrl).origin) return
+        const route = (value: string) => decodeURIComponent(value).replace(/\.(md|mdx)$/, '').replace(/\/$/, '') || '/'
+        const page = pages.find(item => route(item.route) === route(href.pathname))
+        if (page) chooseSingle(page.path)
+        else onError('This link is outside the documentation page list. Open it in the full site preview.')
+      } catch { /* Ignore malformed messages from preview content. */ }
+    }
+    addEventListener('message', navigatePreview)
+    return () => removeEventListener('message', navigatePreview)
+  }, [previewUrl, pages, contentLocked, proposal?.id])
   const togglePath = (path: string) => {
+    if (!canLeaveContent()) return
+    setFocusLine(0); setEditingContent(false)
     const next = selectedPaths.includes(path) ? selectedPaths.filter((item) => item !== path) : [path, ...selectedPaths]
     setSelectedPaths(next)
     setHistoryEntries(null)
@@ -1885,7 +2036,8 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const submit = async (override?: { instruction?: string; allowRelated?: boolean; paths?: string[] }) => {
     const request = (override?.instruction ?? instruction).trim()
     const paths = override?.paths ?? selectedPaths
-    if (request.length < MIN_EDIT_INSTRUCTION || paths.length === 0 || activeJob) return
+    if (request.length < MIN_EDIT_INSTRUCTION || paths.length === 0 || activeJob || !canLeaveContent()) return
+    setEditingContent(false); setAgentPanelOpen(true)
     setSubmitting(true)
     setToast(null)
     try {
@@ -1975,18 +2127,20 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
     }
   }
   const openRun = (run: Proposal) => {
+    if (!canLeaveContent()) return
+    setEditingContent(false); setAgentPanelOpen(true)
     const paths = run.editRequest?.paths ?? []
     setRunId(run.id)
     if (paths[0]) setSelectedPaths(paths)
     setHistoryEntries(null)
     updateUrl(paths, run.id)
   }
-  const focusComposer = () => requestAnimationFrame(() => textarea.current?.focus())
+  const focusComposer = () => { setAgentPanelOpen(true); requestAnimationFrame(() => textarea.current?.focus()) }
 
   const previewFrame = (page: PageSummary) => <div class="current-page-preview">
-    <div class="preview-chrome" aria-hidden="true"><span class="preview-dots"><i /><i /><i /></span><code>{page.route}</code></div>
+
     {previewState === 'ready' && previewUrl
-      ? <iframe key={`${page.path}:${previewNonce}`} title="Current page preview" src={`${previewUrl}${page.route}?embed=page`} />
+      ? <iframe ref={nativePreview} key={`${page.path}:${previewNonce}`} title="Current page preview" src={`${previewUrl}${page.route}?embed=page&workspace=1`} />
       : <div class="preview-placeholder">
         {previewState === 'failed'
           ? <><Icon name="alert" size={18} /><strong>The preview could not start</strong><Button size="sm" onClick={() => setPreviewState('idle')}>Try again</Button></>
@@ -1994,7 +2148,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
       </div>}
   </div>
 
-  return <div class="pages-page">
+  return <div class={`pages-page preview-first-pages ${agentPanelOpen ? 'agent-panel-open' : ''} ${pageListOpen || !activePage ? 'page-list-open' : ''} navigation-open`}>
     {rationale && <ProposalRationaleDrawer change={rationale} onClose={() => setRationale(null)} />}
     {assetPicker && <AssetPicker act={act} title="Insert an image" onClose={() => setAssetPicker(false)} onPick={(asset) => { setAssetPicker(false); insertIntent(`Insert the image ${asset.publicPath} with descriptive alt text where it best supports the text.`) }} />}
     {toast && <div class="page-updated-toast" role="status">
@@ -2003,22 +2157,26 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
       <Button size="sm" onClick={() => void undo(toast)}>Undo</Button>
       <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setToast(null)}><Icon name="close" size={14} /></button>
     </div>}
-    <PageHeader title="Pages" description={view === 'navigation' ? 'Arrange the sidebar: reorder pages, group them into sections, and rename labels.' : view === 'assets' ? 'Images and files the documentation embeds. Upload, replace, and describe them.' : 'Edit a page directly or ask the agent for a reviewed update.'} actions={<Segmented value={view} onChange={setView} items={[['pages', 'Pages'], ['navigation', 'Navigation'], ['assets', 'Images & files']] as const} />} />
+    <PageHeader title="Pages" description={view === 'assets' ? 'Images and files the documentation embeds. Upload, replace, and describe them.' : 'Edit pages and navigation, or ask the agent.'} actions={<div class="pages-view-actions"><Button size="sm" icon="settings" disabled={contentBusy} onClick={() => { if (canLeaveContent() && canLeaveNavigation()) setToolsOpen(!toolsOpen) }}>Workspace tools</Button><Segmented value={view} onChange={setView} items={[['pages', 'Pages'], ['assets', 'Images & files']] as const} /></div>} />
+    {toolsOpen && <section class="pages-workspace-tools" aria-label="Workspace tools">
     {view === 'pages' && <PageTools root={state.root ?? state.cwd} contentDir={state.project?.contentDir ?? ''} {...(activePage ? { path: activePage.path } : {})} onChanged={async (path) => { const next = await api<PageSummary[]>('/api/pages'); setPages(next); const selected = path ?? next.find((page) => page.path === activePage?.path)?.path ?? next[0]?.path; setSelectedPaths(selected ? [selected] : []); updateUrl(selected ? [selected] : []); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
     <Collections onChanged={async () => { await refreshPages(); await act(async () => true) }} onTranslate={async (paths, locale) => { await submit({ paths, instruction: `Translate these documentation pages to ${locale}. Preserve code, API names, navigation routes, source associations, and links. Re-verify factual claims. Change only the selected translation pages.`, allowRelated: false }) }} />
     <AuditTools onChanged={async () => { await refreshPages(); await act(async () => true) }} />
+    </section>}
     {view === 'pages' && selectedPaths.length > 1 && <BulkMetadata paths={selectedPaths} onChanged={async () => { await refreshPages(); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
-    {view === 'navigation' && <NavigationView act={act} onError={onError} {...(previewState === 'ready' && previewUrl ? { previewUrl } : {})} />}
     {view === 'assets' && <AssetLibrary act={act} onError={onError} onChanged={() => { setPreviewNonce((value) => value + 1); void refreshPages() }} />}
     {view === 'pages' && <div class="pages-workbench">
-      <aside class="page-list-panel">
-        {[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].length > 1 && <label>Version / locale<select aria-label="Version / locale" value={collectionFilter} onChange={(event) => setCollectionFilter(event.currentTarget.value)}><option value="">All versions and languages</option>{[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].map((label) => <option>{label}</option>)}</select></label>}
+      <aside class="page-list-panel" aria-label={navigationOpen ? 'Edit site navigation' : 'Page browser'}>
         <label class="page-search">
           <span class="sr-only">Search pages</span>
           <Icon name="search" size={16} />
           <Input type="search" value={search} placeholder="Search titles, paths, or page text" onInput={(event) => setSearch(event.currentTarget.value)} />
         </label>
-        {matches.length > 0 && <details open><summary>{matches.length} text matches{matches.length === 200 ? ' (first 200)' : ''}</summary><ul class="page-text-matches">{matches.map((match) => <li><button onClick={() => { chooseSingle(match.path); setFocusLine(match.line); }}><strong>{match.section} · line {match.line}</strong><small>{match.excerpt}</small></button></li>)}</ul></details>}
+        <div hidden={Boolean(search.trim() || collectionFilter)}><NavigationView act={act} onError={onError} embedded pages={pages} refreshToken={previewNonce} selectedPaths={selectedPaths} onTogglePage={togglePath} onStatus={(dirty, saving) => { setNavigationDirty(dirty); setNavigationBusy(saving) }} onSaved={async () => { await refreshPages(); if (!contentLocked) setPreviewNonce(value => value + 1) }} onSelectPage={chooseSingle} {...(activePage ? { activePath: activePage.path } : {})} /></div>
+        {[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].length > 1 && <label>Version / locale<select aria-label="Version / locale" value={collectionFilter} onChange={(event) => setCollectionFilter(event.currentTarget.value)}><option value="">All versions and languages</option>{[...new Set(pages.map((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}`))].map((label) => <option>{label}</option>)}</select></label>}
+
+        {matches.length > 0 && <details open><summary>{matches.length} text matches{matches.length === 200 ? ' (first 200)' : ''}</summary><ul class="page-text-matches">{matches.map((match) => <li><button onClick={() => { if (!canLeaveContent()) return; chooseSingle(match.path); setFocusLine(match.line); setEditingContent(true) }}><strong>{match.section} · line {match.line}</strong><small>{match.excerpt}</small></button></li>)}</ul></details>}
+        {Boolean(search.trim() || collectionFilter) && <>
         <div class="page-list-summary">
           <span>{query ? `${filteredPages.length} of ${pages.length}` : pages.length} page{pages.length === 1 ? '' : 's'}</span>
           {selectedPaths.length > 1
@@ -2042,6 +2200,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                     return <div
                       key={page.path}
                       role="option"
+                      aria-disabled={contentBusy}
                       aria-selected={checked}
                       aria-current={active ? 'page' : undefined}
                       tabIndex={active || (globalIndex === 0 && !selectedPaths.some((path) => filteredPages.some((candidate) => candidate.path === path))) ? 0 : -1}
@@ -2056,7 +2215,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                       }}
                     >
                       <span class="page-list-check" onClick={(event) => event.stopPropagation()}>
-                        <input type="checkbox" aria-label={`Select ${page.title}`} checked={checked} onChange={() => togglePath(page.path)} />
+                        <input type="checkbox" aria-label={`Select ${page.title}`} disabled={contentBusy} checked={checked} onChange={() => togglePath(page.path)} />
                       </span>
                       <span class="page-list-copy">
                         <strong>{page.title}</strong>
@@ -2067,34 +2226,28 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                   })}
                 </section>)}
         </div>
+        </>}
       </aside>
 
       <section class="page-detail-pane">
-        {!activePage ? <div class="page-detail-empty"><Empty icon="file" title="Choose a page" detail="Select a page on the left to preview it and ask the agent for a scoped edit." /></div> : <>
+        {!activePage ? <div class="page-detail-empty"><Empty icon="file" title="Choose a page" detail="Select a page to preview it, edit its content, or ask the agent." /></div> : <>
           <header class="page-detail-header">
-            <div class="page-detail-copy">
-              <small>{activePage.section ?? 'Not in navigation'}</small>
-              <h2>{activePage.title}</h2>
-              <span class="page-detail-meta">
-                <code>{activePage.path}</code>
-                <Badge tone={PAGE_EVIDENCE[activePage.evidence][1]}>{PAGE_EVIDENCE[activePage.evidence][0]}</Badge>
-                <small>{activePage.wordCount.toLocaleString()} words{activePage.updatedAt ? ` · Updated ${timeText(activePage.updatedAt)}` : ''}</small>
-              </span>
-            </div>
+            <div class="page-detail-copy"><Button size="sm" icon="menu" class="page-outline-toggle" onClick={() => setPageListOpen(!pageListOpen)}>Pages</Button><Icon name="file" size={17} /><h2>{activePage.title}</h2></div>
             <div class="page-detail-actions">
-              <Button icon="clock" class={historyEntries ? 'active-filter' : ''} onClick={() => void openHistory()}>Page history</Button>
-              <Button icon="external" onClick={() => void openInPreview(activePage.route)}>Open in preview</Button>
+              <button type="button" class={`page-content-toggle ${editingContent ? 'active' : ''}`} aria-pressed={editingContent} disabled={Boolean(contentBusy || activeJob || (reviewable && viewingProposalPage))} onClick={() => { if (canLeaveContent()) setEditingContent(!editingContent) }}><Icon name="update" size={15} />Edit content<span class="page-mode-switch" aria-hidden="true" /></button>
+              <button type="button" class={`page-agent-toggle ${agentPanelOpen ? 'active' : ''}`} aria-label="Instruct agent" title="Instruct agent" aria-expanded={agentPanelOpen} onClick={() => setAgentPanelOpen(!agentPanelOpen)}><Icon name="bot" size={19} />{(activeJob || reviewable) && <i />}</button>
+              <button type="button" class="page-options-toggle" disabled={contentBusy} aria-label="Page options" title="Page options" aria-expanded={pageOptionsOpen} onClick={() => { if (canLeaveContent()) setPageOptionsOpen(!pageOptionsOpen) }}><Icon name="settings" size={17} /></button>
             </div>
           </header>
-
-          <Comments key={`comments:${activePage.path}`} path={activePage.path} onRequest={async (text) => { await submit({ paths: [activePage.path], instruction: `Address this reviewer comment on ${activePage.path}: ${text}` }) }} />
-          {!undoingPage && !activeJob && !(reviewable && viewingProposalPage) && <TextEditor key={activePage.path} focusLine={focusLine} refreshToken={previewNonce} root={state.root ?? state.cwd} path={activePage.path} onChanged={async () => { await refreshPages(); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
-          {!activeJob && !(reviewable && viewingProposalPage) && <PageMetadataForm path={activePage.path} act={act} onError={onError} onSaved={() => { setPreviewNonce((value) => value + 1); void refreshPages() }} />}
-
+          {pageOptionsOpen && <section class="page-options-panel" aria-label="Page options">
+            <div class="page-options-actions"><code>{activePage.path}</code><Badge tone={PAGE_EVIDENCE[activePage.evidence][1]}>{PAGE_EVIDENCE[activePage.evidence][0]}</Badge><Button size="sm" icon="clock" onClick={() => void openHistory()}>Page history</Button><Button size="sm" icon="external" onClick={() => void openInPreview(activePage.route)}>Open in preview</Button></div>
+            <Comments key={`comments:${activePage.path}`} path={activePage.path} onRequest={async text => { await submit({ paths: [activePage.path], instruction: `Address this reviewer comment on ${activePage.path}: ${text}` }) }} />
+            {!activeJob && !(reviewable && viewingProposalPage) && <PageMetadataForm path={activePage.path} act={act} onError={onError} onSaved={() => { setPreviewNonce(value => value + 1); void refreshPages() }} />}
+          </section>}
           {selected.length > 1 && <div class="selected-pages-strip" aria-label="Pages selected for this update">
             <strong><Icon name="list" size={14} />{selected.length} pages in this edit</strong>
             {selected.map((page) => <span key={page.path} class={`selected-page-chip ${page.path === activePage.path ? 'active' : ''}`}>
-              <button type="button" onClick={() => { const next = [page.path, ...selectedPaths.filter((item) => item !== page.path)]; setSelectedPaths(next); updateUrl(next, proposal && proposalPaths.includes(page.path) ? proposal.id : '') }}>{page.title}</button>
+              <button type="button" onClick={() => { if (!canLeaveContent()) return; const next = [page.path, ...selectedPaths.filter((item) => item !== page.path)]; setSelectedPaths(next); updateUrl(next, proposal && proposalPaths.includes(page.path) ? proposal.id : '') }}>{page.title}</button>
               <button type="button" aria-label={`Remove ${page.title}`} onClick={() => togglePath(page.path)}><Icon name="close" size={12} /></button>
             </span>)}
           </div>}
@@ -2112,43 +2265,12 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
               : <p class="page-history-empty">No recorded changes for this page yet.</p>}
           </section>}
 
-          {activeJob && otherPageWhileRunning && <>
-            {previewFrame(activePage)}
-            <div class="page-inline-notice">
-              <span class="notice-icon running"><i /></span>
-              <span><strong>An edit is in progress.</strong> Finish or stop it before starting another.</span>
-              {activePaths[0] && <Button size="sm" onClick={() => { const next = [...activePaths]; setSelectedPaths(next); updateUrl(next, activeRun?.id ?? runId) }}>Show the edit</Button>}
-            </div>
-          </>}
 
-          {activeJob && !otherPageWhileRunning && <>
-            {previewFrame(activePage)}
-            <section class="page-edit-running">
-              <header>
-                <span class="running-pulse" aria-hidden="true"><i /></span>
-                <div>
-                  <h2>Editing {activePaths.length === 1 ? titleFor(activePaths[0]!) : `${activePaths.length} pages`}</h2>
-                  <blockquote>{activeRun?.editRequest?.followUps.at(-1)?.instruction ?? activeRun?.editRequest?.instruction ?? instruction}</blockquote>
-                </div>
-                <Badge tone={streamConnected ? 'good' : 'warn'}>{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
-              </header>
-              <AuthoringLiveLog job={activeJob} act={act} stopLabel="Stop" />
-            </section>
-          </>}
-
-          {!activeJob && reviewable && proposal && viewingProposalPage && <section class="page-edit-review">
-            <header class="page-review-head">
-              <div>
-                <small>Agent proposal</small>
-                <h2>Review this edit</h2>
-                <p>{proposal.summary}</p>
-              </div>
-              <Badge tone={statusTone(proposal.status)}>{statusLabel(proposal.status)}</Badge>
-            </header>
-            <blockquote class="page-review-instruction"><Icon name="chat" size={14} /><span>{latestPageEditInstruction(proposal)}</span></blockquote>
-            {reviewChange && proposal.status === 'awaiting-review' && reviewChange.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${proposal.id}:${reviewChange.id}`} root={state.root ?? state.cwd} path={reviewChange.path} proposal={{ id: proposal.id, changeId: reviewChange.id }} onChanged={async () => { await act(async () => true) }} />}
-            {proposal.status === 'conflicted' && <Note tone="bad"><span class="note-body">{proposal.error}<span class="note-actions"><Button size="sm" onClick={() => { leaveProposal(); updateUrl(selectedPaths); setPreviewNonce((value) => value + 1); void refreshPages() }}>Reload and compare</Button><Button size="sm" tone="danger" onClick={() => void reject()}>Reject</Button></span></span></Note>}
-            {validationErrors > 0 && <Note tone="bad"><span class="note-body">The proposed edit has {validationErrors} validation error{validationErrors === 1 ? '' : 's'}. Fix the validation errors by refining the instruction, or reject this edit.<ul class="note-issues">{proposal.validation?.issues?.filter((issue) => issue.severity === 'error').map((issue) => <li key={`${issue.code}:${issue.file ?? ''}:${issue.message}`}>{issue.file ? <code>{issue.file}</code> : null}{issue.message}</li>)}</ul></span></Note>}
+          <div class="page-editor-layout">
+            <section class="page-editor-canvas" aria-label="Page content">
+              {!activeJob && !(reviewable && viewingProposalPage) && <PageContentEditor key={`${state.root ?? state.cwd}:${activePage.path}`} root={state.root ?? state.cwd} path={activePage.path} native={state.project?.generator === 'doxbrix'} base={previewUrl ? `${previewUrl}${activePage.route}` : ''} focusLine={focusLine} refreshToken={previewNonce} editing={editingContent} onEditingChange={setEditingContent} onStatus={(dirty, busy) => { setContentDirty(dirty); setContentBusy(busy) }} onChanged={async () => { await refreshPages(); setFocusLine(0); setPreviewNonce(value => value + 1); await act(async () => true) }}>{previewFrame(activePage)}</PageContentEditor>}
+              {activeJob && previewFrame(activePage)}
+              {!activeJob && reviewable && proposal && viewingProposalPage && <section class="page-edit-review" aria-label="Proposed changes">
             {reviewChange ? <>
               <div class="page-review-toolbar">
                 {pageChanges.length > 1
@@ -2170,6 +2292,39 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                   : <ProposalRenderedDiff runId={proposal.id} change={reviewChange} layout={reviewLayout} onlyChanges={onlyChanges} />}
               </div>
             </> : <Empty title="The agent did not change the page" detail="Refine the instruction or reject this edit." />}
+            {reviewChange && proposal.status === 'awaiting-review' && reviewChange.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${proposal.id}:${reviewChange.id}`} root={state.root ?? state.cwd} path={reviewChange.path} proposal={{ id: proposal.id, changeId: reviewChange.id }} onChanged={async () => { await act(async () => true) }} />}
+
+              </section>}
+            </section>
+            {agentPanelOpen && <aside class="page-agent-panel" aria-label="Agent instructions" onKeyDown={event => { if (event.key === 'Escape') { setAgentPanelOpen(false); document.querySelector<HTMLButtonElement>('.page-agent-toggle')?.focus() } }}>
+              <header class="page-agent-panel-header"><Icon name="bot" size={18} /><h2>Instruct agent</h2><button type="button" aria-label="Close agent panel" onClick={() => { setAgentPanelOpen(false); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.page-agent-toggle')?.focus()) }}><Icon name="close" size={16} /></button></header>
+              <div class="page-agent-scope"><Icon name="file" size={15} /><span>{selected.length > 1 ? `${selected.length} pages selected` : activePage.title}</span></div>
+              {activeJob && !otherPageWhileRunning && <>
+            <section class="page-edit-running">
+              <header>
+                <span class="running-pulse" aria-hidden="true"><i /></span>
+                <div>
+                  <h2>Editing {activePaths.length === 1 ? titleFor(activePaths[0]!) : `${activePaths.length} pages`}</h2>
+                  <blockquote>{activeRun?.editRequest?.followUps.at(-1)?.instruction ?? activeRun?.editRequest?.instruction ?? instruction}</blockquote>
+                </div>
+                <Badge tone={streamConnected ? 'good' : 'warn'}>{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
+              </header>
+              <AuthoringLiveLog job={activeJob} act={act} stopLabel="Stop" />
+            </section>
+              </>}
+              {activeJob && otherPageWhileRunning && <div class="page-agent-other-run"><p>An edit is running on another page.</p><Button onClick={() => { setSelectedPaths([...activePaths]); updateUrl(activePaths, activeRun?.id ?? runId) }}>Show the edit</Button></div>}
+              {!activeJob && reviewable && proposal && viewingProposalPage && <div class="page-agent-review">
+            <header class="page-review-head">
+              <div>
+                <small>Agent proposal</small>
+                <h2>Review this edit</h2>
+                <p>{proposal.summary}</p>
+              </div>
+              <Badge tone={statusTone(proposal.status)}>{statusLabel(proposal.status)}</Badge>
+            </header>
+            <blockquote class="page-review-instruction"><Icon name="chat" size={14} /><span>{latestPageEditInstruction(proposal)}</span></blockquote>
+            {proposal.status === 'conflicted' && <Note tone="bad"><span class="note-body">{proposal.error}<span class="note-actions"><Button size="sm" onClick={() => { leaveProposal(); updateUrl(selectedPaths); setPreviewNonce((value) => value + 1); void refreshPages() }}>Reload and compare</Button><Button size="sm" tone="danger" onClick={() => void reject()}>Reject</Button></span></span></Note>}
+            {validationErrors > 0 && <Note tone="bad"><span class="note-body">The proposed edit has {validationErrors} validation error{validationErrors === 1 ? '' : 's'}. Fix the validation errors by refining the instruction, or reject this edit.<ul class="note-issues">{proposal.validation?.issues?.filter((issue) => issue.severity === 'error').map((issue) => <li key={`${issue.code}:${issue.file ?? ''}:${issue.message}`}>{issue.file ? <code>{issue.file}</code> : null}{issue.message}</li>)}</ul></span></Note>}
             {relatedChanges.length > 0 && <details class="page-related-changes">
               <summary>Also changed <span>{relatedChanges.length}</span></summary>
               {relatedChanges.map((change) => <div key={change.id}><Icon name="file" size={14} /><span><strong>{change.title}</strong><code>{change.path}</code></span><Badge tone="neutral">{change.category}</Badge></div>)}
@@ -2184,22 +2339,16 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
               <Button icon="chat" class={refining ? 'active-filter' : ''} onClick={() => { setRefining(!refining); if (!refining) requestAnimationFrame(() => refineInput.current?.focus()) }}>Refine</Button>
               <small>Accepting writes the page to the project. You can undo it afterwards.</small>
             </footer>
-          </section>}
 
-          {!activeJob && !(reviewable && viewingProposalPage) && <>
-            {previewFrame(activePage)}
-            {reviewable && proposal && !viewingProposalPage && <div class="page-inline-notice">
-              <Icon name="info" size={15} />
-              <span>An edit of <strong>{proposalPaths.map(titleFor).join(', ')}</strong> is waiting for your review.</span>
-              <Button size="sm" onClick={() => openRun(proposal)}>Open review</Button>
-            </div>}
-            {failed && proposal && viewingProposalPage && <PageEditFailure proposal={proposal} onRetry={(related) => void submit({ instruction: latestPageEditInstruction(proposal), allowRelated: related, paths: proposalPaths })} onRefine={() => { setInstruction(latestPageEditInstruction(proposal)); leaveProposal(); updateUrl(proposalPaths); focusComposer() }} />}
+              </div>}
+              {!activeJob && !(reviewable && viewingProposalPage) && <>
+                {failed && proposal && viewingProposalPage && <PageEditFailure proposal={proposal} onRetry={related => void submit({ instruction: latestPageEditInstruction(proposal), allowRelated: related, paths: proposalPaths })} onRefine={() => { setInstruction(latestPageEditInstruction(proposal)); leaveProposal(); updateUrl(proposalPaths); focusComposer() }} />}
             <section class="page-edit-composer">
               <header class="composer-head">
                 <span class="composer-icon"><Icon name="sparkles" size={18} /></span>
                 <div>
-                  <h2>Edit with the agent</h2>
-                  <p>Describe the change in plain language. The agent works in an isolated copy and you review the result before anything is written.</p>
+                  <h2>Describe the change</h2>
+                  <p>The agent proposes an update for your review.</p>
                 </div>
               </header>
               <div class="composer-body">
@@ -2215,6 +2364,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                   {PAGE_EDIT_INTENTS.map(([label, value]) => <button key={label} type="button" aria-pressed="false" disabled={submitting} onClick={() => insertIntent(value)}>{label}</button>)}
                   <button type="button" aria-pressed="false" disabled={submitting} onClick={() => setAssetPicker(true)}><Icon name="plus" size={12} /> Insert an image…</button>
                 </div>
+                <details class="page-agent-advanced"><summary>Options &amp; agent settings</summary>
                 <div class="page-edit-options">
                   <div class={`page-option-card ${allowRelated ? 'on' : ''}`}>
                     <Toggle checked={allowRelated} disabled={submitting} onChange={setAllowRelated} label="Also allow related changes" />
@@ -2231,23 +2381,27 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                   <Field label="Model"><Combo value={model} options={agentModels(agent).map((entry) => [entry.id, entry.label] as const)} disabled={!agent} onValueChange={setModel} /></Field>
                   {(agent === 'codex' || agent === 'claude') && <Field label={agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={agent === 'claude' ? effort : reasoning} options={modelReasoningLevels(agent, model).map((value) => [value, value] as const)} onValueChange={agent === 'claude' ? setEffort : setReasoning} /></Field>}
                 </div>}
+                </details>
               </div>
               <footer class="composer-foot">
-                <Button tone="primary" icon="sparkles" busy={submitting} disabled={!instructionReady || selectedPaths.length === 0} onClick={() => void submit()}>Ask the agent to edit</Button>
-                <small>The page stays unchanged until you accept the result.</small>
+                <Button tone="primary" icon="sparkles" busy={submitting} disabled={!instructionReady || selectedPaths.length === 0 || contentLocked} onClick={() => void submit()}>Generate proposal</Button>
+                <small>{contentLocked ? 'Save or discard your content edits before generating a proposal.' : 'The page stays unchanged until you accept the result.'}</small>
               </footer>
             </section>
-          </>}
+              </>}
+            </aside>}
+          </div>
+          <footer class="page-canvas-status"><Icon name="preview" size={14} /><span>{reviewable && viewingProposalPage ? 'Proposed changes · Not applied' : contentDirty ? 'Unsaved draft' : 'Local preview'}</span><code>{activePage.path}</code></footer>
         </>}
       </section>
     </div>}
   </div>
 }
 
-type PagesView = 'pages' | 'navigation' | 'assets'
+type PagesView = 'pages' | 'assets'
 
 function pagesViewFrom(value: string | null): PagesView {
-  return value === 'navigation' || value === 'assets' ? value : 'pages'
+  return value === 'assets' ? value : 'pages'
 }
 
 function groupPageSummaries(pages: PageSummary[]): Array<[string, PageSummary[]]> {
@@ -3725,6 +3879,7 @@ function agentSignInLabel(status: string): string {
 }
 
 function documentationExists(state: UiState): boolean {
+  if ((state.mintlifyImport?.pageCount ?? 0) > 0) return true
   if (state.receipt?.completedAt) return true
   return validRuns(state.runs).some((run) => run.status === 'applied' || run.status === 'partially-applied')
 }

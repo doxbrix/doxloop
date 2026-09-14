@@ -106,3 +106,55 @@ describe('public-surface noise filtering', () => {
     expect(suggestedPageCounts(1, 0)).toEqual({ starter: 3, standard: 7, comprehensive: 12 })
   })
 })
+
+describe('product code is inventoried before supporting files', () => {
+  test('reads src routes even when an asset folder alone would exhaust an alphabetical cap, and records UI label catalogs', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-discovery-order-'))
+    roots.push(parent)
+    const source = join(parent, 'product')
+    await mkdir(join(source, 'public', 'intl', 'messages'), { recursive: true })
+    await mkdir(join(source, 'src', 'app', 'api', 'websites', '[websiteId]'), { recursive: true })
+    await mkdir(join(source, 'src', 'app', '(main)', 'dashboard'), { recursive: true })
+    await mkdir(join(source, 'db', 'migrations'), { recursive: true })
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'ordered-app', scripts: { start: 'next start', build: 'next build', 'test-e2e': 'playwright', lint: 'eslint', 'build-docker-nightly': 'docker' } }))
+    for (let index = 0; index < 60; index += 1) await writeFile(join(source, 'public', `icon-${String(index).padStart(3, '0')}.json`), '{"icon": true}')
+    await writeFile(join(source, 'public', 'intl', 'messages', 'en-US.json'), JSON.stringify({ label: { 'two-factor-enable': 'Enable 2FA' } }))
+    await writeFile(join(source, 'src', 'app', 'api', 'websites', '[websiteId]', 'route.ts'), 'export async function GET() {}\nexport async function POST() {}\nconst secret = process.env.APP_SECRET\n')
+    await writeFile(join(source, 'src', 'app', '(main)', 'dashboard', 'page.tsx'), 'export default function Page() { return null }\n')
+    await writeFile(join(source, 'db', 'migrations', '001-api-keys.js'), 'exports.up = (knex) => knex.raw("CREATE TABLE api_key (login TEXT)")\nprocess.exit(1)\nconst url = process.env.DATABASE_URL\n')
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [{ name: 'product', path: '../product' }] })
+
+    const { inventory } = await discoverDocumentationSources(root)
+    const result = inventory.sources[0]!
+    expect(result.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'route', label: 'GET /api/websites/:websiteId', path: 'src/app/api/websites/[websiteId]/route.ts' }),
+      expect.objectContaining({ kind: 'route', label: 'POST /api/websites/:websiteId' }),
+      expect.objectContaining({ kind: 'configuration', label: 'APP_SECRET' }),
+      expect.objectContaining({ kind: 'configuration', label: 'DATABASE_URL', path: 'db/migrations/001-api-keys.js' }),
+      expect.objectContaining({ kind: 'command', label: 'npm run start' }),
+    ]))
+    expect(result.evidence.some((item) => item.label.startsWith('exit '))).toBe(false)
+    expect(result.evidence.some((item) => item.kind === 'authentication' && item.path.startsWith('db/'))).toBe(false)
+    expect(result.evidence.some((item) => item.kind === 'command' && /test-e2e|lint|docker/.test(item.label))).toBe(false)
+    expect(result.evidence.some((item) => item.kind === 'asset')).toBe(false)
+    expect(result.uiLabelCatalogs).toEqual(['public/intl/messages/en-US.json'])
+  })
+
+  test('ignores translated template strings and comments when counting keyword surfaces', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-discovery-template-'))
+    roots.push(parent)
+    const source = join(parent, 'product')
+    await mkdir(join(source, 'src', 'components'), { recursive: true })
+    await mkdir(join(source, 'src', 'lang'), { recursive: true })
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'vue-app' }))
+    await writeFile(join(source, 'src', 'lang', 'en.json'), JSON.stringify({ 'Setup Notification': 'Set Up Notification' }))
+    await writeFile(join(source, 'src', 'components', 'ApiKeyDialog.vue'), '<template>\n  <h2>{{ $t("Add API Key") }}</h2>\n  <label>{{ $t("login") }}</label>\n</template>\n<script>\n// login handled by the server\nexport default { methods: { save() { this.$root.getSocket().emit("addAPIKey", this.key) } } }\n</script>\n')
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [{ name: 'product', path: '../product' }] })
+
+    const { inventory } = await discoverDocumentationSources(root)
+    const result = inventory.sources[0]!
+    expect(result.evidence.filter((item) => item.kind === 'authentication')).toEqual([])
+    expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'event', label: 'addAPIKey' })]))
+    expect(result.uiLabelCatalogs).toEqual(['src/lang/en.json'])
+  })
+})

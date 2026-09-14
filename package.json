@@ -29,7 +29,11 @@
     "LICENSE",
     "!dist/**/*.map",
     "!assets/marketing/**",
-    "!assets/social/**"
+    "!assets/social/**",
+    "vendor/doxbrix-import/dist",
+    "vendor/doxbrix-import/LICENSE",
+    "vendor/doxbrix-import/UPSTREAM.json",
+    "vendor/doxbrix-import/README.md"
   ],
   "exports": {
     "./generator-api": {
@@ -47,11 +51,11 @@
   },
   "scripts": {
     "build": "pnpm run build:core && pnpm run build:generators",
-    "build:core": "rm -rf dist && tsc -p tsconfig.json && vite build --config vite.ui.config.ts && node scripts/prepare-dist.mjs",
+    "build:core": "rm -rf dist && pnpm run build:importer && tsc -p tsconfig.json && vite build --config vite.ui.config.ts && node scripts/prepare-dist.mjs",
     "build:generators": "pnpm --filter './packages/*' run build",
-    "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.ui.json && pnpm --filter './packages/*' run typecheck",
-    "build:test": "tsc -p tsconfig.json && pnpm run build:generators",
+    "dev": "pnpm run build:importer && tsx src/cli.ts",
+    "typecheck": "pnpm run build:importer && tsc --noEmit && tsc --noEmit -p tsconfig.ui.json && pnpm --filter './packages/*' run typecheck",
+    "build:test": "pnpm run build:importer && tsc -p tsconfig.json && pnpm run build:generators",
     "pretest": "pnpm run build:test",
     "test": "vitest run",
     "test:generator": "node scripts/ci-generator-smoke.mjs",
@@ -64,7 +68,8 @@
     "check:boundary": "node scripts/check-boundary.mjs",
     "prepack": "pnpm run check && pnpm run build && pnpm run check:boundary",
     "test:existing-sites": "node scripts/ci-existing-sites.mjs",
-    "test:python-boundary": "node scripts/ci-python-sandbox.mjs"
+    "test:python-boundary": "node scripts/ci-python-sandbox.mjs",
+    "build:importer": "tsc -p vendor/doxbrix-import/tsconfig.json"
   },
   "dependencies": {
     "@playwright/mcp": "0.0.79",

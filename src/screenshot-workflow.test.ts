@@ -533,6 +533,19 @@ describe('screenshot workflow', () => {
     await expect(validateScreenshotManifest(root, screenshotPlan(), 'enabled')).resolves.toMatchObject({
       summary: { status: 'verified', captured: 2 },
     })
+
+    // The plan approved one state; the writer captured a second, distinct one
+    // after it. Extra verified evidence is kept, not a reason to fail the run.
+    const plan = screenshotPlan()
+    plan.pages[0]!.visuals!.captureSequence = ['Open the invitation form — the member form is visible — orient readers to the workflow.']
+    plan.pages[0]!.visuals!.estimatedCaptures = 1
+    await write(steps.map((step, index) => ({ ...step, sequenceItem: index + 1 })))
+    await expect(validateScreenshotManifest(root, plan, 'enabled')).resolves.toMatchObject({
+      summary: { status: 'verified', captured: 2 },
+    })
+    // A repeated item still means the approved story was not followed.
+    await write(steps.map((step) => ({ ...step, sequenceItem: 1 })))
+    await expect(validateScreenshotManifest(root, plan, 'enabled')).rejects.toThrow(/one unique approved capture-sequence item/)
   })
 
   test('creates the guide asset directories the capture tool cannot create itself', async () => {

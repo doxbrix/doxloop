@@ -2,10 +2,38 @@ import { DoxloopError } from './errors.js'
 import type { DocumentationPlan } from './types.js'
 
 export interface BatchLimits { maxPages: number; maxScreenshots: number; maxMinutes: number }
+export type BatchScope = 'starter' | 'standard' | 'comprehensive' | 'custom'
+/**
+ * Screenshots a batch allows per page it may write. The planner is asked for
+ * a capture of every screen-changing step — four to seven per UI guide — and
+ * a comprehensive plan is mostly UI guides, so a cap of one image per page
+ * left every real plan over its limit at approval.
+ */
+export const SCREENSHOTS_PER_PAGE = 3
+export const MAX_BATCH_SCREENSHOTS = 300
+/**
+ * The batch a new plan gets when the reviewer has not set limits by hand.
+ * The depth chosen in the wizard or on the Update page has to mean what it
+ * says: a comprehensive plan is not a five-page batch, and a large batch needs
+ * the planning and authoring time to match. `maxMinutes` bounds one attempt.
+ */
+export function defaultBatchLimits(scope: BatchScope, screenshots: boolean, targetPages = 0): BatchLimits {
+  const base = scope === 'starter'
+    ? { maxPages: 5, maxMinutes: 15 }
+    : scope === 'comprehensive'
+      ? { maxPages: 40, maxMinutes: 120 }
+      : { maxPages: 12, maxMinutes: 45 }
+  const maxPages = Math.min(500, Math.max(base.maxPages, targetPages))
+  return {
+    maxPages,
+    maxScreenshots: screenshots ? Math.min(MAX_BATCH_SCREENSHOTS, maxPages * SCREENSHOTS_PER_PAGE) : 0,
+    maxMinutes: base.maxMinutes,
+  }
+}
 export function batchLimits(value: unknown, defaults: BatchLimits = { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }): BatchLimits {
   const input = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const result = { ...defaults }
-  for (const [key, min, max] of [['maxPages', 1, 500], ['maxScreenshots', 0, 100], ['maxMinutes', 1, 120]] as const) {
+  for (const [key, min, max] of [['maxPages', 1, 500], ['maxScreenshots', 0, MAX_BATCH_SCREENSHOTS], ['maxMinutes', 1, 120]] as const) {
     if (input[key] === undefined) continue
     if (typeof input[key] !== 'number' || !Number.isInteger(input[key]) || input[key] < min || input[key] > max) throw new DoxloopError(`${key} must be a whole number between ${min} and ${max}.`)
     result[key] = input[key]

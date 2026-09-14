@@ -249,3 +249,20 @@ describe('change summary formatting', () => {
     expect(formatSourceChanges([])).toBe('')
   })
 })
+
+test('a materialized remote snapshot pinned at the recorded commit is current, not baseline-free', async () => {
+  const root = await makeRoot()
+  const commit = 'e4821321e559c887b14e37d9979e604b221a8945'
+  const snapshot = join(root, '.doxloop-sources', 'kuma', commit)
+  await mkdir(snapshot, { recursive: true })
+  await writeFile(join(snapshot, 'readme.md'), 'pinned\n', 'utf8')
+  await writeFile(join(root, SYNC_STATE_FILE), JSON.stringify({ schemaVersion: 1, sources: { kuma: { commit, recordedAt: new Date().toISOString() } } }), 'utf8')
+  const remote = { provider: 'git' as const, repository: 'https://github.com/louislam/uptime-kuma', branch: 'master' }
+
+  const [pinned, unpinned] = await collectSourceChanges(root, [
+    { name: 'kuma', path: snapshot, remote },
+    { name: 'kuma-other', path: snapshot, remote },
+  ])
+  expect(pinned).toMatchObject({ kind: 'unchanged', baseline: commit, head: commit, changedFiles: [] })
+  expect(unpinned?.kind).toBe('no-baseline')
+})

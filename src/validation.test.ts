@@ -19,6 +19,18 @@ async function fixture(): Promise<string> {
 }
 
 describe('validateProject', () => {
+  test('allows shared pages across versions while rejecting repeats within a version', async () => {
+    const root = await fixture()
+    const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+    const space = config.spaces[0]
+    config.spaces = [{ ...space, version: 'v2' }, { ...space, version: 'v1' }]
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+    expect((await validateProject(root)).issues.filter((issue) => issue.code === 'duplicate-navigation')).toEqual([])
+    config.spaces.push({ ...space, version: 'v1' })
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+    expect((await validateProject(root)).issues.some((issue) => issue.code === 'duplicate-navigation')).toBe(true)
+  })
+
   test('blocks the generated starter project from release', async () => {
     const root = await fixture()
     const result = await validateProject(root)
@@ -330,6 +342,26 @@ description: List accessible projects.
     )
   })
 
+  test('reads a gRPC-gateway path template as its variable name', async () => {
+    const root = await fixture()
+    await writeFile(
+      join(root, 'index.mdx'),
+      `---
+title: Get memo
+---
+<ApiEndpoint method="GET" path="/api/v1/{name=memos/*}" baseUrl="https://memos.example.com" summary="Get memo" description="Returns one memo by resource name.">
+<Param name="name" in="path" type="string" required example="memos/abc123">The memo's resource name.</Param>
+<Response status={200} contentType="application/json" description="Memo found">
+{ "name": "memos/abc123" }
+</Response>
+</ApiEndpoint>
+`,
+      'utf8',
+    )
+    const result = await validateProject(root)
+    expect(result.issues.filter((issue) => issue.code === 'api-endpoint-path-param')).toEqual([])
+  })
+
   test('accepts a complete native Doxbrix ApiEndpoint block', async () => {
     const root = await fixture()
     await writeFile(
@@ -600,7 +632,7 @@ description: Schedule drift checks for a remote source.
 
 # Configure monitoring
 
-${'This guide walks an administrator through configuring a monitoring schedule for a remote read-only source, choosing budgets, and verifying the first run. '.repeat(12)}
+${'This guide walks an administrator through configuring a monitoring schedule for a remote read-only source, choosing budgets, and verifying the first run. '.repeat(16)}
 
 <Steps>
 <Step title="Open Sources">
@@ -624,5 +656,46 @@ Next, [review the first proposal](/guides/review).
     expect(deploy.filter((issue) => issue.code.startsWith('thin-')).every((issue) => issue.severity === 'warning')).toBe(true)
     const complete = result.issues.filter((issue) => issue.file === 'guides/complete.mdx' && issue.code.startsWith('thin-'))
     expect(complete).toEqual([])
+  })
+})
+
+describe('navigation shape gate', () => {
+  test('warns about generic thin spaces and single-page groups, never errors', async () => {
+    const root = await fixture()
+    await mkdir(join(root, 'reference'), { recursive: true })
+    await writeFile(join(root, 'reference', 'api.mdx'), '---\ntitle: API\n---\n\n# API\n\nEndpoints.\n')
+    await writeFile(join(root, 'reference', 'env.mdx'), '---\ntitle: Environment\n---\n\n# Environment\n\nVariables.\n')
+    const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+    config.spaces = [
+      { name: 'Documentation', slug: 'docs', nav: [
+        { type: 'group', label: 'Get started', items: [{ type: 'page', file: 'index' }, { type: 'page', file: 'quickstart' }] },
+        { type: 'group', label: 'Tracking tools', items: [{ type: 'page', file: 'reference/env' }] },
+      ] },
+      { name: 'Reference', slug: 'reference', nav: [{ type: 'group', label: 'API', items: [{ type: 'page', file: 'reference/api' }] }] },
+    ]
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+
+    const result = await validateProject(root)
+    const codes = result.issues.filter((issue) => ['thin-space', 'single-page-group', 'generic-space-name'].includes(issue.code))
+    expect(codes.every((issue) => issue.severity === 'warning')).toBe(true)
+    expect(codes.map((issue) => issue.code).sort()).toEqual(['generic-space-name', 'generic-space-name', 'single-page-group', 'thin-space', 'thin-space'])
+    expect(codes.find((issue) => issue.code === 'single-page-group')?.message).toContain('Tracking tools')
+  })
+})
+
+describe('API endpoint response bodies', () => {
+  test('accepts a fenced example body and still rejects an empty one', async () => {
+    const root = await fixture()
+    await mkdir(join(root, 'api'), { recursive: true })
+    const endpoint = (body: string) => `<ApiEndpoint method="GET" path="/api/badge/{id}/status" baseUrl="https://example.test" summary="Badge" description="Renders a badge.">\n<Param name="id" in="path" type="integer" required example="1">Monitor ID.</Param>\n<Response status={200} contentType="image/svg+xml" description="SVG badge">\n${body}\n</Response>\n</ApiEndpoint>\n`
+    await writeFile(join(root, 'api', 'badges.mdx'), `---\ntitle: Badges\n---\n\n# Badges\n\n${endpoint('```xml\n<svg xmlns="http://www.w3.org/2000/svg" width="98" height="20"><title>Status: Up</title></svg>\n```')}`)
+    await writeFile(join(root, 'api', 'empty.mdx'), `---\ntitle: Empty\n---\n\n# Empty\n\n${endpoint('')}`)
+    const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+    config.spaces[0].nav.push({ type: 'group', label: 'API', items: [{ type: 'page', file: 'api/badges' }, { type: 'page', file: 'api/empty' }] })
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+
+    const result = await validateProject(root)
+    const responseIssues = result.issues.filter((issue) => issue.code === 'api-endpoint-response')
+    expect(responseIssues.map((issue) => issue.file)).toEqual(['api/empty.mdx'])
   })
 })

@@ -48,6 +48,46 @@ let tocEntries: TocEntry[] = []
 const slugCounts = new Map<string, string>()
 let renderDepth = 0
 
+export interface EditableBlock { start: number; end: number; text: string }
+let editableSource: string | undefined
+let editableBlocks: EditableBlock[] = []
+let originalEditableSource = ''
+let editableOffsets: number[] = []
+let editableCursor = 0
+let editScope: { start: number; end: number; cursor: number } | undefined
+
+/** Map editable rendered regions to exact source spans, including repeated blocks and CRLF. */
+export function renderEditableMarkdown(md: string): RenderResult & { blocks: EditableBlock[] } {
+  originalEditableSource = md
+  editableSource = md.replace(/\r\n/g, '\n')
+  editableOffsets = []
+  for (let i = 0; i < md.length; i++) {
+    editableOffsets.push(i)
+    if (md[i] === '\r' && md[i + 1] === '\n') i++
+  }
+  editableOffsets.push(md.length)
+  editableCursor = 0
+  editScope = undefined
+  editableBlocks = []
+  try { return { ...renderMarkdown(md), blocks: [...editableBlocks] } }
+  finally { editableSource = undefined; editableBlocks = []; editableOffsets = []; editScope = undefined }
+}
+
+function editAttributes(text: string, code = false): string {
+  if (!editableSource || !text.trim()) return ''
+  const from = editScope?.cursor ?? 0
+  const start = editableSource.indexOf(text, from)
+  if (start < 0 || (editScope ? start + text.length > editScope.end : editableSource.indexOf(text, start + 1) !== -1)) return ''
+  if (editScope) editScope.cursor = start + text.length
+  const sourceStart = editableOffsets[start]!
+  const sourceEnd = editableOffsets[start + text.length]!
+  if (editableBlocks.some((block) => sourceStart < block.end && sourceEnd > block.start)) return ''
+  const original = originalEditableSource.slice(sourceStart, sourceEnd)
+  editableBlocks.push({ start: sourceStart, end: sourceEnd, text: original })
+  return ` data-edit-start="${sourceStart}" data-edit-end="${sourceEnd}" data-edit-format="${code ? 'plain' : 'markdown'}" data-edit-source="${escAttr(original)}"`
+
+}
+
 export function renderMarkdown(md: string): RenderResult {
   uidCounter = 0
   tocEntries = []
@@ -459,7 +499,7 @@ function codeBlock(code: string, lang: string): string {
   } catch {
     highlighted = esc(code)
   }
-  return `<div class="dp-code-block dp-code-theme-auto dp-code-theme-light"><div class="dp-code-header"><span class="dp-code-lang">${esc(lang || 'plaintext')}</span><button class="dp-code-copy-btn" type="button" aria-label="Copy code">${copyIcon()}<span>Copy</span></button></div><pre class="dp-code-pre dp-hl-auto dp-hl-light"><code>${highlighted}</code></pre></div>`
+  return `<div class="dp-code-block dp-code-theme-auto dp-code-theme-light"><div class="dp-code-header"><span class="dp-code-lang">${esc(lang || 'plaintext')}</span><button class="dp-code-copy-btn" type="button" aria-label="Copy code">${copyIcon()}<span>Copy</span></button></div><pre class="dp-code-pre dp-hl-auto dp-hl-light"><code${editAttributes(code, true)}>${highlighted}</code></pre></div>`
 }
 
 function copyIcon(): string {
@@ -766,7 +806,19 @@ function responseExample(_props: Props, inner: string): string {
 // ---------------------------------------------------------------------------
 
 function renderMarkdownChunk(md: string, top: boolean): string {
+  const previous = editScope
+  const start = editableSource?.indexOf(md, editableCursor) ?? -1
+  editScope = start >= 0 ? { start, end: start + md.length, cursor: start } : undefined
+  if (start >= 0) editableCursor = start + md.length
+  try { return renderMarkdownLines(md, top) }
+  finally { editScope = previous }
+}
+
+function renderMarkdownLines(md: string, top: boolean): string {
   const lines = md.split('\n')
+  const lineOffsets: number[] = []
+  let offset = 0
+  for (const line of lines) { lineOffsets.push(offset); offset += line.length + 1 }
   const out: string[] = []
   let i = 0
   let guard = 0
@@ -777,11 +829,13 @@ function renderMarkdownChunk(md: string, top: boolean): string {
       break
     }
     const line = lines[i]!
+    if (editScope) editScope.cursor = editScope.start + lineOffsets[i]!
 
-    const fence = /^\s*(```|~~~)(\w*)\s*$/.exec(line)
+    const fence = /^\s*(```+|~~~+)\s*([^\s`~]*)(?:\s+.*)?$/.exec(line)
     if (fence) {
       const lang = fence[2] ?? ''
       const body: string[] = []
+      if (editScope) editScope.cursor = editScope.start + lineOffsets[i]! + line.length + 1
       i++
       while (i < lines.length && !/^\s*(```|~~~)\s*$/.test(lines[i]!)) body.push(lines[i++]!)
       i++ // closing fence
@@ -807,8 +861,9 @@ function renderMarkdownChunk(md: string, top: boolean): string {
       continue
     }
 
-    const h = /^(#{1,6})\s+(.*)$/.exec(line)
+    const h = /^\s*(#{1,6})\s+(.*)$/.exec(line)
     if (h) {
+      if (editScope) editScope.cursor += line.indexOf(h[2]!, h[1]!.length)
       out.push(heading(h[1]!.length, h[2]!, top))
       i++
       continue
@@ -839,10 +894,14 @@ function renderMarkdownChunk(md: string, top: boolean): string {
     if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
       const ordered = /^\s*\d+\.\s+/.test(line)
       const items: string[] = []
+      const itemStarts: number[] = []
       while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i]!)) {
-        items.push(lines[i++]!.replace(/^\s*([-*+]|\d+\.)\s+/, ''))
+        const item = lines[i]!.replace(/^\s*([-*+]|\d+\.)\s+/, '')
+        itemStarts.push((editScope?.start ?? 0) + lineOffsets[i]! + lines[i]!.length - item.length)
+        items.push(item)
+        i++
       }
-      out.push(renderList(items, ordered))
+      out.push(renderList(items, ordered, itemStarts))
       continue
     }
 
@@ -862,7 +921,9 @@ function renderMarkdownChunk(md: string, top: boolean): string {
     ) {
       para.push(lines[i++]!)
     }
-    if (para.length) out.push(`<p class="dp-p">${inline(para.join(' '))}</p>`)
+    // A malformed block opener must still advance, preserving text below it.
+    if (!para.length) para.push(lines[i++]!)
+    if (para.length) out.push(`<p class="dp-p"${editAttributes(para.join('\n'))}>${inline(para.join(' '))}</p>`)
   }
 
   return out.join('\n')
@@ -874,33 +935,38 @@ function heading(level: number, text: string, top: boolean): string {
   if (top && (lvl === 2 || lvl === 3 || lvl === 4)) {
     tocEntries.push({ id, level: lvl as 2 | 3 | 4, title: stripInline(text) })
   }
-  return `<h${lvl} id="${escAttr(id)}" class="dp-h${lvl}">${inline(text)}</h${lvl}>`
+  return `<h${lvl} id="${escAttr(id)}" class="dp-h${lvl}"${editAttributes(text)}>${inline(text)}</h${lvl}>`
 }
 
-function renderList(items: string[], ordered: boolean): string {
+function renderList(items: string[], ordered: boolean, starts: number[]): string {
   const isTask = items.some((it) => /^\[[ xX]\]\s+/.test(it))
   if (isTask) {
     const lis = items
-      .map((it) => {
+      .map((it, index) => {
+        if (editScope) editScope.cursor = starts[index]!
         const m = /^\[([ xX])\]\s+(.*)$/.exec(it)
         const checked = m && m[1] !== ' '
         const icon = `<span class="dp-task-check-icon${checked ? ' checked' : ''}"></span>`
         const txt = m ? m[2]! : it
+        if (editScope) editScope.cursor += it.length - txt.length
         const style = checked ? ' style="text-decoration:line-through;color:#9ca3af"' : ''
-        return `<li class="dp-task-item">${icon}<span${style}>${inline(txt)}</span></li>`
+        return `<li class="dp-task-item">${icon}<span${style}${editAttributes(txt)}>${inline(txt)}</span></li>`
       })
       .join('')
     return `<ul class="dp-task-list">${lis}</ul>`
   }
   const tag = ordered ? 'ol' : 'ul'
   const cls = ordered ? 'dp-ol' : 'dp-ul'
-  const lis = items.map((it) => `<li>${inline(it)}</li>`).join('')
+  const lis = items.map((it, index) => {
+    if (editScope) editScope.cursor = starts[index]!
+    return `<li${editAttributes(it)}>${inline(it)}</li>`
+  }).join('')
   return `<${tag} class="${cls}">${lis}</${tag}>`
 }
 
 function renderTable(header: string[], rows: string[][]): string {
-  const head = `<tr>${header.map((c) => `<th>${inline(c)}</th>`).join('')}</tr>`
-  const body = rows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')
+  const head = `<tr>${header.map((c) => `<th${editAttributes(c)}>${inline(c)}</th>`).join('')}</tr>`
+  const body = rows.map((r) => `<tr>${r.map((c) => `<td${editAttributes(c)}>${inline(c)}</td>`).join('')}</tr>`).join('')
   return `<div class="dp-table-wrap"><table class="dp-table"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
 }
 
@@ -916,7 +982,7 @@ function inline(text: string): string {
       tag === 'Badge'
         ? `<span class="dp-inline-badge">${esc(str(props.text) || (body ?? '').trim())}</span>`
         : `<span class="dp-inline-badge">${esc(iconGlyph(str(props.name)))}</span>`
-    tokens.push(html)
+    tokens.push(editableSource !== undefined ? `<span contenteditable="false" data-md-atom="${escAttr(_m)}">${html}</span>` : html)
     return `${TOK_OPEN}${tokens.length - 1}${TOK_CLOSE}`
   })
 
@@ -929,6 +995,20 @@ function inline(text: string): string {
   s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>')
   s = s.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
   s = s.replace(/(^|[^_\w])_([^_]+)_/g, '$1<em>$2</em>')
+  if (editableSource !== undefined) {
+    const links = [...text.matchAll(/(?<!!)\[([^\]]+)\](\([^)\s]+[^)]*\))/g)]
+    let linkIndex = 0
+    s = s.replace(/<a class="df-inline-link"[^>]*>/g, (tag) => {
+      const link = links[linkIndex++]
+      return link ? tag.replace(/>$/, ` data-md-suffix="${escAttr(']' + link[2]!)}">`) : tag
+    })
+    const images = [...text.matchAll(/!\[([^\]]*)\]\([^)\s]+[^)]*\)/g)]
+    let imageIndex = 0
+    s = s.replace(/<img [^>]*\/>/g, (tag) => {
+      const source = images[imageIndex++]?.[0]
+      return source ? `<span contenteditable="false" data-md-atom="${escAttr(source)}">${tag}</span>` : tag
+    })
+  }
   if (tokens.length) {
     s = s.replace(new RegExp(`${TOK_OPEN}(\\d+)${TOK_CLOSE}`, 'g'), (_m, k) => tokens[Number(k)] ?? '')
   }

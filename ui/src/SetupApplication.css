@@ -689,3 +689,8 @@
 
 /* Validation feedback inside the Add source dialog; the server message is multi-line. */
 .sources-dialog-body > .field-error { margin: 0; color: var(--bad); font-size: 12px; line-height: 1.45; white-space: pre-line; }
+
+.mintlify-import-fields { border: 0; padding: 0; margin: 0; display: grid; gap: 16px; min-width: 0; }
+.mintlify-import-panel { overflow-wrap: anywhere; }
+.mintlify-conversion-warnings { display: grid; gap: 12px; max-height: 320px; overflow: auto; }
+.mintlify-import-panel details summary { cursor: pointer; margin-bottom: 12px; }

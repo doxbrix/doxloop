@@ -60,3 +60,18 @@ test('a planned capability contributes no delivered coverage', async () => {
     expect(commands.items.find((item) => item.id === command.id)?.state).toBe('planned')
   } finally { spy.mockRestore() }
 })
+
+test('evidence paths with route-group brackets are found on disk and no unrelated identifier is suggested', async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'doxloop-coverage-brackets-')); parents.push(parent)
+  const source = join(parent, 'product')
+  await mkdir(join(source, 'src', 'app', '(main)', 'websites', '[websiteId]', 'compare'), { recursive: true })
+  await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'bracketed' }), 'utf8')
+  await writeFile(join(source, 'src', 'app', '(main)', 'websites', '[websiteId]', 'compare', 'ComparePage.tsx'), 'export default function ComparePage() { return null }\n', 'utf8')
+  const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [{ name: 'product', path: '../product' }], generator: 'doxbrix' })
+  await writeEvidenceMap(root, { schemaVersion: 1, pages: { 'index.mdx': { sources: [{ source: 'product', paths: ['src/app/(main)/websites/[websiteId]/compare/ComparePage.tsx'] }], confidence: 'inferred' } } })
+  const report = await buildSourceIntelligence(root)
+  expect(report.evidenceDiagnostics.filter((issue) => issue.code === 'deleted-identifier')).toEqual([])
+  const weak = report.evidenceDiagnostics.filter((issue) => issue.code === 'weak-relation')
+  expect(weak.length).toBeLessThanOrEqual(1)
+  expect(weak.every((issue) => !issue.suggestion.includes('such as "product"'))).toBe(true)
+})

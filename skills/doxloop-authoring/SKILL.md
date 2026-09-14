@@ -21,7 +21,11 @@ publish or deploy.
 5. Read the generator-specific navigation and site configuration.
 6. Inspect existing pages before proposing new ones.
 7. Use only source directories configured in `.doxloop/project.json`.
-8. Restate the reader, scope, and outcomes being documented.
+8. When a source has `"kind": "docs-site"`, read
+   [references/existing-documentation.md](references/existing-documentation.md):
+   the project rewrites that documentation, and the crawled snapshot is
+   evidence to audit and rewrite from, never text to copy.
+9. Restate the reader, scope, and outcomes being documented.
 
 After initial source and documentation inspection, read
 [references/template-routing.md](references/template-routing.md) and
@@ -147,7 +151,11 @@ product, not just enough to write one example. Look for:
 - tests, fixtures, and examples that demonstrate supported workflows;
 - authentication, permissions, errors, limits, and recovery paths;
 - theme tokens, fonts, public logos, favicons, and color-mode configuration;
-- existing documentation and terminology that still match the source.
+- existing documentation and terminology that still match the source;
+- for a `docs-site` source, the snapshot's `index.md` and a cross-section of
+  its pages, judged against the product sources as
+  [references/existing-documentation.md](references/existing-documentation.md)
+  describes.
 
 Classify the product and identify its likely readers, first-success path, public
 capabilities, important workflows, and operational concerns. Record which
@@ -358,7 +366,10 @@ Prefer evidence in this order:
 1. public interfaces and configuration schemas;
 2. tests and fixtures demonstrating supported behavior;
 3. implementation used by those interfaces;
-4. existing documentation that still matches current source.
+4. existing documentation that still matches current source, including the
+   crawled pages of a `docs-site` source; when no product source is
+   configured, those pages are the only evidence and nothing may be added
+   beyond what they support.
 
 Inspect broadly enough to find the supported public surface, then read deeply
 only where needed to verify reader-visible behavior. Do not expose internal

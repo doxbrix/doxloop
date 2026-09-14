@@ -35,6 +35,8 @@ export interface NavigationEditorProps {
   requiresEveryPage: boolean
   orphans: NavigationOrphan[]
   /** The plan review allows one level of groups over pages. */
+  onSelectPage?: (path: string) => void
+  activePath?: string
   maxDepth?: number
   emptyLabel?: string
 }
@@ -46,7 +48,7 @@ type DropPosition = 'before' | 'after' | 'into'
  * keyboard route: arrows move focus, Alt+arrows move the focused item, and
  * the row's buttons expose the same moves for screen readers.
  */
-export function NavigationEditor({ items, onChange, supports, icons, editable, requiresEveryPage, orphans, maxDepth, emptyLabel }: NavigationEditorProps) {
+export function NavigationEditor({ items, onChange, supports, icons, editable, requiresEveryPage, orphans, maxDepth, emptyLabel, onSelectPage, activePath }: NavigationEditorProps) {
   const [selectedId, setSelectedId] = useState<string>()
   const [dragging, setDragging] = useState<string>()
   const [drop, setDrop] = useState<{ id: string; position: DropPosition }>()
@@ -143,6 +145,7 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
         role="treeitem"
         aria-level={depth + 1}
         aria-selected={active}
+        aria-current={node.type === 'page' && node.path === activePath ? 'page' : undefined}
         aria-expanded={isGroup ? true : undefined}
         tabIndex={0}
         draggable={editable}
@@ -172,6 +175,7 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
           <button type="button" class="danger" aria-label={isGroup ? `Ungroup ${itemLabel(item)}` : `Remove ${itemLabel(item)} from navigation`} title={isGroup ? 'Ungroup' : 'Remove from navigation'} disabled={!canRemove(item)} onClick={() => remove(item.id)}><Icon name={isGroup ? 'columns' : 'close'} size={14} /></button>
         </span>}
       </div>
+      {active && node.type === 'page' && node.path && onSelectPage && <Button size="sm" class="nav-open-page" icon="file" onClick={() => onSelectPage(node.path!)}>Open page</Button>}
       {active && editable && <NavigationItemDetails item={item} supports={supports} icons={icons} requiresEveryPage={requiresEveryPage} onChange={(patch) => change(updateItem(items, item.id, (current) => ({ ...current, node: { ...current.node, ...patch } as NavItem['node'] })))} />}
       {isGroup && <div class="nav-tree-children" role="group">{renderRows(item.children ?? [], depth + 1)}</div>}
     </div>

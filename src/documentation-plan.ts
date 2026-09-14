@@ -1,13 +1,14 @@
-import { assertBatchFits, batchLimits } from './batch-limits.js'
+import { assertBatchFits, batchLimits, defaultBatchLimits } from './batch-limits.js'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { createAgentLogFormatter } from './agent-log.js'
 import { forwardTerminationSignals, spawnAgentProcess } from './agent-process.js'
-import { agentArguments, captureAuthPrompt, prepareAgentPrompt, sourceAccessDirectories } from './author.js'
+import { agentArguments, agentEnvironment, captureAuthPrompt, prepareAgentPrompt, sourceAccessDirectories, type ClaudeEffortLevel } from './author.js'
 import { captureAuthContext, describeCaptureAuth, prepareCaptureAuth, type CaptureAuthMode } from './capture-auth.js'
 import { chooseAgent } from './agents.js'
 import { emitWorkflowStage } from './job-events.js'
+import { writeExistingDocumentationRedirects } from './docs-site.js'
 import { computeDrift } from './drift.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
@@ -37,6 +38,12 @@ import type {
   DocumentationPlanQuestion,
   DocumentationPlanScope,
   DocumentationPlanVisuals,
+  ExistingDocumentationAssessment,
+  ExistingDocumentationDisposition,
+  ExistingDocumentationFinding,
+  ExistingDocumentationPageDisposition,
+  SourceBinding,
+  SyncRun,
 } from './types.js'
 
 const PLANS_DIRECTORY = join('.doxloop', 'plans')
@@ -109,7 +116,7 @@ export async function createDocumentationPlan(
     },
     target,
     clarification: { mode: input.clarificationMode ?? 'review', answers: {} },
-    execution: { ...input.execution, limits: batchLimits(input.execution.limits, { maxPages: Math.max(input.targetPages ?? 0, input.scope === 'starter' ? 5 : input.scope === 'standard' ? 12 : 40), maxScreenshots: input.execution.screenshots === 'disabled' || input.execution.screenshots === false ? 0 : 12, maxMinutes: 15 }) },
+    execution: { ...input.execution, limits: batchLimits(input.execution.limits, defaultBatchLimits(input.scope, input.execution.screenshots !== 'disabled' && input.execution.screenshots !== false, input.targetPages)) },
     ...(template ? { template } : {}),
   }
   if (input.execution.limits && input.targetPages && input.targetPages > plan.execution.limits!.maxPages) throw new DoxloopError('The minimum page count exceeds the batch maximum. Raise maxPages or lower targetPages.')
@@ -217,7 +224,38 @@ export async function readDocumentationPlan(root: string, id: string): Promise<D
     await persistPlan(root, inferred, false)
     return inferred
   }
+  if (plan.status === 'failed' && plan.failure?.stage === 'generate' && plan.failure.proposalId) {
+    const reconciled = await reconcileContinuedGeneration(root, plan, plan.failure.proposalId)
+    if (reconciled) return reconciled
+  }
   return plan
+}
+
+/**
+ * A failed generation can be continued from the proposal itself: the
+ * Proposals panel and `doxloop proposal resume` work on the run, not on the
+ * plan that started it. When that continuation finished, the plan still said
+ * failed and offered recovery for a proposal that was already awaiting review
+ * or applied, and taking that offer failed with "Only a failed or interrupted
+ * proposal can be recovered". Read the proposal's real state back into the
+ * plan instead.
+ */
+async function reconcileContinuedGeneration(
+  root: string,
+  plan: DocumentationPlan,
+  proposalId: string,
+): Promise<DocumentationPlan | undefined> {
+  let run: SyncRun
+  try {
+    run = await readSyncRun(root, proposalId)
+  } catch {
+    return undefined
+  }
+  if (run.status !== 'awaiting-review' && run.status !== 'applied') return undefined
+  const { error: _error, failure: _failure, ...retained } = plan
+  const generated: DocumentationPlan = { ...retained, status: 'generated', proposalId, updatedAt: new Date().toISOString() }
+  await persistPlan(root, generated, false)
+  return generated
 }
 
 async function inferPlanFailure(root: string, plan: DocumentationPlan): Promise<DocumentationPlanFailure> {
@@ -477,6 +515,10 @@ export async function approveDocumentationPlan(root: string, id: string): Promis
   }
   await persistPlan(root, approved, true)
   await atomicWrite(join(root, CURRENT_PLAN_FILE), `${JSON.stringify(approved, null, 2)}\n`)
+  // Old routes of the existing documentation now point at the pages that
+  // absorb them, so the preview and the Doxbrix build honor them once the
+  // rewrite lands and the map can be exported for the old host.
+  await writeExistingDocumentationRedirects(root, approved)
   return approved
 }
 
@@ -514,6 +556,37 @@ export async function cancelDocumentationPlan(root: string, id: string): Promise
   }
   await persistPlan(root, cancelled, false)
   return cancelled
+}
+
+/**
+ * Record that a planning or generation process ended without reporting a
+ * result. A process that is killed, crashes, or is stopped from the UI never
+ * reaches its own failure bookkeeping, and a plan left at "planning" offers
+ * the reviewer nothing to retry. Returns the failed plan, or undefined when
+ * the plan had already moved on.
+ */
+export async function markDocumentationPlanInterrupted(
+  root: string,
+  id: string,
+  stage: DocumentationPlanFailure['stage'],
+  message: string,
+): Promise<DocumentationPlan | undefined> {
+  let current: DocumentationPlan
+  try {
+    current = await readDocumentationPlan(root, id)
+  } catch {
+    return undefined
+  }
+  if (!['planning', 'revising', 'generating'].includes(current.status)) return undefined
+  const failed: DocumentationPlan = {
+    ...current,
+    status: 'failed',
+    updatedAt: new Date().toISOString(),
+    error: message,
+    failure: { stage, resumable: false, ignorable: false },
+  }
+  await persistPlan(root, failed, false)
+  return failed
 }
 
 /** Restore only the durable state required to retry an interrupted UI stage. */
@@ -694,6 +767,72 @@ export async function documentationSourceSnapshot(root: string): Promise<string>
     .digest('hex')
 }
 
+const PROPOSAL_CHECKPOINT_FILE = 'proposal-checkpoint.json'
+
+export interface ProposalCheckpoint {
+  /** Fingerprint of everything the planner was asked; a different brief or source snapshot invalidates the checkpoint. */
+  key: string
+  /** Which planning pass produced the reply: the first proposal, or the corrective pass after failed gates. */
+  pass: 'proposal' | 'revised'
+  raw: unknown
+  savedAt: string
+}
+
+/**
+ * Fingerprint of a planning request. Two attempts with the same fingerprint
+ * are asking the same question, so the agent's earlier reply can stand in for
+ * a new one.
+ */
+export function proposalCheckpointKey(current: DocumentationPlan, sourceSnapshot: string, feedback?: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      id: current.id,
+      version: current.version,
+      mode: current.mode,
+      scope: current.scope,
+      request: current.request,
+      targetPages: current.targetPages ?? null,
+      execution: current.execution,
+      clarification: current.clarification,
+      sourceSnapshot,
+      feedback: feedback ?? null,
+    }))
+    .digest('hex')
+}
+
+function proposalCheckpointPath(root: string, id: string): string {
+  return join(root, PLANS_DIRECTORY, id, PROPOSAL_CHECKPOINT_FILE)
+}
+
+/**
+ * Keep the agent's reply the moment it arrives. A planning run that is later
+ * stopped by its time limit, a crash, or the user can then continue from
+ * this reply instead of paying for the same planning pass again.
+ */
+export async function writeProposalCheckpoint(root: string, id: string, checkpoint: Omit<ProposalCheckpoint, 'savedAt'>): Promise<void> {
+  await atomicWrite(proposalCheckpointPath(root, id), `${JSON.stringify({ ...checkpoint, savedAt: new Date().toISOString() }, null, 2)}\n`)
+}
+
+export async function readProposalCheckpoint(root: string, id: string, key: string): Promise<ProposalCheckpoint | undefined> {
+  let text: string
+  try {
+    text = await readFile(proposalCheckpointPath(root, id), 'utf8')
+  } catch {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<ProposalCheckpoint>
+    if (parsed.key !== key || (parsed.pass !== 'proposal' && parsed.pass !== 'revised') || parsed.raw === undefined) return undefined
+    return { key, pass: parsed.pass, raw: parsed.raw, savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '' }
+  } catch {
+    return undefined
+  }
+}
+
+export async function clearProposalCheckpoint(root: string, id: string): Promise<void> {
+  await rm(proposalCheckpointPath(root, id), { force: true })
+}
+
 async function runPlanner(
   root: string,
   current: DocumentationPlan,
@@ -715,29 +854,42 @@ async function runPlanner(
     emitWorkflowStage('building-coverage', 'Building coverage plan', 'running')
     const selected = await chooseAgent(current.execution.agent)
     const prompt = planningPrompt(project, current, discovery.inventory, formatSourceChanges(changes), feedback, await reviewPreferenceGuidance(root), describeCaptureAuth(project.application ? await captureAuthContext(root) : undefined))
-    let raw = await planFromAgent(root, selected, prompt, current.execution, project)
+    const checkpointKey = proposalCheckpointKey(current, await documentationSourceSnapshot(root), feedback)
+    const checkpoint = await readProposalCheckpoint(root, current.id, checkpointKey)
+    let raw: unknown
+    if (checkpoint) {
+      process.stdout.write(`Continuing from the proposal ${selected.name} returned at ${checkpoint.savedAt}; the planning pass is not repeated.\n`)
+      raw = checkpoint.raw
+    } else {
+      raw = await planFromAgent(root, selected, prompt, current.execution, project)
+      await writeProposalCheckpoint(root, current.id, { key: checkpointKey, pass: 'proposal', raw })
+    }
     let recommendedAnswers: Record<string, string> | undefined
+    raw = repairMechanicalPlanIssues(raw, current.execution)
     const proposed = normalizePlanShape(raw, current)
-    // Thin screenshot coverage is worth one corrective attempt, but it never
-    // fails the run: the application may genuinely expose only one screen.
-    const planningIssue = [
+    // Only findings that would block approval are worth a corrective pass:
+    // it costs as much as the first proposal, because the agent returns the
+    // whole plan again. Thin or missing screenshot coverage is reported as an
+    // advisory on the review instead, where the reviewer can ask for more.
+    const planningIssue = checkpoint?.pass === 'revised' ? '' : [
       initialCreatePlanCoverageIssue(proposed, current),
+      existingDocumentationPlanIssue(proposed, current, project.sources),
       requiredScreenshotPlanIssue(proposed, current.execution),
-      screenshotCoverageAdvisory(proposed, current.execution),
-      shallowCaptureAdvisory(proposed, current.execution),
     ].filter((issue): issue is string => Boolean(issue)).join('\n')
     if (planningIssue) {
       emitWorkflowStage('revising-gates', 'Revising failed planning gates', 'running')
       const repairPrompt = `${prompt}
 
-Required planning validation failed for your first proposal:
-${planningIssue}
-
-Return a corrected complete JSON object. Re-audit the configured evidence for distinct reader jobs and use the supplied doxloop_capture MCP tools to inspect the reachable application when screenshots are required. Do not pad the plan, invent UI states, downgrade required screenshots, or return another plan without a complete screenshot-enabled UI guide.
-
-First proposal:
-${JSON.stringify(raw, null, 2)}`
-      raw = await planFromAgent(root, selected, repairPrompt, current.execution, project)
+${gateRevisionInstructions(planningIssue, raw)}`
+      try {
+        raw = await planFromAgent(root, selected, repairPrompt, current.execution, project)
+        await writeProposalCheckpoint(root, current.id, { key: checkpointKey, pass: 'revised', raw })
+      } catch (error) {
+        // The first proposal is real work. When the corrective pass stops
+        // (timeout, cut-off reply, agent error) the reviewer gets that
+        // proposal with the gate findings as advisories rather than nothing.
+        process.stdout.write(`Gate revision did not finish; keeping the first proposal for review. ${error instanceof Error ? error.message : String(error)}\n`)
+      }
       emitWorkflowStage('revising-gates', 'Revising failed planning gates', 'completed')
     }
     const clarificationCandidate = normalizePlanShape(raw, current)
@@ -756,6 +908,7 @@ ${JSON.stringify(raw, null, 2)}`
     const finalShape = normalizePlanShape(raw, current)
     const finalPlanningIssue = [
       initialCreatePlanCoverageIssue(finalShape, current),
+      existingDocumentationPlanIssue(finalShape, current, project.sources),
       requiredScreenshotPlanIssue(finalShape, current.execution),
     ].filter((issue): issue is string => Boolean(issue)).join('\n')
     if (finalPlanningIssue) {
@@ -764,12 +917,16 @@ ${JSON.stringify(raw, null, 2)}`
       // it for review instead of paying for another planning run.
       const candidate = await persistFailedPlanCandidate(root, current, raw, selected.name)
       failedCandidate = candidate
+      // Replaying this reply would fail the same gate, so the next attempt plans afresh.
+      await clearProposalCheckpoint(root, current.id)
       throw new DoxloopError(`The planning agent could not produce an approvable plan. ${finalPlanningIssue}`)
     }
     let applied = await applyDocumentationPlanProposal(root, current.id, raw, selected.name)
+    await clearProposalCheckpoint(root, current.id)
     const advisories = [
       screenshotCoverageAdvisory(applied, applied.execution),
       shallowCaptureAdvisory(applied, applied.execution),
+      existingDocumentationAdvisory(applied, project.sources, discovery.inventory),
     ].filter((item): item is string => Boolean(item))
     if (recommendedAnswers || advisories.length > 0) {
       applied = {
@@ -795,6 +952,28 @@ ${JSON.stringify(raw, null, 2)}`
     await persistPlan(root, failed, false)
     throw error
   }
+}
+
+/**
+ * The corrective pass costs as much as the first proposal because the agent
+ * returns the whole plan again, and in real runs it cost more: told to
+ * "re-audit the evidence" and "inspect the reachable application", the
+ * planner signed in and re-explored every screen it had already seen. The
+ * gate names specific pages and specific fields, so the pass is scoped to
+ * them, and the browser is only for a state the first pass never reached.
+ */
+export function gateRevisionInstructions(planningIssue: string, firstProposal: unknown): string {
+  const noVisualGuide = /planned no application screenshots/.test(planningIssue)
+  const browserGuidance = noVisualGuide
+    ? 'Use the supplied doxloop_capture MCP tools only as far as needed to confirm the screens the guides you add will document; stay within the planning browser budget.'
+    : 'You already inspected the application and the evidence for this proposal; do not sign in or explore it again. Every finding below can be resolved from the first proposal and the source you have read.'
+  return `Required planning validation failed for your first proposal:
+${planningIssue}
+
+Return the first proposal again as one complete JSON object with exactly these findings fixed. Keep every page, capability, navigation entry, and field that the findings do not name unchanged — this pass corrects the named pages; it does not re-plan. ${browserGuidance} Do not pad the plan, invent UI states, downgrade required screenshots, or return another plan without a complete screenshot-enabled UI guide.
+
+First proposal (compact JSON):
+${JSON.stringify(firstProposal)}`
 }
 
 /**
@@ -997,12 +1176,28 @@ export const DEFAULT_PLANNING_TIMEOUT_MINUTES = 20
  * without editing the project.
  */
 export function planningTimeoutMinutes(project: Pick<DoxloopProject, 'sync'>, env: NodeJS.ProcessEnv = process.env): number {
+  return explicitPlanningTimeoutMinutes(project, env) ?? DEFAULT_PLANNING_TIMEOUT_MINUTES
+}
+
+function explicitPlanningTimeoutMinutes(project: Pick<DoxloopProject, 'sync'>, env: NodeJS.ProcessEnv): number | undefined {
   const raw = env.DOXLOOP_PLAN_TIMEOUT_MINUTES
   if (raw !== undefined && raw.trim() !== '') {
     const parsed = Number(raw)
     if (Number.isFinite(parsed) && parsed > 0) return parsed
   }
-  return project.sync.budget?.maxMinutes ?? DEFAULT_PLANNING_TIMEOUT_MINUTES
+  return project.sync.budget?.maxMinutes
+}
+
+/**
+ * How long one planning pass may run for a batch. A limit the user set
+ * (environment or monitoring budget) is honoured and capped by the batch's
+ * minutes; otherwise the batch's own minutes apply, never less than the
+ * default, so a comprehensive plan is not cut off at a starter's deadline.
+ */
+export function planningTimeoutForBatch(project: Pick<DoxloopProject, 'sync'>, limits: { maxMinutes: number }, env: NodeJS.ProcessEnv = process.env): number {
+  const explicit = explicitPlanningTimeoutMinutes(project, env)
+  if (explicit !== undefined) return Math.min(explicit, limits.maxMinutes)
+  return Math.max(DEFAULT_PLANNING_TIMEOUT_MINUTES, limits.maxMinutes)
 }
 
 export function planningTimeoutMessage(minutes: number, agent: string): string {
@@ -1013,6 +1208,15 @@ function formatMinutes(minutes: number): string {
   if (Number.isInteger(minutes)) return `${minutes} minute${minutes === 1 ? '' : 's'}`
   const seconds = Math.round(minutes * 60)
   return seconds < 60 ? `${seconds} second${seconds === 1 ? '' : 's'}` : `${Math.round(minutes * 10) / 10} minutes`
+}
+
+/**
+ * Planning is an inventory and grouping task over evidence Doxloop has
+ * already extracted; extra reasoning effort mostly buys slower turns. The
+ * run's effort still applies to authoring, where depth matters.
+ */
+export function planningEffort(effort: ClaudeEffortLevel): ClaudeEffortLevel {
+  return effort === 'high' || effort === 'max' ? 'medium' : effort
 }
 
 async function runAgentForPlan(
@@ -1036,17 +1240,17 @@ async function runAgentForPlan(
     mode: 'review',
     ...(execution.model ? { model: execution.model } : {}),
     ...(execution.reasoning ? { reasoning: execution.reasoning } : {}),
-    ...(execution.effort ? { effort: execution.effort } : {}),
+    ...(execution.effort ? { effort: planningEffort(execution.effort) } : {}),
     ...(project.sync.budget?.maxUsd ? { maxBudgetUsd: project.sync.budget.maxUsd } : {}),
     sourceDirectories: sourceAccessDirectories(root, project.sources),
     ...(captureProvider ? { captureProvider } : {}),
     captureRequired: screenshotIntent === 'enabled',
   })
-  const timeoutMinutes = Math.min(planningTimeoutMinutes(project), batchLimits(execution.limits).maxMinutes)
+  const timeoutMinutes = planningTimeoutForBatch(project, batchLimits(execution.limits))
   return new Promise<string>((resolveOutput, reject) => {
     const agent = spawnAgentProcess(selected.executable, args, {
       cwd: root,
-      env: process.env,
+      env: agentEnvironment(selected.name),
       stdio: ['ignore', 'pipe', 'pipe'],
       isolate: true,
     })
@@ -1086,11 +1290,74 @@ async function runAgentForPlan(
   })
 }
 
+/**
+ * What the planner must know about the inventory beyond its rows: which
+ * files hold the strings readers see, and whether the inventory is partial.
+ */
+export function discoveryGuidance(discovery: DocumentationDiscoveryInventory): string {
+  const lines: string[] = []
+  const catalogs = discovery.sources.flatMap((source) => (source.uiLabelCatalogs ?? []).map((path) => `${source.name}: ${path}`))
+  if (catalogs.length > 0) {
+    lines.push(`UI label catalogs (the exact English strings the product displays; read them before naming any button, tab, field, or menu, and quote the displayed value rather than its key):\n${catalogs.map((item) => `- ${item}`).join('\n')}`)
+  }
+  const partial = discovery.sources.filter((source) => source.truncated)
+  if (partial.length > 0) {
+    lines.push(`Partial inventory: ${partial.map((source) => `${source.name} (${source.filesScanned} of ${source.filesAvailable} files)`).join(', ')}. Product code was inventoried first; read the source directly for any surface the inventory may have cut off before deciding it does not exist.`)
+  }
+  return lines.length ? `${lines.join('\n\n')}\n` : ''
+}
+
 export function screenshotPlanningInstructions(): string {
   return `Doxloop supplies the purpose-built doxloop_capture MCP browser for this run. It is the capture connector required by this task and must take precedence over any generic in-app Browser plugin, Chrome extension, or node_repl browser mechanism. Call the doxloop_capture navigation and snapshot tools directly before deciding visual states; do not use failure of another browser mechanism as evidence that Doxloop capture is unavailable. Do not save PNG files during planning. Plan from states that are actually visible in the live application; do not invent fixture data, authenticated state, prepared plans, proposals, or controls merely because source code or tests mention them.
-Explore the application before you decide what is visible. Many control centers are single-page applications where every screen shares one URL, so the absence of a second route is never evidence that a screen is unreachable. Use read-only interaction to reveal screens: follow in-app navigation, tabs, steps, accordions, disclosure controls, and detail panels, and snapshot each distinct screen you reach. Interaction that only reveals an existing screen is safe and expected. Do not submit, create, delete, deploy, publish, send, or otherwise change data, and back out of any control that would. Record a state as unavailable only after you actually attempted to reach it, and say which control or screen stopped you.
+Explore the application with a fixed budget before you decide what is visible: at most 12 doxloop_capture calls in total during planning, and at most one snapshot per distinct screen. The source's route, navigation, and UI label definitions are the primary inventory of screens; the browser confirms that they exist and what they show. Open the starting route, then visit each top-level navigation destination once and snapshot it; open a dialog, tab, panel, or disclosure only when the source cannot tell you what it contains. Many control centers are single-page applications where every screen shares one URL, so the absence of a second route is never evidence that a screen is unreachable. Interaction that only reveals an existing screen is safe and expected. Do not fill forms, submit, create, delete, deploy, publish, send, or otherwise change data, and back out of any control that would. Record a state as unavailable only after you attempted to reach it within the budget, and say which control or screen stopped you.
 Screenshot readiness, authentication, fixture data, routes, and application preparation are run preconditions—not documentation-scope decisions. Never add a plan question solely about preparing, restarting, signing in to, or populating the capture application. If a desired state is not visibly available after you tried to reach it through in-app navigation, omit that state and use another evidence-supported, reachable state; do not trigger a second planning pass to ask the user to manufacture it.
 Plan screenshots only for visible application workflows where an image materially reduces ambiguity or proves an important state. Never plan decorative screenshots for API, CLI, concept, or reference-only pages. For a UI guide, plan one capture for every reader step that changes what is on screen: the entry screen, each dialog, drawer, tab, expanded section, or form the step opens, the form once it is filled with safe example values, and the visible result or confirmation. Readers follow a guide screen by screen, so a guide whose steps open four screens plans four captures. A primary how-to guide therefore normally plans 4–7 captures and a tutorial 5–8; plan fewer only when the application genuinely exposes fewer distinct states and say so in the workflow. When intent is disabled, every page must use visuals.mode "none". When intent is enabled, cover the visible UI surface in proportion to it: every planned page that documents a screen or workflow you actually reached needs its own screenshot-enabled guide marked "required". One guide is enough only when the application genuinely exposes one screen; planning a single capture for an application whose screens you did not attempt to reach is a failed plan, not a conservative one. In automatic mode, use "recommended" only when the project policy and user request allow capture. Treat the user-provided route as the default boundary; specialize it per guide only when the live application, configured source routes, or UI tests provide evidence. Every screenshot-enabled page must identify an application-relative startPath, a specific ordered workflow, and an explicit captureSequence covering meaningful visible states from entry through verification. Each capture-sequence item must be a state that looks different from the one before it — a different screen, an opened dialog, an expanded section, a filled form, or a result. Scrolling, focusing a field, hovering, or merely inspecting part of a screen that is already visible is not a new state and must never be its own capture item, because it produces an identical image and Doxloop consolidates it away. When a guide's workflow only ever shows one screen, plan one capture for it rather than padding the sequence to a larger number.`
+}
+
+function docsSiteSources(sources: SourceBinding[]): SourceBinding[] {
+  return sources.filter((source) => (source.kind ?? 'directory') === 'docs-site')
+}
+
+/**
+ * When an existing documentation site is configured, the plan is also an
+ * audit of it: the reviewer sees coverage, gaps, contradictions, and where
+ * every old page lands before any page is rewritten. Product sources decide
+ * facts; without them the plan may restructure but not invent.
+ */
+export function existingDocumentationPlanningInstructions(sources: SourceBinding[], discovery: DocumentationDiscoveryInventory): string {
+  const sites = docsSiteSources(sources)
+  if (sites.length === 0) return ''
+  const productSources = sources.filter((source) => (source.kind ?? 'directory') !== 'docs-site')
+  const siteLines = sites.map((source) => {
+    const inventory = discovery.sources.find((item) => item.name === source.name)
+    const pages = inventory?.filesAvailable ?? source.site?.pages ?? 0
+    return `- "${source.name}": ${source.site?.url ?? source.path}, crawled into the read-only Markdown snapshot at ${source.path} (${pages} pages${source.site?.generator ? `, ${source.site.generator}` : ''}). Read its index.md first: it lists every page with its title, word count, and original URL, plus broken links and crawl warnings. Open page files under pages/ to judge their content.`
+  })
+  const factRule = productSources.length > 0
+    ? `Product sources (${productSources.map((source) => `"${source.name}"`).join(', ')}) are the truth for facts. Where an existing page contradicts them, list the claim under coverage.contradicted and plan the corrected page; where it describes behavior no product source shows, decide whether it is obsolete (coverage.obsolete) or knowledge code cannot show that the rewrite must keep (coverage.preserved). Product surfaces in the deterministic inventory that no existing page covers belong in coverage.gaps and need a planned page.`
+    : `No product code or API specification is configured, so the existing documentation is the only product evidence. Plan a restructure and rewrite of what it already says: do not plan pages whose facts the crawled pages cannot support, leave coverage.gaps and coverage.contradicted empty, and note in "instructions" that every page is written with inferred confidence until a product source is connected.`
+  return `Existing documentation to rewrite (docs-site sources):
+${siteLines.join('\n')}
+This run rewrites that documentation as a new professional documentation set. Audit it before planning: read enough pages to judge accuracy, structure, depth, duplication, terminology, and reader journeys. ${factRule} Give every crawled page a disposition: "rewrite" when one planned page replaces it, "merge" when it is absorbed into a planned page with other pages, "preserve" when its content is carried over largely as it stands, or "drop" with the reason when its content is obsolete or duplicated. A page that is dropped must not lose knowledge the product still has. Cite docs-site pages in evidenceDetails with kind "documentation" and the snapshot-relative file path, alongside product-source evidence. Keep the assessment compact: summary in at most 400 characters, each finding description in at most 200, each disposition reason in at most 120.
+`
+}
+
+export function existingDocumentationPlanShape(sources: SourceBinding[]): string {
+  if (docsSiteSources(sources).length === 0) return ''
+  return `,
+  "existingDocumentation": [{
+    "source": "docs-site source name",
+    "summary": "how well the existing documentation serves readers today and what the rewrite changes",
+    "strengths": ["what the existing documentation does well and the rewrite keeps"],
+    "findings": [{ "severity": "blocker | major | minor", "title": "short problem title", "description": "evidence-based problem in the existing documentation", "pages": ["pages/existing-page.md"] }],
+    "coverage": {
+      "gaps": ["product surface found in code that the existing documentation never covers"],
+      "obsolete": ["existing page or claim describing behavior the product no longer has"],
+      "preserved": ["existing knowledge code cannot show that the rewrite carries over"],
+      "contradicted": ["existing claim the product sources contradict; the rewrite corrects it"]
+    },
+    "pages": [{ "path": "pages/existing-page.md", "title": "existing page title", "url": "original page URL", "disposition": "rewrite | merge | preserve | drop", "into": ["planned-page-id"], "reason": "why this page lands there" }]
+  }]`
 }
 
 function planningPrompt(
@@ -1113,6 +1380,9 @@ function planningPrompt(
     : `${initialRequest}\n\nUser request:\n${current.request || 'Use the configured evidence and documentation brief to recommend the right documentation.'}`
   const screenshotIntent = normalizeScreenshotIntent(current.execution.screenshots)
   const screenshotPolicy = project.application?.screenshots?.policy ?? 'requested'
+  const questionRule = current.clarification.mode === 'defaults'
+    ? '- The reviewer asked you to decide open questions by their safe default instead of asking. Return an empty "questions" array: make each such decision yourself, apply it to the plan, and record it in one sentence in "instructions" so the reviewer can see what you assumed.'
+    : '- Use at most three questions, only when the answer materially changes scope or reader outcomes.'
   return `You are the planning stage of Doxloop. Research the configured product evidence and existing documentation, then return a complete documentation coverage plan. Do not edit any file, do not author reader-facing documentation, and do not ask questions in prose.
 
 ${revision}
@@ -1134,10 +1404,10 @@ ${JSON.stringify(current.target, null, 2)}
 
 Deterministic source discovery (trusted inventory produced by Doxloop; agent inferences must remain distinguishable):
 ${formatDiscoveryInventory(discovery)}
-
+${discoveryGuidance(discovery)}
 Deterministic source-change summary:
 ${changes}
-${templateInstructions(current)}
+${existingDocumentationPlanningInstructions(project.sources, discovery)}${templateInstructions(current)}
 Durable reviewer preferences from prior revisions, rejections, and inline edits. Apply them only when they remain compatible with current evidence and this request:
 ${reviewerGuidance}
 
@@ -1169,7 +1439,7 @@ The JSON object must use this exact shape:
     "disposition": "planned | existing | excluded | needs-human"
   }],
   "navigation": {
-    "top": ["Documentation", "Reference"],
+    "top": ["product-derived space name", "second space only when it holds at least five substantial pages"],
     "sections": [{ "id": "getting-started", "title": "Getting started", "pageIds": ["planned-page-id"] }]
   },
   "estimatedEffort": "small | medium | large",
@@ -1193,7 +1463,7 @@ The JSON object must use this exact shape:
     "question": "one material question only",
     "whyItMatters": "decision affected by the answer",
     "recommendation": "safe default"
-  }]
+  }]${existingDocumentationPlanShape(project.sources)}
 }
 
 Rules:
@@ -1202,10 +1472,12 @@ Rules:
 - Enumerate concrete reader outcomes first, then ensure every evidence-supported outcome maps to at least one page. Put unsupported or intentionally omitted outcomes in exclusions.
 - Treat deterministic discovery entries as trusted facts about what was found, while keeping your inferred grouping, audience relevance, and recommendations clearly in rationale. Every planned capability must map to pageIds, and every page to write must cite at least one configured source when sources are available.
 - Produce a coherent generator-neutral navigation outline. Use the persisted target only to identify generator-native navigation boundaries; do not put generator-specific syntax in page paths or section IDs.
+- Name top-level spaces after this product's reader surfaces and audiences as the evidence shows them — for example "Guides", "Tracker & API", and "Self-hosting" for an analytics product, or "Monitoring", "Status pages", and "Administration" for a monitoring tool. Never default to a generic "Documentation" plus "Reference" pair. Add a second or third space only when it holds at least five substantial pages of its own; otherwise keep those pages as groups inside the primary space. Every navigation group needs at least two pages, and a runbook or troubleshooting page belongs with the workflows it supports, not in a reference space.
+- When the inventory lists UI label catalogs, plan UI guides around the strings those catalogs display. Authors must quote the displayed English text, never the translation key or a paraphrase.
 - Give each page one distinct reader job or reference purpose. Do not hide several substantial workflows inside a generic overview or quickstart merely to keep the plan small.
 - Preserve useful existing pages during updates and identify their action explicitly.
 - Generated starter pages are scaffolding, not useful existing documentation. Any existing page containing a \`doxloop:starter-page\` marker or starter-placeholder language must appear in the current plan with action \`update\` or \`remove\`; never preserve or leave it outside the plan.
-- Use at most three questions, only when the answer materially changes scope or reader outcomes.
+${questionRule}
 - Scope contract for starter: at least 3 pages to write, covering orientation, first success, and essential reference or troubleshooting when supported. Keep it deliberately small, but do not merge distinct reader jobs to stay under an arbitrary number.
 - Scope contract for standard: at least 8 pages to write and no fixed upper limit — the evidence sets the size. Include overview, prerequisites or installation, quickstart, every primary workflow guide, necessary concepts, public reference or configuration, and troubleshooting. Add examples, integrations, errors, or limitations when evidence supports them. Give each primary workflow, screen, and reference surface its own page rather than compressing them to hit a small count.
 - Scope contract for comprehensive: at least 12 pages to write and no fixed upper limit — the evidence sets the size. This is the default scope; use the deterministic public-surface inventory as the floor for coverage, not a ceiling. Cover every distinct evidence-supported public workflow, screen, command, and interface at useful depth, plus relevant concepts, examples, integrations, operations, security, errors, limits, troubleshooting, and lifecycle guidance. A product with many screens, commands, or configuration groups legitimately needs 40–80 pages; give each screen, command group, and configuration area its own page instead of compressing them into overviews.
@@ -1219,9 +1491,11 @@ ${current.mode === 'create'
 - Paths are relative, portable, have no leading slash, and do not escape the documentation project.
 - Every must-have page explains its rationale and expected evidence.
 - Every page declares a visuals decision. Use zero for non-UI pages. For each screenshot-enabled page, plan a coherent visual story rather than a token image: orientation or entry state, important input or choice states, intermediate configuration or validation when useful, successful result, and verification or next action. A tutorial normally needs 5–8 captures, getting-started and primary how-to guides 4–7, and focused troubleshooting or secondary UI guides 3–5. Automatic/recommended capture may omit states that text makes unambiguous, but it should still normally plan 2–4 images. Never inflate the count with unchanged screens, decorative images, or every mouse click.
+- The estimatedCaptures of all pages together must not exceed the batch's maxScreenshots. When the visible surface deserves more, keep complete sequences for the guides whose screens matter most to the reader outcome, give the remaining UI pages visuals.mode "none", and say in their rationale that captures are deferred to a later batch; never trim every guide to a token image.
 - Every screenshot-enabled page requires a startPath beginning with one slash, a specific workflow, and a captureSequence with exactly one concrete item per estimated capture in capture order. Each item must name the reader action, expected stable visible state, and why that image helps. Set estimatedCaptures to captureSequence.length. Pages with visuals.mode "none" use zero and empty capture details.
 - The pages array must not be empty.
-- Every page declares "diagram". Concept and architecture pages set "required" so the writer includes a Mermaid diagram of the model or lifecycle; task, reference, and release pages set "none" unless a diagram resolves real reader ambiguity.`
+- Every page declares "diagram". Concept and architecture pages set "required" so the writer includes a Mermaid diagram of the model or lifecycle; task, reference, and release pages set "none" unless a diagram resolves real reader ambiguity.
+- Keep the reply compact; a long plan is emitted token by token and every extra sentence delays the reviewer. Write purpose in at most 120 characters, rationale in at most 160, each captureSequence item in at most 160, and visuals.workflow in at most 240. List at most two evidenceDetails per page and one per capability; the writer records complete evidence when it reads the sources. Do not restate the discovery inventory, the project configuration, or these rules anywhere in the reply.`
 }
 
 function generationRequest(plan: DocumentationPlan, reviewerGuidance: string): string {
@@ -1239,14 +1513,36 @@ Approved hash: ${plan.approvedHash}
 
 Treat the approved plan as a scope boundary. Create, update, preserve, or remove only the planned pages and the navigation, theme, evidence map, and supporting assets strictly required by those pages. Do not silently expand scope. If source research reveals useful work outside the plan, report it as a recommendation instead of implementing it. Resolve factual details from configured evidence and mark unsupported behavior rather than guessing.
 
-For every screenshot-enabled page, follow the approved visuals.startPath, visuals.workflow, and visuals.captureSequence in order. ${captureContract} In .doxloop/screenshot-manifest.json, write capture as the JSON boolean true or false—never "required" or "recommended"—and set sequenceItem to the one-based approved capture-sequence item represented by each image. Use specific action, expectedState, and purpose text rather than abbreviations such as "Open /".
+For every screenshot-enabled page, follow the approved visuals.startPath, visuals.workflow, and visuals.captureSequence in order. ${captureContract} Capture efficiently: take the screenshot immediately after the navigation or click that produces an approved state — the action's result already tells you it succeeded — and call the accessibility snapshot only when the next action needs an element reference or a dialog must be confirmed, never as a separate check before every image and never after one; a real run spent six browser calls and a model turn each on every image this way. In .doxloop/screenshot-manifest.json, write capture as the JSON boolean true or false—never "required" or "recommended"—and set sequenceItem to the one-based approved capture-sequence item represented by each image. Use specific action, expectedState, and purpose text rather than abbreviations such as "Open /".
 
-Write every planned page to professional depth. Read the authoring skill's page-depth reference and apply its contract for the page type: an outcome-led introduction; prerequisites; complete ordered steps with the exact labels, values, and observable result of each step; verification; evidence-backed troubleshooting; and a next step. Reference pages cover their whole public surface with complete tables. Concept pages carry a diagram or model and link to the tasks they inform. The landing page orients each audience with cards to a first task. Use the generator's native components — steps, tabs, callouts, cards, accordions, code groups, frames — where they make the page clearer. For every screenshot-enabled guide, put one captured image inside every step that changes the screen. Doxloop reports \`thin-page\` and \`thin-procedure\` warnings from its validation command; resolve every one on a planned page before finishing.
+Write every planned page to professional depth. Read the authoring skill's page-depth reference and apply its contract for the page type: an outcome-led introduction; prerequisites; complete ordered steps with the exact labels, values, and observable result of each step; verification; evidence-backed troubleshooting; and a next step. Reference pages cover their whole public surface with complete tables. Concept pages carry a diagram or model and link to the tasks they inform. The landing page orients each audience with cards to a first task. Use the generator's native components — steps, tabs, callouts, cards, accordions, code groups, frames — where they make the page clearer. For every screenshot-enabled guide, put one captured image inside every step that changes the screen. Doxloop reports \`thin-page\`, \`thin-procedure\`, \`thin-space\`, \`single-page-group\`, and \`generic-space-name\` warnings from its validation command; resolve every one on a planned page before finishing. If \`doxloop test\` cannot start in your sandbox (for example a Node or Keychain crash before any output), say so once and finish without building substitute checks or task lists: Doxloop runs the same validation the moment you finish and returns every problem to you. Name every button, tab, field, and menu with the string the product displays: when the inventory lists a UI label catalog, read it and quote the displayed English value, never the translation key, a paraphrase such as "the add control", or a label you have not found in the catalog or the component source. Write each page's prerequisites, cautions, and limitations for its own task in its own words; do not repeat one disclaimer or "before you begin" block across pages, and do not fill verification blocks with restatements of the steps.
 
-${planWritingRequirements(plan)}The finished workspace must contain no generated starter content. Replace every planned starter page completely and remove every \`doxloop:starter-page\` marker before validation. Do not report completion while the \`starter-content\` validation code remains.
+${planWritingRequirements(plan)}${existingDocumentationWritingRequirements(plan)}The finished workspace must contain no generated starter content. Replace every planned starter page completely and remove every \`doxloop:starter-page\` marker before validation. Do not report completion while the \`starter-content\` validation code remains.
 
 Preserve applicable reviewer preferences below unless they conflict with the approved plan or current evidence:
 ${reviewerGuidance}`
+}
+
+/**
+ * How the writer follows the approved audit of an existing documentation
+ * site: dispositions are scope, contradictions are corrections, and the old
+ * prose is evidence to rewrite from rather than text to paste.
+ */
+export function existingDocumentationWritingRequirements(plan: Pick<DocumentationPlan, 'existingDocumentation' | 'pages'>): string {
+  const assessments = plan.existingDocumentation ?? []
+  if (assessments.length === 0) return ''
+  const titles = new Map(plan.pages.map((page) => [page.id, page.title]))
+  const lines = assessments.flatMap((assessment) => {
+    const corrections = assessment.coverage.contradicted.map((claim) => `  - correct: ${claim}`)
+    const preserved = assessment.coverage.preserved.map((item) => `  - keep: ${item}`)
+    const dropped = assessment.pages.filter((page) => page.disposition === 'drop').map((page) => `  - drop ${page.path}${page.reason ? ` (${page.reason})` : ''}`)
+    const placed = assessment.pages.filter((page) => page.disposition !== 'drop').map((page) => `  - ${page.disposition} ${page.path} → ${page.into.map((id) => titles.get(id) ?? id).join(', ')}`)
+    return [`Existing documentation "${assessment.source}":`, ...placed, ...dropped, ...corrections, ...preserved]
+  })
+  return `The approved plan includes an audit of the existing documentation being rewritten. Follow its page dispositions exactly: every existing page marked rewrite, merge, or preserve must have its reader-valuable content carried into the named planned pages, and a page marked drop is omitted for the stated reason. Write the corrected fact for every contradicted claim and never repeat the old one. Rewrite in the project's voice from the evidence; do not paste the existing prose. Where the existing pages carry knowledge no product source shows, keep it and record the page's confidence as inferred with the docs-site source as evidence. List every correction and every dropped page in your final summary.
+${lines.join('\n')}
+
+`
 }
 
 /**
@@ -1406,7 +1702,7 @@ function normalizePlanShape(raw: unknown, base: DocumentationPlan): Pick<Documen
   'productProfile' | 'summary' | 'audiences' | 'outcomes' | 'terminology' | 'exclusions' |
   'instructions' | 'experienceLevel' | 'preferredExamples' | 'locale' | 'accessibilityTarget' |
   'styleGuide' | 'capabilities' | 'navigation' | 'estimatedPages' | 'estimatedEffort' |
-  'pages' | 'questions' | 'scope'
+  'pages' | 'questions' | 'scope' | 'existingDocumentation'
 > {
   const value = record(raw)
   const pagesRaw = Array.isArray(value.pages) ? value.pages : base.pages
@@ -1431,6 +1727,7 @@ function normalizePlanShape(raw: unknown, base: DocumentationPlan): Pick<Documen
     return { ...normalized, pageIds: normalized.pageIds.filter((id) => knownPageIds.has(id)) }
   })
   const navigation = normalizeNavigation(value.navigation ?? base.navigation, pages)
+  const existingDocumentation = normalizeExistingDocumentation(value.existingDocumentation ?? base.existingDocumentation, pages)
   return {
     productProfile: textValue(value.productProfile) ?? base.productProfile,
     summary: requiredText(value.summary ?? base.summary, 'Plan summary'),
@@ -1451,7 +1748,94 @@ function normalizePlanShape(raw: unknown, base: DocumentationPlan): Pick<Documen
     pages,
     questions,
     scope,
+    ...(existingDocumentation ? { existingDocumentation } : {}),
   }
+}
+
+function normalizeExistingDocumentation(raw: unknown, pages: DocumentationPlanPage[]): ExistingDocumentationAssessment[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const knownPageIds = new Set(pages.map((page) => page.id))
+  const assessments = raw.flatMap((item): ExistingDocumentationAssessment[] => {
+    const value = record(item)
+    const source = textValue(value.source)
+    if (!source) return []
+    const coverage = record(value.coverage)
+    const findings = (Array.isArray(value.findings) ? value.findings : []).flatMap((entry): ExistingDocumentationFinding[] => {
+      const finding = record(entry)
+      const title = textValue(finding.title)
+      if (!title) return []
+      const severity = finding.severity === 'blocker' || finding.severity === 'minor' ? finding.severity : 'major'
+      return [{ severity, title, description: textValue(finding.description) ?? '', pages: stringList(finding.pages) }]
+    })
+    const dispositions = (Array.isArray(value.pages) ? value.pages : []).flatMap((entry): ExistingDocumentationPageDisposition[] => {
+      const disposition = record(entry)
+      const path = textValue(disposition.path)
+      if (!path) return []
+      const kind: ExistingDocumentationDisposition = disposition.disposition === 'merge' || disposition.disposition === 'preserve' || disposition.disposition === 'drop' ? disposition.disposition : 'rewrite'
+      const into = stringList(disposition.into).filter((id) => knownPageIds.has(id))
+      const title = textValue(disposition.title)
+      const url = textValue(disposition.url)
+      return [{
+        path,
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        disposition: kind === 'drop' ? 'drop' : into.length === 0 ? 'drop' : kind,
+        into: kind === 'drop' ? [] : into,
+        reason: textValue(disposition.reason)?.trim() || (kind !== 'drop' && into.length === 0 ? 'The plan named no page that absorbs this content.' : ''),
+      }]
+    })
+    return [{
+      source,
+      summary: textValue(value.summary) ?? '',
+      strengths: stringList(value.strengths),
+      findings,
+      coverage: {
+        gaps: stringList(coverage.gaps),
+        obsolete: stringList(coverage.obsolete),
+        preserved: stringList(coverage.preserved),
+        contradicted: stringList(coverage.contradicted),
+      },
+      pages: dispositions,
+    }]
+  })
+  return assessments.length > 0 ? assessments : undefined
+}
+
+/**
+ * The audit of an existing documentation site is what the reviewer approves
+ * before a rewrite, so a first proposal that skips it is not approvable.
+ */
+export function existingDocumentationPlanIssue(
+  plan: Pick<DocumentationPlan, 'existingDocumentation'>,
+  base: Pick<DocumentationPlan, 'mode' | 'status'>,
+  sources: SourceBinding[],
+): string | undefined {
+  // Only the first proposal of a create run is gated: an update plan scoped to
+  // one change should not have to re-audit the whole existing site.
+  if (base.mode !== 'create' || base.status !== 'planning') return undefined
+  const missing = docsSiteSources(sources).filter((source) => !plan.existingDocumentation?.some((assessment) => assessment.source === source.name && assessment.pages.length > 0))
+  if (missing.length === 0) return undefined
+  return `The plan does not assess the existing documentation site${missing.length === 1 ? '' : 's'} ${missing.map((source) => `"${source.name}"`).join(', ')}. Add an "existingDocumentation" entry per docs-site source with a summary, findings, coverage (gaps, obsolete, preserved, contradicted), and a disposition for every crawled page listed in the snapshot's index.md.`
+}
+
+/** Crawled pages the plan never placed are reported for the reviewer rather than sent back to the planner. */
+export function existingDocumentationAdvisory(
+  plan: Pick<DocumentationPlan, 'existingDocumentation'>,
+  sources: SourceBinding[],
+  discovery: Pick<DocumentationDiscoveryInventory, 'sources'>,
+): string | undefined {
+  const notes: string[] = []
+  for (const source of docsSiteSources(sources)) {
+    const inventory = discovery.sources.find((item) => item.name === source.name)
+    if (!inventory) continue
+    const crawled = inventory.evidence.filter((item) => item.path !== 'index.md').map((item) => item.path)
+    const assessment = plan.existingDocumentation?.find((item) => item.source === source.name)
+    const placed = new Set((assessment?.pages ?? []).map((page) => page.path))
+    const unplaced = crawled.filter((path) => !placed.has(path))
+    if (unplaced.length === 0) continue
+    notes.push(`${unplaced.length} of ${crawled.length} crawled pages from "${source.name}" have no disposition in this plan (for example ${unplaced.slice(0, 3).join(', ')}). Their content is neither rewritten nor explicitly dropped; ask the agent to place them or accept that they are left behind.`)
+  }
+  return notes.length > 0 ? notes.join(' ') : undefined
 }
 
 function isCapturePreparationQuestion(question: DocumentationPlanQuestion): boolean {
@@ -1501,6 +1885,69 @@ function initialCreatePlanCoverageIssue(
     ? `The reviewer asked for at least ${base.targetPages} pages to write.`
     : `It needs at least ${minimum} distinct evidence-supported pages.`
   return `The ${base.scope} create plan proposes only ${pagesToWrite} ${pagesToWrite === 1 ? 'page' : 'pages'} to write. ${requirement} Split the public surface into more focused, evidence-backed pages, or add a specific "Scope exception:" exclusion explaining why the configured product evidence cannot support that depth.`
+}
+
+/**
+ * Fix what a corrective planning pass would only relabel. In required
+ * screenshot mode every screenshot-enabled page is required by definition,
+ * so a "recommended" label is a wording slip, not a planning decision, and
+ * a second full pass to change the word costs as much as the first proposal.
+ *
+ * The same goes for the other slips the required-screenshot gate catches: a
+ * guide whose visual purpose landed in the page's own rationale, a start path
+ * written without its leading slash, or a workflow the planner left out while
+ * spelling the same steps out in the capture sequence. Real runs paid a second
+ * planning pass — six to twenty minutes, with the browser exploration repeated
+ * — for each of these, so they are repaired here and reported on the log.
+ */
+export function repairMechanicalPlanIssues(raw: unknown, execution: DocumentationPlanExecution): unknown {
+  const intent = normalizeScreenshotIntent(execution.screenshots)
+  if (intent === 'disabled') return raw
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { pages?: unknown }).pages)) return raw
+  const pages = (raw as { pages: unknown[] }).pages
+  const repairs = { relabeled: 0, rationale: 0, startPath: 0, workflow: 0 }
+  const next = pages.map((page) => {
+    if (!page || typeof page !== 'object') return page
+    const visualsRaw = (page as { visuals?: unknown }).visuals
+    if (!visualsRaw || typeof visualsRaw !== 'object') return page
+    const visuals = { ...(visualsRaw as Record<string, unknown>) }
+    if (visuals.mode === 'recommended' && intent === 'enabled') {
+      repairs.relabeled += 1
+      visuals.mode = 'required'
+    }
+    if (visuals.mode !== 'required' && visuals.mode !== 'recommended') return { ...page, visuals }
+    const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
+    if (!text(visuals.rationale)) {
+      const fallback = text(visuals.purpose) ?? text((page as { rationale?: unknown }).rationale) ?? text((page as { purpose?: unknown }).purpose)
+      if (fallback) {
+        repairs.rationale += 1
+        visuals.rationale = fallback
+      }
+    }
+    const startPath = text(visuals.startPath)
+    if (startPath && !validCaptureStartPath(startPath)) {
+      const candidate = `/${startPath.replace(/^(?:\.\/|\/)+/, '')}`
+      if (validCaptureStartPath(candidate)) {
+        repairs.startPath += 1
+        visuals.startPath = candidate
+      }
+    }
+    const sequence = Array.isArray(visuals.captureSequence) ? visuals.captureSequence.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []
+    if ((text(visuals.workflow)?.length ?? 0) < 12 && sequence.length > 0) {
+      const workflow = sequence.map((item) => item.split(/\s+—\s+/, 1)[0]!.trim()).filter(Boolean).join('; ')
+      if (workflow.length >= 12) {
+        repairs.workflow += 1
+        visuals.workflow = workflow
+      }
+    }
+    return { ...page, visuals }
+  })
+  const guides = (count: number) => `${count} screenshot guide${count === 1 ? '' : 's'}`
+  if (repairs.relabeled > 0) process.stdout.write(`Marked ${guides(repairs.relabeled)} required: screenshots are required for this run, so best-effort visuals are not an option.\n`)
+  if (repairs.rationale > 0) process.stdout.write(`Filled the visual purpose of ${guides(repairs.rationale)} from the page rationale the planner wrote instead.\n`)
+  if (repairs.startPath > 0) process.stdout.write(`Normalized the start path of ${guides(repairs.startPath)} to an application-relative path.\n`)
+  if (repairs.workflow > 0) process.stdout.write(`Derived the workflow of ${guides(repairs.workflow)} from the capture sequence the planner supplied.\n`)
+  return { ...(raw as object), pages: next }
 }
 
 export function requiredScreenshotPlanIssue(
@@ -1656,11 +2103,16 @@ function completeCaptureSequence(sequence: string[] | undefined, expected: numbe
   return sequence.every((item) => item.trim().length >= 20) && new Set(normalized).size === sequence.length
 }
 
+/**
+ * A guide's start path only ever tells the capture browser where to open; a
+ * hash fragment is how single-page applications address a tab or panel
+ * (`/setting#member`), so it is a valid destination rather than a defect.
+ */
 function validCaptureStartPath(value: string | undefined): boolean {
-  if (!value?.trim() || !value.startsWith('/') || value.startsWith('//')) return false
+  if (!value?.trim() || !value.startsWith('/') || value.startsWith('//') || /\s/.test(value)) return false
   try {
     const parsed = new URL(value, 'https://capture.invalid')
-    return parsed.origin === 'https://capture.invalid' && !parsed.username && !parsed.password && !parsed.hash
+    return parsed.origin === 'https://capture.invalid' && !parsed.username && !parsed.password
   } catch {
     return false
   }

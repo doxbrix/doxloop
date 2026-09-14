@@ -34,6 +34,7 @@ export type NavigationNode =
 
 export interface NavigationSpace {
   name: string
+  version?: string
   icon?: string
   nav: NavigationNode[]
 }
@@ -93,8 +94,10 @@ export async function readNavigation(root: string): Promise<NavigationTree> {
     const site = await loadSiteConfig(root, project)
     const raw = await readFile(configPath, 'utf8')
     const referenced = new Set<string>()
+    const defaultVersion = (site.versions?.find((entry) => entry.default || entry.isDefault) ?? site.versions?.[0])?.version
     const spaces = site.spaces.map((space) => ({
       name: space.name,
+      ...((space.version ?? defaultVersion) ? { version: (space.version ?? defaultVersion)! } : {}),
       ...(space.icon ? { icon: space.icon } : {}),
       nav: decorate(space.nav as NavigationNode[], known, referenced),
     }))
@@ -141,7 +144,7 @@ export async function readNavigation(root: string): Promise<NavigationTree> {
 
 export interface NavigationWrite {
   fingerprint: string
-  spaces: Array<{ name: string; nav: unknown }>
+  spaces: Array<{ name: string; version?: string; nav: unknown }>
 }
 
 export async function writeNavigation(root: string, raw: unknown): Promise<NavigationTree> {
@@ -159,6 +162,7 @@ export async function writeNavigation(root: string, raw: unknown): Promise<Navig
   )))
   const spaces = input.spaces.map((space, index) => ({
     name: requireLabel(space.name, `Space ${index + 1} name`),
+    ...(space.version ? { version: space.version } : {}),
     nav: sanitizeNodes(space.nav, knownFiles, new Set<string>(), current.supports, `space "${space.name}"`),
   }))
   if (spaces.length === 0) throw new DoxloopError('Navigation needs at least one space.', 2)
@@ -217,10 +221,12 @@ export async function appendDoxbrixNavigationPage(
 async function writeDoxbrixNavigation(root: string, project: DoxloopProject, spaces: NavigationSpace[]): Promise<void> {
   const configPath = await siteConfigPath(root, project)
   const site = await loadSiteConfig(root, project)
-  const existing = new Map(site.spaces.map((space) => [space.name, space]))
+  const defaultVersion = (site.versions?.find((entry) => entry.default || entry.isDefault) ?? site.versions?.[0])?.version
+  const existing = new Map(site.spaces.map((space) => [JSON.stringify([space.version ?? defaultVersion, space.name]), space]))
   const next: DoxbrixSpace[] = spaces.map((space, index) => {
-    const previous = existing.get(space.name) ?? site.spaces[index]
-    return { ...(previous ?? {}), name: space.name, nav: space.nav as DoxbrixNavNode[] }
+    if (space.version && site.versions?.length && !site.versions.some((entry) => entry.version === space.version)) throw new DoxloopError(`Unknown documentation version "${space.version}".`)
+    const previous = existing.get(JSON.stringify([space.version ?? defaultVersion, space.name])) ?? site.spaces[index]
+    return { ...(previous ?? {}), ...(space.version ? { version: space.version } : {}), name: space.name, nav: space.nav as DoxbrixNavNode[] }
   })
   await writeFile(configPath, `${JSON.stringify({ ...site, spaces: next }, null, 2)}\n`, 'utf8')
 }
@@ -234,7 +240,8 @@ function parseWrite(raw: unknown): NavigationWrite {
     fingerprint: body.fingerprint,
     spaces: body.spaces.map((space) => {
       const entry = (space && typeof space === 'object' ? space : {}) as Record<string, unknown>
-      return { name: typeof entry.name === 'string' ? entry.name : '', nav: entry.nav }
+      if (entry.version !== undefined && (typeof entry.version !== 'string' || !entry.version.trim())) throw new DoxloopError('Space version must be a non-empty string.')
+      return { name: typeof entry.name === 'string' ? entry.name : '', ...(typeof entry.version === 'string' ? { version: entry.version } : {}), nav: entry.nav }
     }),
   }
 }

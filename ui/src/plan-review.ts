@@ -90,3 +90,16 @@ function pageMatchesFilter(page: DocumentationPlanPage, filter: PlanPageFilter):
   if (filter === 'changes') return page.action !== 'preserve'
   return page.action === filter
 }
+
+export type PlanPrimaryAction = 'approve' | 'generate' | 'retry-generating' | 'retry-planning'
+
+/**
+ * What the plan review's primary button does. A plan that failed before it
+ * proposed any pages cannot be approved, so its button retries planning and
+ * ignores the approval rules that assume pages exist.
+ */
+export function planPrimaryAction(plan: { status: string; failure?: { stage: string } }): PlanPrimaryAction {
+  if (plan.status === 'approved') return 'generate'
+  if (plan.status === 'failed') return plan.failure?.stage === 'propose' ? 'retry-planning' : 'retry-generating'
+  return 'approve'
+}

@@ -15,7 +15,7 @@ import {
   pageId,
   ROOT_CONTENT_IGNORED_DIRECTORIES,
 } from './project.js'
-import { doxbrixDocument } from './preview.js'
+import { doxbrixDocument, firstSitePage } from './preview.js'
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const DOXBRIX_CSS = resolve(PACKAGE_ROOT, 'assets', 'doxbrix-preview.css')
@@ -78,7 +78,9 @@ export async function buildDoxbrixStaticSite(
   const siteUrl = publicSiteUrl(options.siteUrl, site.site)
   const search: Array<{ title: string; description: string; href: string; text: string }> = []
   const sitemap: string[] = []
-  const firstId = pageId(contentRoot, paths[0]!)
+  const ids = new Set(paths.map((path) => pageId(contentRoot, path)))
+  const navigationHome = firstSitePage(site)
+  const firstId = navigationHome && ids.has(navigationHome) ? navigationHome : pageId(contentRoot, paths[0]!)
 
   for (const path of paths) {
     const id = pageId(contentRoot, path)
@@ -107,10 +109,12 @@ export async function buildDoxbrixStaticSite(
     await mkdir(dirname(pageOutput), { recursive: true })
     await writeFile(pageOutput, html, 'utf8')
     if (id.endsWith('/index')) await writeFile(join(outputDir, ...id.split('/').slice(0, -1), 'index.html'), html, 'utf8')
-    if (id === firstId) await writeFile(join(outputDir, 'index.html'), html, 'utf8')
     search.push({ title, description: description ?? '', href, text: markdownSearchText(parsed.content) })
     if (siteUrl) sitemap.push(new URL(`${id}/`, trailingSlash(siteUrl)).toString())
   }
+
+  // Write last so an unlisted index page cannot replace the navigation homepage.
+  await cp(join(outputDir, ...firstId.split('/'), 'index.html'), join(outputDir, 'index.html'))
 
   for (const [from, to] of Object.entries(await readRedirects(root))) {
     const target = `${basePath}${to}`

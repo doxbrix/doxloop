@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, post, NO_TIMEOUT } from './api'
-import { Button, Field, Input, Note, Select } from './components'
+import { Button, Field, Input, Note, Select, Tabs } from './components'
+import { MintlifyImportPanel } from './MintlifyImportPanel'
 import { Icon } from './icons'
 import { generatorLabel, inspectionSummary, projectFolderName, recentProjectChoices } from './project-presentation'
 import type { GeneratorEntry, ProjectInspection, RecentProject, UiState } from './types'
@@ -111,14 +112,14 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
       </div>
       <div class="project-switcher-actions">
         <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => void openFolder()}><Icon name="folder" size={16} /><span><strong>Open folder…</strong><small>A Doxloop project, or existing docs to import</small></span>{busy === 'browse' && <span class="spinner" />}</button>
-        <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpen(false); setImporting({ path: '' }) }}><Icon name="publish" size={16} /><span><strong>Import existing documentation…</strong><small>Adopt a Docusaurus, MkDocs, Hugo, or other site</small></span></button>
+        <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpen(false); setImporting({ path: '' }) }}><Icon name="publish" size={16} /><span><strong>Import existing documentation…</strong><small>Keep your generator, or convert Mintlify to Doxbrix</small></span></button>
         <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpen(false); onNewProject() }}><Icon name="plus" size={16} /><span><strong>New documentation project</strong><small>Open the setup wizard</small></span></button>
       </div>
     </div>}
     {importing && <div class="proposal-ready-scrim project-dialog-scrim" role="presentation">
       <section class="project-dialog" role="dialog" aria-modal="true" aria-labelledby="import-project-title">
         <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setImporting(null)}><Icon name="close" size={16} /></button>
-        <header><span class="proposal-ready-icon"><Icon name="publish" size={22} /></span><div><h2 id="import-project-title">Import existing documentation</h2><p>Doxloop adopts the folder as it is: it reads the site's configuration, lists its pages, and adds only its own project files.</p></div></header>
+        <header><span class="proposal-ready-icon"><Icon name="publish" size={22} /></span><div><h2 id="import-project-title">Import existing documentation</h2><p>Keep a supported documentation site in its native format, or convert a Mintlify project from a local folder or GitHub to Doxbrix.</p></div></header>
         <ImportExistingPanel
           initialPath={importing.path}
           initialInspection={importing.inspection}
@@ -135,12 +136,25 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
  * directory, and title, then import it. Used by the switcher dialog and by
  * the setup wizard's "Use existing documentation" choice.
  */
-export function ImportExistingPanel({ initialPath = '', initialInspection, onImported, onCancel }: {
+type ImportPanelProps = {
   initialPath?: string
   initialInspection?: ProjectInspection | undefined
   onImported: () => Promise<void>
   onCancel?: (() => void) | undefined
-}) {
+}
+
+export function ImportExistingPanel(props: ImportPanelProps) {
+  const [mode, setMode] = useState<'native' | 'mintlify'>(props.initialInspection?.conversion === 'mintlify' ? 'mintlify' : 'native')
+  const [mintlifyPath, setMintlifyPath] = useState(props.initialPath ?? '')
+  return <div>
+    <Tabs value={mode} onChange={setMode} items={[[ 'native', 'Keep existing generator' ], [ 'mintlify', 'Mintlify to Doxbrix' ]]} />
+    {mode === 'mintlify'
+      ? <MintlifyImportPanel initialPath={mintlifyPath} onImported={props.onImported} onCancel={props.onCancel} />
+      : <NativeImportPanel {...props} onMintlify={(path) => { setMintlifyPath(path); setMode('mintlify') }} />}
+  </div>
+}
+
+function NativeImportPanel({ initialPath = '', initialInspection, onImported, onCancel, onMintlify }: ImportPanelProps & { onMintlify: (path: string) => void }) {
   const [path, setPath] = useState(initialPath)
   const [inspection, setInspection] = useState<ProjectInspection | undefined>(initialInspection)
   const [generators, setGenerators] = useState<GeneratorEntry[]>([])
@@ -157,6 +171,9 @@ export function ImportExistingPanel({ initialPath = '', initialInspection, onImp
   useEffect(() => {
     void api<Partial<ProjectsResponse>>('/api/projects').then((result) => setGenerators(result.generators ?? [])).catch(() => undefined)
   }, [])
+  useEffect(() => {
+    if (inspection?.conversion === 'mintlify') onMintlify(path)
+  }, [inspection])
 
   const inspect = async (overrides: { generator?: string; contentDir?: string } = {}) => {
     const target = path.trim()

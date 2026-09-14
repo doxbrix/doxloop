@@ -45,7 +45,7 @@ import {
 } from './screen-capture-provider.js'
 import { adoptCapturedImages, checkApplicationReadiness, collapseDuplicateCaptures, embedMissingCaptures, prepareGuideAssetDirectories, validateScreenshotManifest, writeScreenshotManifestSkeleton } from './screenshot-workflow.js'
 import { collectSourceChanges, formatSourceChanges, recordSyncState } from './sync.js'
-import { formatValidation, validateProject } from './validation.js'
+import { formatValidation, isStarterContent, validateProject } from './validation.js'
 import type {
   AgentName,
   ApplicationConfig,
@@ -127,6 +127,12 @@ export async function runAuthor(options: {
    * with a follow-up instruction instead of discarding the agent's work. */
   onFailure?: (detail: string) => void
   tolerateValidationErrors?: boolean
+  /**
+   * Project whose saved sign-in material the capture browser should use.
+   * Proposal workspaces are throwaway copies under `.doxloop/runs`, and the
+   * material is keyed by project path, so a workspace root would find nothing.
+   */
+  captureAuthRoot?: string
 }): Promise<number> {
   let project = await loadProject(options.root)
   let remoteChanges: Awaited<ReturnType<typeof monitorRemoteSources>>['changes'] | undefined
@@ -142,7 +148,8 @@ export async function runAuthor(options: {
       : undefined
   // Sign-in material never enters the prompt; the agent only learns which
   // kind is available so it knows what to expect on the login page.
-  const captureAuth = project.application ? await captureAuthContext(options.root) : undefined
+  const captureAuthRoot = options.captureAuthRoot ?? options.root
+  const captureAuth = project.application ? await captureAuthContext(captureAuthRoot) : undefined
   const buildPrompt = (sources: SourceBinding[]): string => authorPrompt(
     options.mode,
     sources,
@@ -207,7 +214,8 @@ export async function runAuthor(options: {
     const approved = await workspacePlan(options.root)
     if (approved) {
       const existing = (await authoringPages(options.root, project)).map((path) => path.slice(options.root.length + 1).replace(/\\/g, '/'))
-      prompt += `\n\nAPPROVED FILE CONTRACT (enforced before any acceptance):\n${JSON.stringify(approved.pages.map((page) => ({ path: page.path, action: page.action, priority: page.priority })), null, 2)}\nExisting documentation files: ${JSON.stringify(existing)}\nUpdate existing pages in place, retaining their filenames and extensions. Do not replace an existing .md file with .mdx or move an index page to a new path. Only delete pages explicitly approved for removal. Preserve and Later pages must remain untouched. New pages must use an approved path under ${project.contentDir || 'the project root'}. If the plan cannot be followed, report the conflict instead of silently changing its scope.\n`
+      const replacements = await starterReplacements(options.root, approved, existing)
+      prompt += `\n\nAPPROVED FILE CONTRACT (enforced before any acceptance):\n${JSON.stringify(approved.pages.map((page) => ({ path: page.path, action: page.action, priority: page.priority })), null, 2)}\nExisting documentation files: ${JSON.stringify(existing)}\nUpdate existing pages in place, retaining their filenames and extensions. Do not replace an existing .md file with .mdx or move an index page to a new path. Only delete pages explicitly approved for removal. Preserve and Later pages must remain untouched. New pages must use an approved path under ${project.contentDir || 'the project root'}. If the plan cannot be followed, report the conflict instead of silently changing its scope.\n${replacements}`
     }
   }
   const requestId =
@@ -233,7 +241,7 @@ export async function runAuthor(options: {
   const sourceDirectories = sourceAccessDirectories(options.root, promptSources)
   const captureMaterial =
     options.mode !== 'review' && screenshotIntent !== 'disabled' && project.application
-      ? await prepareCaptureAuth(options.root)
+      ? await prepareCaptureAuth(captureAuthRoot)
       : undefined
   const captureProvider =
     options.mode !== 'review' && screenshotIntent !== 'disabled' && project.application
@@ -340,7 +348,7 @@ export async function runAuthor(options: {
         {
           cwd: options.root,
           stdio: pipeOutput ? ['inherit', 'pipe', 'pipe'] : 'inherit',
-          env: process.env,
+          env: agentEnvironment(selected.name),
           isolate: unattended || captureReview,
         },
       )
@@ -587,6 +595,48 @@ export async function runAuthor(options: {
   return exitCode
 }
 
+/**
+ * A create plan often puts a starter page's replacement at a new path
+ * ("getting-started/quickstart" for the scaffold's "quickstart.mdx") with
+ * action "update". Read together with "update existing pages in place", that
+ * left the writer keeping the root file while every link pointed at the
+ * planned path, and the run failed on broken links twice in a row. Say which
+ * file each such page replaces and where it belongs, so nothing is left to
+ * interpretation. The site root's landing page is the one exception: a
+ * Doxbrix site needs its index, so that page is written where the index is.
+ */
+export async function starterReplacements(
+  root: string,
+  plan: Pick<DocumentationPlan, 'pages'>,
+  existing: readonly string[],
+): Promise<string> {
+  const stem = (path: string) => path.replace(/\.[^./]+$/, '')
+  const existingStems = new Map(existing.map((path) => [stem(path), path]))
+  const lines: string[] = []
+  for (const page of plan.pages) {
+    if (page.action !== 'update' || page.priority === 'later' || existingStems.has(page.path)) continue
+    const last = page.path.split('/').pop() ?? page.path
+    const landing = /^(?:index|overview|home|start-here)$/i.test(last)
+    const candidates = landing ? ['index', ...[...existingStems.keys()].filter((item) => item.split('/').pop() === last)] : [...existingStems.keys()].filter((item) => item.split('/').pop() === last)
+    const file = candidates.map((item) => existingStems.get(item)).find((item): item is string => Boolean(item))
+    if (!file) continue
+    let starter = false
+    try {
+      starter = isStarterContent(await readFile(join(root, file), 'utf8'))
+    } catch {
+      continue
+    }
+    if (!starter) continue
+    if (landing && stem(file) === 'index') {
+      lines.push(`- "${page.path}" is the site's landing page: write it at ${file} (the site root keeps its index) and link to it as "/"; do not create ${page.path}.`)
+    } else {
+      lines.push(`- "${page.path}" replaces the generated starter ${file}: write it at its planned path with the same extension as ${file}, delete ${file}, update navigation, and point every link at "/${page.path}".`)
+    }
+  }
+  if (lines.length === 0) return ''
+  return `Starter pages this plan replaces (Doxloop resolved these; follow them exactly):\n${lines.join('\n')}\n`
+}
+
 export async function prepareAgentPrompt(
   root: string,
   prompt: string,
@@ -622,6 +672,24 @@ export async function prepareAgentPrompt(
  * still exploring the application, before it had written a single page.
  */
 export const PLANNING_MAX_TURNS = 100
+/** Tools a planning run must never use: planning proposes, it does not write or run anything. */
+export const CLAUDE_PLANNING_DISALLOWED_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'] as const
+/** Environment for a spawned agent. Claude Code's own reply cap stays in force: a plan that needs more than it is not converging, and a longer cap only makes that failure slower. */
+/**
+ * The environment an unattended agent runs in. `NODE_USE_SYSTEM_CA` makes
+ * every Node process read the macOS Keychain trust store at startup; inside
+ * the agent's sandbox that read is denied and Node dies with
+ * "SecItemCopyMatching failed -67674" before printing anything — so the
+ * writer could never run `doxloop test`, never saw its thin-page warnings,
+ * and either built substitute checks or left the warnings for the reviewer.
+ * The agent's own commands only ever reach the local documentation project,
+ * so the system trust store buys them nothing.
+ */
+export function agentEnvironment(_name: AgentName, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (env.NODE_USE_SYSTEM_CA === undefined) return env
+  const { NODE_USE_SYSTEM_CA: _systemCa, ...rest } = env
+  return rest
+}
 export const MIN_AUTHORING_MAX_TURNS = 400
 export const EDIT_MIN_MAX_TURNS = 80
 export const EDIT_TURNS_PER_PAGE = 30
@@ -791,10 +859,17 @@ export function agentArguments(
         prompt,
       )
     } else if (name === 'claude') {
+      // Plan mode would be the obvious choice, but Claude Code refuses every
+      // MCP tool it cannot prove read-only there, including the capture
+      // browser's navigate, so the planner could never look at the
+      // application it is planning screenshots for. Non-interactive default
+      // mode with the writing tools denied keeps the run read-only instead.
       args.push(
         '--print',
         '--permission-mode',
-        'plan',
+        'default',
+        '--disallowedTools',
+        CLAUDE_PLANNING_DISALLOWED_TOOLS.join(','),
         '--max-turns',
         String(PLANNING_MAX_TURNS),
         '--output-format',
@@ -899,6 +974,22 @@ function claudeAbsolutePermissionPattern(path: string): string {
   return `/${normalized}`
 }
 
+/**
+ * How the writer treats an existing documentation site next to product
+ * sources: product code decides facts, the old documentation decides what
+ * readers were told and where they went to read it. Without code the rewrite
+ * may reorganize and clarify but must not manufacture facts.
+ */
+export function existingDocumentationGuidance(sources: SourceBinding[]): string {
+  const docsSites = sources.filter((source) => (source.kind ?? 'directory') === 'docs-site')
+  if (docsSites.length === 0) return ''
+  const productSources = sources.filter((source) => (source.kind ?? 'directory') !== 'docs-site')
+  const shared = 'Account for every crawled page: carry its reader-valuable knowledge into the new documentation, merge overlapping pages, and drop only content the approved plan marks as dropped, stating why in your summary. Preserve the terminology readers already know unless the plan renames it. Fix broken links, duplicated content, and stale structure rather than reproducing them.'
+  return productSources.length > 0
+    ? `\n\nThe existing documentation is being rewritten from the product sources above. Where the existing pages and the product source disagree, the product source is correct: write the corrected fact, do not repeat the old claim, and list every correction in your final summary. Behavior the existing documentation describes that you cannot find in any product source is either obsolete (omit it and say so) or knowledge the code cannot show (keep it and record the page's confidence as \`inferred\` with the docs-site source as its evidence). ${shared}`
+    : `\n\nNo product code or API specification is configured: the existing documentation site is the only product evidence. Restructure, clarify, deduplicate, and rewrite it to professional depth, but do not introduce factual claims, options, commands, or values that the crawled pages do not support, and do not "correct" a claim you cannot verify. Record every page's confidence as \`inferred\` in the evidence map, citing the docs-site source and the snapshot page files it was written from, so the pages can be verified once a product source is connected. ${shared}`
+}
+
 export function authorPrompt(
   mode: AuthorMode,
   sources: SourceBinding[],
@@ -919,11 +1010,13 @@ export function authorPrompt(
           .map((source) =>
             (source.kind ?? 'directory') === 'openapi'
               ? `- ${source.name}: OpenAPI specification at ${source.path} — read it as authoritative API evidence for endpoints, parameters, schemas, and examples.`
+              : (source.kind ?? 'directory') === 'docs-site'
+                ? `- ${source.name}: existing documentation site ${source.site?.url ?? source.path}, crawled into the read-only Markdown snapshot at ${source.path}${source.site ? ` (${source.site.pages} pages; index.md lists every page with its original URL)` : ''}. This is the documentation being rewritten: read it for reader intent, terminology, structure, and knowledge that code cannot show, but never copy its prose verbatim.`
               : source.remote
                 ? `- ${source.name}: read-only Git repository ${source.remote.repository}, branch ${source.remote.branch}${source.remote.subdirectory ? `, scoped to ${source.remote.subdirectory}` : ''}, materialized at ${source.path}`
               : `- ${source.name}: ${source.path}`,
           )
-          .join('\n')}`
+          .join('\n')}${existingDocumentationGuidance(sources)}`
   const requestText = request?.trim()
     ? `\nThe user also requested:\n${request.trim()}\n`
     : ''
@@ -945,7 +1038,7 @@ export function authorPrompt(
   const screenshotText = screenshotPrompt(mode, screenshots, application, captureAuth)
   const tasks: Record<AuthorMode, string> = {
     create:
-      'Begin with read-only product discovery. Classify the product, identify its public capabilities and likely readers, map the documentation types supported by source evidence, infer the most relevant expert domain template and documentation-type playbooks, and apply audience as flavor within that combination. Compose a professional semantic navigation plan from the common site frame, selected type blocks, domain overlays, and audience ordering; include both top-navigation and left-navigation outlines, remove unsupported or duplicate destinations, and implement the result through the generator-native navigation system. Capture evidence-backed theme tokens, fonts, and public brand assets. Do not force the user to choose or know a template. When the expertise profile is clear, state it and continue; ask only when competing profiles would materially change the reader, scope, or outcomes. Before editing, present your findings, captured brand identity, prioritized documentation plan, and navigation outline as a concise progress update. That update is not a stopping point: unless an essential material choice genuinely requires a user response, continue immediately in this same run from discovery through file edits and validation. A discovery summary, coverage plan, or navigation outline by itself is an incomplete create run and must never be the final response. If material choices remain unresolved, ask for them once in one consolidated message and wait for one response; otherwise state reasonable assumptions and continue without asking. Do not ask follow-up questions unless a contradiction blocks accurate work. Save the confirmed or inferred reader and editorial decisions under `documentation` in `.doxloop/project.json`, preserving all other settings; do not persist template identifiers as requirements. Then create or improve a comprehensive documentation set for the agreed scope, apply the confirmed identity through the generator-native theme, complete factual, task, editorial, and accessibility passes, and clear every professional quality gate. Write every page to the depth in the authoring skill\'s page-depth reference: an outcome-led opening, prerequisites, complete ordered steps with exact labels and observable results, verification, evidence-backed troubleshooting, and a next step for guides; complete tables for reference; a model and its consequences for concepts; and an audience-oriented landing page with cards. Resolve every `thin-page` and `thin-procedure` validation warning before finishing. Replace every generated starter page and remove every `doxloop:starter-page` marker before finishing. Do not optimize for the minimum number of pages.',
+      'Begin with read-only product discovery. Classify the product, identify its public capabilities and likely readers, map the documentation types supported by source evidence, infer the most relevant expert domain template and documentation-type playbooks, and apply audience as flavor within that combination. Compose a professional semantic navigation plan from the common site frame, selected type blocks, domain overlays, and audience ordering; include both top-navigation and left-navigation outlines, remove unsupported or duplicate destinations, and implement the result through the generator-native navigation system. Capture evidence-backed theme tokens, fonts, and public brand assets. Do not force the user to choose or know a template. When the expertise profile is clear, state it and continue; ask only when competing profiles would materially change the reader, scope, or outcomes. Before editing, present your findings, captured brand identity, prioritized documentation plan, and navigation outline as a concise progress update. That update is not a stopping point: unless an essential material choice genuinely requires a user response, continue immediately in this same run from discovery through file edits and validation. A discovery summary, coverage plan, or navigation outline by itself is an incomplete create run and must never be the final response. If material choices remain unresolved, ask for them once in one consolidated message and wait for one response; otherwise state reasonable assumptions and continue without asking. Do not ask follow-up questions unless a contradiction blocks accurate work. Save the confirmed or inferred reader and editorial decisions under `documentation` in `.doxloop/project.json`, preserving all other settings; do not persist template identifiers as requirements. Then create or improve a comprehensive documentation set for the agreed scope, apply the confirmed identity through the generator-native theme, complete factual, task, editorial, and accessibility passes, and clear every professional quality gate. Write every page to the depth in the authoring skill\'s page-depth reference: an outcome-led opening, prerequisites, complete ordered steps with exact labels and observable results, verification, evidence-backed troubleshooting, and a next step for guides; complete tables for reference; a model and its consequences for concepts; and an audience-oriented landing page with cards. Resolve every `thin-page`, `thin-procedure`, `thin-space`, `single-page-group`, and `generic-space-name` validation warning before finishing. Replace every generated starter page and remove every `doxloop:starter-page` marker before finishing. Do not optimize for the minimum number of pages. Name top-level spaces after the product\'s reader surfaces, never a generic "Documentation" and "Reference" pair, and promote a second space only when it holds at least five substantial pages. When the product ships an English UI message catalog (for example `src/lang/en.json` or `public/intl/messages/en-US.json`), read it and quote the displayed strings for every button, tab, field, and menu you name; never write a translation key, a paraphrase such as "the add control", or a label you have not found in the catalog or the component. Write each page\'s prerequisites, cautions, and limitations in its own words for its own task: do not paste the same disclaimer, hedge, or "before you begin" block across pages, and do not fill verification blocks with restatements of the steps.',
     update:
       'Classify the request as source synchronization, a scoped content change, or transformation of existing documentation. For source synchronization, inspect product changes and update all documentation affected by reader-visible behavior, including native documentation theme configuration when product theme tokens or public brand assets changed. When this prompt includes a source-change summary, start from the listed commits and files and inspect their diffs instead of re-reading the whole source. For a requested transformation, inspect existing pages first, infer the relevant domain/type expertise and audience flavor, preserve or correct claims from configured evidence, and do not let an unrelated change summary redefine the requested scope. When pages move, a reader journey is added, or information architecture changes, compose the common frame, type blocks, domain overlays, and audience ordering into one semantic navigation plan and translate it through the generator-native navigation system. Follow the persisted documentation brief, verify changed facts and examples, complete editorial and accessibility passes, and clear every professional quality gate. Bring every page you create or rewrite to the depth in the authoring skill\'s page-depth reference and resolve its `thin-page` and `thin-procedure` validation warnings. Identify related coverage gaps and recommend additions, but leave unrelated pages and brief decisions unchanged unless the user approves broader work.',
     review:

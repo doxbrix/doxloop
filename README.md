@@ -83,6 +83,12 @@ is: Doxloop reads the site's configuration, lists its pages, and changes none
 of them. Every project you open is remembered, and the project switcher in the
 sidebar moves between them.
 
+For **Mintlify**, choose **Use existing documentation folder → Mintlify to
+Doxbrix**. Select a local folder or enter a GitHub repository, review the
+conversion, and create a new Doxbrix project. Doxloop uses the tested Doxbrix
+conversion engine and preserves the original Mintlify project. See
+[Import Mintlify documentation](docs/mintlify-import.md).
+
 ### 3. Set up the workspace
 
 The wizard walks through five steps and creates nothing until the last one.
@@ -91,9 +97,12 @@ The wizard walks through five steps and creates nothing until the last one.
    documentation project and the title readers will see, or choose **Use
    existing documentation folder** to adopt a site you already have.
 2. **Sources.** Choose **Add source**, then **Source code** for a local folder
-   or a Git repository, or **OpenAPI spec** to upload a file or paste a public
-   URL. Private repositories accept a username and a personal access token that
-   is held in memory for the session and never written to the project.
+   or a Git repository, **OpenAPI spec** to upload a file or paste a public
+   URL, or **Existing documentation** to crawl the docs site you publish today
+   so the agent can audit it and rewrite it (see
+   [Rewrite existing documentation](docs/existing-documentation.md)). Private
+   repositories accept a username and a personal access token that is held in
+   memory for the session and never written to the project.
 3. **Tools.** Pick the documentation generator (Doxbrix is recommended and
    needs no installation), the coding assistant (Codex, Claude Code, or
    Gemini), and optionally the model. If the assistant is not installed,
@@ -184,6 +193,7 @@ wizard:
 | Capability | What you get |
 | --- | --- |
 | 🔎 **Source-grounded research** | Uses code, public interfaces, tests, examples, configuration, and OpenAPI documents as evidence. |
+| 🔁 **Rewrite existing docs** | Crawls the documentation you publish today, reports coverage gaps, contradicted claims, and obsolete pages against your sources, and rewrites it with redirects from every old page. |
 | 🧭 **Plan before writing** | Proposes readers, page coverage, and navigation as an editable plan that you approve before anything is written. |
 | ✍️ **Generator-native output** | Creates the right Markdown, MDX, configuration, components, and theme for the selected generator. |
 | ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, page depth, and generator conventions on every proposal and before every deploy. |
@@ -201,7 +211,7 @@ left navigation shows:
 | Page | What you do there |
 | --- | --- |
 | **Overview** | Follow the loop from sources through plan, write, review, and deploy. See what needs your review, overall coverage, the published address, and recent activity. |
-| **Sources** | Connect and test local folders, Git repositories, and OpenAPI specifications. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
+| **Sources** | Connect and test local folders, Git repositories, OpenAPI specifications, and existing documentation sites. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
 | **Create** or **Update** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
 | **Pages** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
 | **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, ask the agent to revise, and optionally prepare a pull request branch. |
@@ -496,8 +506,10 @@ with reasons, and mixed accept/reject decisions. Rejecting remaining changes
 keeps already accepted work. A fully decided mixed proposal can be undone;
 rejected changes do not advance the source freshness baseline.
 
-New UI runs default to a small first batch: five pages, no screenshots and
-15 minutes per authoring attempt. **Run limits** and the plan review expose
+A new plan's batch follows the documentation depth you choose: Starter allows
+five pages and 15 minutes per authoring attempt; Standard twelve pages and
+45 minutes; Comprehensive forty pages and 120 minutes. Each batch allows three
+screenshots per page it may write. **Run limits** and the plan review expose
 maximum pages, screenshot artifacts and minutes. Approval refuses oversized
 plans; mark extra pages **Later** or raise the limits explicitly. Generated
 proposals outside the approved page scope or artifact limits remain in the

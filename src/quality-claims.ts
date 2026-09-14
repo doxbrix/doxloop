@@ -68,6 +68,10 @@ async function claimEvidenceText(root: string, project: DoxloopProject, entries:
   for (const entry of entries) {
     const source = byName.get(entry.source)
     if (!source) continue
+    // The crawled pages of an existing documentation site are what is being
+    // rewritten, not proof: a claim they alone support stays at the page's
+    // recorded confidence instead of being verified against itself.
+    if (sourceKind(source) === 'docs-site') continue
     if (sourceKind(source) === 'openapi') {
       try {
         const loaded = await loadOpenApiSource(root, source)

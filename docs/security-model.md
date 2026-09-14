@@ -56,6 +56,11 @@ Authoring and validation do not publish. A coding agent may still have network
 access according to its own configuration.
 
 Remote OpenAPI sources follow the [remote OpenAPI safety policy](./openapi-security.md).
+Existing documentation sites are crawled with the same host controls (public
+HTTP(S) only, no embedded credentials, private and loopback ranges refused on
+every redirect), without executing page scripts, honoring `robots.txt`, and
+within page-size and page-count limits; see
+[Rewrite existing documentation](./existing-documentation.md).
 Git repository sources are downloaded as read-only snapshots through the
 provider's read API; Doxloop never clones, fetches, commits, pushes, or changes
 hooks in a source checkout.

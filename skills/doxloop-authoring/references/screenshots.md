@@ -163,10 +163,14 @@ and `purpose` as full descriptive clauses of at least 8 characters each — for
 example `"Open the application at /"` rather than `"Open /"` — because Doxloop
 rejects terser values during manifest validation. A step without a meaningful
 image sets `capture` to `false`, `status` to `text-only`, and includes a
-specific `textOnlyReason`. Confirm each state in the browser *before* capturing
-it, because that is the check you can actually perform; you are not expected to
-open or view the saved PNG afterwards, and being unable to view an image file is
-never a reason to record a captured step as `text-only`. For an approved plan, every captured step also
+specific `textOnlyReason`. Confirm each state from the result of the action that
+produced it — a successful navigation or click is the confirmation — and take
+the screenshot straight away. Call the accessibility snapshot when the next
+action needs an element reference or when a dialog, menu, or drawer must be
+confirmed open; do not snapshot before every image as a separate check, and
+never after one. You are not expected to open or view the saved PNG afterwards,
+and being unable to view an image file is never a reason to record a captured
+step as `text-only`. For an approved plan, every captured step also
 sets `sequenceItem` to the one-based matching item in `visuals.captureSequence`;
 text-only steps omit it.
 

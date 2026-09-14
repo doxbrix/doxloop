@@ -65,6 +65,13 @@ category with a short reason.
 
 - Match commands, options, API names, UI labels, and examples to current public
   source or tests.
+- Take UI labels from the product's English message catalog when one exists
+  (`src/lang/en.json`, `public/intl/messages/en-US.json`, `locales/en.json`):
+  quote the displayed value, never the key. "Set Up Notification" is what the
+  reader sees; `Setup Notification` is the key. Never paraphrase a control
+  ("the add control") when the component names it ("Create team").
+- Write each page's prerequisites, cautions, and limitations in its own words;
+  a disclaimer or "before you begin" block copied across pages is filler.
 - Make prerequisites, defaults, limits, and compatibility explicit.
 - Distinguish verified execution, source verification, inference, and unknowns.
 - Exclude secrets, private identifiers, and internal-only details.

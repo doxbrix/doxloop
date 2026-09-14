@@ -23,6 +23,21 @@ function group(node: NavigationNode): Extract<NavigationNode, { type: 'group' }>
   return node
 }
 
+test('navigation saves preserve same-named spaces in different documentation versions', async () => {
+  const root = await scaffold()
+  const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+  const original = config.spaces[0]
+  config.versions = [{ version: 'v2', isDefault: true }, { version: 'v1' }]
+  config.spaces = [{ ...original, name: 'Guides', slug: 'latest-guides', version: 'v2' }, { ...original, name: 'Guides', slug: 'legacy-guides', version: 'v1' }]
+  await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+  const tree = await readNavigation(root)
+  expect(tree.spaces.map(space => space.version)).toEqual(['v2', 'v1'])
+  await writeNavigation(root, { fingerprint: tree.fingerprint, spaces: [...tree.spaces].reverse() })
+  const saved = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+  expect(saved.spaces.map((space: { version: string; slug: string }) => [space.version, space.slug])).toEqual([['v1', 'legacy-guides'], ['v2', 'latest-guides']])
+  expect(saved.versions).toEqual(config.versions)
+})
+
 describe('Doxbrix navigation editing', () => {
   test('reads docs.json as an editable tree with page paths and orphans', async () => {
     const root = await scaffold()
