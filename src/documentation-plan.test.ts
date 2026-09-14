@@ -220,6 +220,18 @@ describe('documentation plan workflow', () => {
     expect(ready.status).toBe('ready-for-review')
   })
 
+  test('starts a comprehensive screenshot plan without client-supplied limits', async () => {
+    const { root } = await fixture()
+    const created = await createDocumentationPlan(root, {
+      mode: 'create',
+      scope: 'comprehensive',
+      execution: { screenshots: 'enabled' },
+    })
+    expect(created.status).toBe('planning')
+    expect(created.execution.limits).toEqual({ maxPages: 40, maxScreenshots: 120, maxMinutes: 120 })
+    expect((await readDocumentationPlan(root, created.id)).execution.limits).toEqual(created.execution.limits)
+  })
+
   test('persists a planning checkpoint and accepts a structured agent proposal', async () => {
     const { root } = await fixture()
     const created = await createDocumentationPlan(root, {

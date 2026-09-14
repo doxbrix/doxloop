@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { batchLimits, defaultBatchLimits } from '../../src/batch-limits.js'
 import { batchLimitsForScope, describeBatchLimits, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileIssue, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupStepIssue } from './setup-plan'
 
 describe('setupDocumentationPlanRequest', () => {
@@ -46,7 +47,6 @@ describe('setupDocumentationPlanRequest', () => {
       model: 'gpt-5.6-sol',
       reasoning: 'high',
       screenshots: 'enabled',
-      limits: { maxPages: 40, maxScreenshots: 120, maxMinutes: 120 },
     })
   })
 
@@ -69,7 +69,6 @@ describe('setupDocumentationPlanRequest', () => {
       model: 'claude-sonnet-4-5',
       effort: 'max',
       screenshots: 'disabled',
-      limits: { maxPages: 12, maxScreenshots: 0, maxMinutes: 45 },
     })
   })
 
@@ -132,11 +131,24 @@ describe('setupStepIssue', () => {
 })
 
 describe('batchLimitsForScope', () => {
-  it('sends the depth-sized batch with the plan request so Comprehensive is not a five-page run', () => {
+  it('leaves hidden limits to the server while displaying the depth-sized batch', () => {
     const request = setupDocumentationPlanRequest({ scope: 'comprehensive', readerOutcome: '', clarificationMode: 'review', agent: 'claude', model: '', reasoning: '', effort: '', screenshots: 'enabled' })
-    expect(request.limits).toEqual({ maxPages: 40, maxScreenshots: 120, maxMinutes: 120 })
+    expect(request).not.toHaveProperty('limits')
+    expect(batchLimitsForScope(request.scope, request.screenshots)).toEqual({ maxPages: 40, maxScreenshots: 120, maxMinutes: 120 })
     expect(batchLimitsForScope('starter', 'disabled')).toEqual({ maxPages: 5, maxScreenshots: 0, maxMinutes: 15 })
     expect(batchLimitsForScope('standard', 'auto')).toEqual({ maxPages: 12, maxScreenshots: 36, maxMinutes: 45 })
     expect(describeBatchLimits(batchLimitsForScope('starter', 'enabled'))).toBe('5 pages · 15 screenshots · 15 minutes per attempt')
   })
+})
+
+// Exercise the wizard/API boundary for every depth and screenshot choice.
+describe('setup limit compatibility', () => {
+  for (const scope of ['starter', 'standard', 'comprehensive'] as const) {
+    it.each(['auto', 'enabled', 'disabled'] as const)(`${scope} with %s screenshots uses valid server defaults`, (screenshots) => {
+      const request = setupDocumentationPlanRequest({ scope, screenshots, readerOutcome: '', clarificationMode: 'review', agent: '', model: '', reasoning: '', effort: '' })
+      expect(request).not.toHaveProperty('limits')
+      const limits = defaultBatchLimits(request.scope, request.screenshots !== 'disabled')
+      expect(batchLimits(limits)).toEqual(batchLimitsForScope(scope, screenshots))
+    })
+  }
 })

@@ -1,3 +1,5 @@
+import { defaultBatchLimits, type BatchLimits, type BatchScope } from '../../src/batch-limits.js'
+
 export interface SetupPlanForm {
   scope: 'starter' | 'standard' | 'comprehensive'
   readerOutcome: string
@@ -13,21 +15,11 @@ export interface SetupPlanForm {
 
 export const DEFAULT_READER_OUTCOME = 'Understand the product, get started, and complete the primary supported workflows.'
 
-export interface SetupBatchLimits { maxPages: number; maxScreenshots: number; maxMinutes: number }
+export type SetupBatchLimits = BatchLimits
 
-/**
- * The run limits a plan gets for a documentation depth. Mirrors the server's
- * `defaultBatchLimits` so the wizard's Review step shows the batch the plan
- * will actually be held to.
- */
-export function batchLimitsForScope(scope: 'starter' | 'standard' | 'comprehensive' | 'custom', screenshots: 'auto' | 'enabled' | 'disabled'): SetupBatchLimits {
-  const base = scope === 'starter'
-    ? { maxPages: 5, maxMinutes: 15 }
-    : scope === 'comprehensive'
-      ? { maxPages: 40, maxMinutes: 120 }
-      : { maxPages: 12, maxMinutes: 45 }
-  // Three captures per page, as the server's defaultBatchLimits allows.
-  return { ...base, maxScreenshots: screenshots === 'disabled' ? 0 : base.maxPages * 3 }
+/** Use the server's defaults when displaying limits for the selected depth. */
+export function batchLimitsForScope(scope: BatchScope, screenshots: 'auto' | 'enabled' | 'disabled'): SetupBatchLimits {
+  return defaultBatchLimits(scope, screenshots !== 'disabled')
 }
 
 export function describeBatchLimits(limits: SetupBatchLimits): string {
@@ -136,6 +128,7 @@ export function setupDocumentationPlanRequest(form: SetupPlanForm) {
     ...(form.agent === 'codex' && form.reasoning ? { reasoning: form.reasoning } : {}),
     ...(form.agent === 'claude' && form.effort ? { effort: form.effort } : {}),
     screenshots: form.screenshots,
-    limits: batchLimitsForScope(form.scope, form.screenshots),
+    // Setup has no limit overrides. Let the running server choose its defaults
+    // so a cached wizard cannot send limits that its server does not support.
   }
 }
