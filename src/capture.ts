@@ -384,6 +384,24 @@ export async function ensurePlaywright(): Promise<PlaywrightModule> {
   return playwright
 }
 
+/**
+ * The managed Playwright when it is already installed, without installing
+ * anything: quick checks (such as the sign-in probe) must never start a
+ * download of a few hundred MB, so they fall back when this is undefined.
+ */
+export async function loadInstalledPlaywright(): Promise<PlaywrightModule | undefined> {
+  const directory = toolsDir()
+  const entry = join(directory, 'node_modules', 'playwright', 'index.js')
+  if (!(await pathExists(entry)) || !(await pathExists(join(directory, '.chromium-ready')))) return undefined
+  try {
+    const loaded = (await import(pathToFileURL(entry).href)) as PlaywrightModule | { default: PlaywrightModule }
+    const playwright = 'chromium' in loaded ? loaded : loaded.default
+    return playwright?.chromium ? playwright : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function npmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm'
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { replayRun } from './proposal-replay.js'
 import { auditDocumentation, backfillEvidence } from './workspace-tools.js'
 
 import { mkdir, readFile } from 'node:fs/promises'
@@ -87,6 +88,7 @@ import {
   parseDesignReference,
   parseSource,
   parseSpec,
+  projectDefaultModel,
   resolveSeparateProjectLayout,
   saveDefaultAgent,
   scaffoldProject,
@@ -204,6 +206,8 @@ async function main(): Promise<number> {
       return proposalCommand(args, cwd)
     case 'pages':
       return pagesCommand(args, cwd)
+    case 'replay':
+      return replayCommand(args, cwd)
     case 'capture': {
       const root = await findProjectRoot(cwd)
       await capture({ root, urls: args.positionals })
@@ -775,7 +779,7 @@ async function authorCommand(
 
   const designReferences = flags(args, 'reference').map(parseDesignReference)
   if (mode !== 'review') await addDesignReferences(root, designReferences)
-  const model = flag(args, 'model')
+  const model = flag(args, 'model') ?? projectDefaultModel(project, selectedAgent)
   const reasoning = parseReasoning(flag(args, 'reasoning'))
   const effort = parseClaudeEffort(flag(args, 'effort'))
   const screenshots = screenshotIntent(args)
@@ -879,6 +883,18 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
   if (run.status === 'failed') throw new DoxloopError(run.error ?? 'The proposal revision failed.')
   process.stdout.write(`\nDocumentation proposal ${run.id} is ${run.status}.\n`)
   return 0
+}
+
+async function replayCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const target = args.positionals[0]
+  if (!target || args.positionals.length > 1) throw new UsageError('Usage: doxloop replay <run-directory> [--keep] [--format text|json]')
+  const result = await replayRun(resolve(cwd, target), {
+    keep: booleanFlag(args, 'keep'),
+    log: (line) => { if (outputFormat(flag(args, 'format')) !== 'json') process.stdout.write(`${line}\n`) },
+  })
+  if (outputFormat(flag(args, 'format')) === 'json') process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+  else if (booleanFlag(args, 'keep')) process.stdout.write(`Working copy kept at ${result.workspace}\n`)
+  return result.after.errors > 0 ? 1 : 0
 }
 
 async function pagesCommand(args: ParsedArgs, cwd: string): Promise<number> {
@@ -1028,7 +1044,7 @@ async function syncCommand(args: ParsedArgs, cwd: string): Promise<number> {
     const trigger = flag(args, 'trigger')
     const request = flag(args, 'request')
     const agent = parseAgent(flag(args, 'agent'))
-    const model = flag(args, 'model')
+    const model = flag(args, 'model') ?? projectDefaultModel(project, agent ?? project.defaultAgent)
     const reasoning = parseReasoning(flag(args, 'reasoning'))
     const effort = parseClaudeEffort(flag(args, 'effort'))
     const hasManualAuthoring = Boolean(request || agent || model || reasoning || effort || booleanFlag(args, 'screenshots') || booleanFlag(args, 'no-screenshots'))
@@ -1582,6 +1598,27 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'replay') {
+    return `Usage: doxloop replay <run-directory> [options]
+
+Re-run the end-of-generation checks over a copy of a recorded run's workspace:
+capture status from the images on disk, the tolerant screenshot check, the
+deterministic post-pass, starter cleanup, and the validation that "Accept all"
+performs. The run folder itself is never modified; no agent is started.
+
+Use it after changing any of those steps, and to turn a run that ended blocked
+into a regression check. Run folders live under .doxloop/runs/<run-id>.
+
+Exit status:
+  0   the accept check would pass
+  1   errors remain after every repair
+
+Options:
+  --keep                   Leave the working copy in place and print its path
+  --format <text|json>     Output format (default: text)
+  --cwd <directory>        Resolve the run directory from here
+`
+  }
   if (command === 'coverage') {
     return `Usage: doxloop coverage [options]
 
@@ -1778,6 +1815,7 @@ Author:
 Maintain:
   check      Report documentation stale since the last source change
   coverage   Report source health, coverage, and evidence precision
+  replay     Re-run the end-of-generation checks over a recorded run
   sync       Set up and run automatic documentation maintenance
 
 Visual:

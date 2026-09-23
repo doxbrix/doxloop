@@ -7,6 +7,7 @@ import { pathExists } from './fs.js'
 import { loadPages, loadProject } from './project.js'
 import { lineHunks } from './text-diff.js'
 import type {
+  AgentUsage,
   DeploymentRecord,
   DoxloopProject,
   HistoryChangedPage,
@@ -42,6 +43,8 @@ export interface FinishRequestInput {
   linesAdded?: number
   linesRemoved?: number
   error?: string | undefined
+  /** Token usage across every agent session the request ran, when the agent reported it. */
+  usage?: AgentUsage | undefined
 }
 
 /** Open a request row before the agent starts, so an interrupted run is still visible. */
@@ -91,7 +94,15 @@ export async function finishRequest(
                 validation_pages = ?,
                 validation_errors = ?,
                 validation_warnings = ?,
-                error_message = ?
+                error_message = ?,
+                input_tokens = COALESCE(?, input_tokens),
+                output_tokens = COALESCE(?, output_tokens),
+                cache_read_tokens = COALESCE(?, cache_read_tokens),
+                cache_creation_tokens = COALESCE(?, cache_creation_tokens),
+                cost_usd = COALESCE(?, cost_usd),
+                agent_turns = COALESCE(?, agent_turns),
+                agent_sessions = COALESCE(?, agent_sessions),
+                max_context_tokens = COALESCE(?, max_context_tokens)
           WHERE id = ?`,
       )
       .run(
@@ -105,6 +116,7 @@ export async function finishRequest(
         input.validation?.errors ?? null,
         input.validation?.warnings ?? null,
         text(input.error),
+        ...usageColumns(input.usage),
         id,
       )
   })
@@ -241,8 +253,10 @@ export async function recordSyncRun(
         `INSERT INTO requests (id, created_at, finished_at, duration_ms, kind, trigger,
            request_text, agent, model, reasoning_effort, status, pages_changed, lines_added,
            lines_removed, validation_pages, validation_errors, validation_warnings,
-           source_summary, stale_pages_count, error_message, run_dir)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           source_summary, stale_pages_count, error_message, run_dir, input_tokens,
+           output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, agent_turns,
+           agent_sessions, max_context_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            finished_at = excluded.finished_at,
            duration_ms = excluded.duration_ms,
@@ -259,7 +273,15 @@ export async function recordSyncRun(
            error_message = excluded.error_message,
            request_text = COALESCE(excluded.request_text, requests.request_text),
            agent = COALESCE(excluded.agent, requests.agent),
-           model = COALESCE(excluded.model, requests.model)`,
+           model = COALESCE(excluded.model, requests.model),
+           input_tokens = COALESCE(excluded.input_tokens, requests.input_tokens),
+           output_tokens = COALESCE(excluded.output_tokens, requests.output_tokens),
+           cache_read_tokens = COALESCE(excluded.cache_read_tokens, requests.cache_read_tokens),
+           cache_creation_tokens = COALESCE(excluded.cache_creation_tokens, requests.cache_creation_tokens),
+           cost_usd = COALESCE(excluded.cost_usd, requests.cost_usd),
+           agent_turns = COALESCE(excluded.agent_turns, requests.agent_turns),
+           agent_sessions = COALESCE(excluded.agent_sessions, requests.agent_sessions),
+           max_context_tokens = COALESCE(excluded.max_context_tokens, requests.max_context_tokens)`,
       )
       .run(
         run.id,
@@ -283,6 +305,7 @@ export async function recordSyncRun(
         run.stalePages.length,
         text(run.error),
         text(context.runDir),
+        ...usageColumns(run.usage),
       )
 
     const upsertPage = database.prepare(
@@ -476,7 +499,9 @@ export async function listRequests(root: string, limit = 20): Promise<HistoryReq
       .prepare(
         `SELECT id, created_at, finished_at, duration_ms, kind, trigger, request_text, agent,
                 model, status, pages_changed, lines_added, lines_removed, validation_errors,
-                validation_warnings, source_summary, error_message
+                validation_warnings, source_summary, error_message, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, cost_usd, agent_turns, agent_sessions,
+                max_context_tokens
            FROM requests
           ORDER BY created_at DESC
           LIMIT ?`,
@@ -720,6 +745,48 @@ function toRequest(row: unknown): HistoryRequest {
       record.validation_warnings === null ? undefined : Number(record.validation_warnings),
     sourceSummary: optional(record.source_summary),
     error: optional(record.error_message),
+    usage: usageFromRow(record),
+  }
+}
+
+/** The eight usage columns in table order, all null when the agent reported no usage. */
+function usageColumns(usage: AgentUsage | undefined): Array<number | null> {
+  if (!usage) return [null, null, null, null, null, null, null, null]
+  return [
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens,
+    usage.cacheCreationTokens,
+    usage.costUsd ?? null,
+    usage.turns,
+    usage.sessions,
+    usage.maxContextTokens,
+  ]
+}
+
+/** Rebuild the usage from a request row; undefined when no usage was ever recorded for it. */
+function usageFromRow(record: Record<string, unknown>): AgentUsage | undefined {
+  const count = (value: unknown): number | undefined =>
+    value === null || value === undefined ? undefined : Number(value)
+  const input = count(record.input_tokens)
+  const output = count(record.output_tokens)
+  const cacheRead = count(record.cache_read_tokens)
+  const cacheCreation = count(record.cache_creation_tokens)
+  if (input === undefined && output === undefined && cacheRead === undefined && cacheCreation === undefined) {
+    return undefined
+  }
+  const cost = count(record.cost_usd)
+  return {
+    inputTokens: input ?? 0,
+    outputTokens: output ?? 0,
+    cacheReadTokens: cacheRead ?? 0,
+    cacheCreationTokens: cacheCreation ?? 0,
+    totalTokens: (input ?? 0) + (output ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0),
+    ...(cost !== undefined ? { costUsd: cost } : {}),
+    turns: count(record.agent_turns) ?? 0,
+    sessions: count(record.agent_sessions) ?? 1,
+    maxContextTokens: count(record.max_context_tokens) ?? 0,
+    durationMs: count(record.duration_ms) ?? 0,
   }
 }
 

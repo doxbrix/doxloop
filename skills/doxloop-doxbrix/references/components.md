@@ -155,6 +155,4 @@ For standalone API blocks:
 </ResponseExample>
 ```
 
-Never invent a component outside this catalog. After adding a rich component,
-inspect that component in `doxloop preview`; balanced tags alone do not prove
-that its attributes or content are correct.
+Never invent a component outside this catalog.

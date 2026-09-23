@@ -387,6 +387,68 @@ description: Retrieve one project.
     ).toHaveLength(0)
   })
 
+  test('asks for one summary-or-description and one example suggestion per endpoint, none when a request sample is shown', async () => {
+    const root = await fixture()
+    const endpoint = (path: string, attributes: string) => `<ApiEndpoint method="POST" path="${path}" baseUrl="https://memos.example.com"${attributes}>
+<Param name="attachment" in="body" type="Attachment" required>Attachment metadata.</Param>
+<Param name="attachment_id" in="body" type="string">Optional ID.</Param>
+<Response status={200} contentType="application/json" description="Created">
+{ "name": "attachments/a1" }
+</Response>
+</ApiEndpoint>`
+    await writeFile(
+      join(root, 'index.mdx'),
+      `---
+title: Attachment API
+description: Create attachments.
+---
+
+## CreateAttachment
+
+${endpoint('/api/v1/attachments', ' summary="Create an attachment"')}
+
+\`\`\`bash
+# Create one attachment
+curl -X POST 'https://memos.example.com/api/v1/attachments' -H 'Authorization: Bearer <token>'
+\`\`\`
+
+## UploadAttachment
+
+${endpoint('/api/v1/attachments:upload', ' description="Uploads in chunks."')}
+
+## DeleteAttachment
+
+${endpoint('/api/v1/attachments/{attachment}', '')}
+`,
+    )
+
+    const result = await validateProject(root)
+    const issues = result.issues.filter((issue) => issue.code === 'api-endpoint-description' || issue.code === 'api-endpoint-param-example')
+    expect(issues.map((issue) => [issue.code, issue.message])).toEqual([
+      ['api-endpoint-param-example', 'API endpoint 2 parameters "attachment", "attachment_id" should include a verified example for the generated request.'],
+      ['api-endpoint-description', 'API endpoint 3 should include a summary attribute.'],
+      ['api-endpoint-param-example', 'API endpoint 3 parameters "attachment", "attachment_id" should include a verified example for the generated request.'],
+    ])
+  })
+
+  test('does not read a regular expression in inline code or prose as a broken link', async () => {
+    const root = await fixture()
+    await writeFile(
+      join(root, 'index.mdx'),
+      `---
+title: Attachment IDs
+description: ID format.
+---
+
+IDs match \`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,34}[a-zA-Z0-9])?$\`.
+
+Outside code the same pattern [a-zA-Z0-9]([a-zA-Z0-9-]{0,34}[a-zA-Z0-9]) is still not a link.
+`,
+    )
+    const result = await validateProject(root)
+    expect(result.issues.filter((issue) => issue.code === 'broken-link' || issue.code === 'invalid-link')).toEqual([])
+  })
+
   test('validates Doxbrix brand colors and local assets', async () => {
     const root = await fixture()
     const configPath = join(root, 'docs.json')

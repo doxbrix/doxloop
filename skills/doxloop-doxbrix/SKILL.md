@@ -5,18 +5,22 @@ description: Author and maintain documentation in native Doxbrix format, includi
 
 # Doxloop Doxbrix Format
 
-Produce documentation that renders natively in Doxbrix. Use this skill together
-with `$doxloop-authoring`; that skill owns discovery, consultation, coverage, and
-writing quality.
+Produce documentation that renders natively in Doxbrix. Use it together with
+`$doxloop-authoring`, which owns what to write; this skill owns how Doxbrix
+expresses it. Translate the shared semantic top/left navigation plan into native
+Doxbrix spaces, groups, and page entries; preserve the approved information architecture.
 
 ## Read before editing
 
-1. Read `.doxloop/project.json` and confirm `generator` is `doxbrix` or absent.
+1. In a batch, use the generator and target in the supplied prompt and plan
+   slice. Otherwise read `.doxloop/project.json` and confirm `generator` is
+   `doxbrix` or absent.
 2. Read [references/manifest.md](references/manifest.md).
 3. Read [references/components.md](references/components.md) before authoring
    rich layouts.
-4. Inspect existing `docs.json` and pages for established theme, terminology,
-   paths, and component patterns.
+4. In a batch, use the assigned page paths and the supplied terminology. Read
+   `docs.json` only if assigned site setup. Outside batches, inspect existing
+   configuration and pages for established patterns.
 
 When creating or changing HTTP API reference, also read
 [references/api-endpoints.md](references/api-endpoints.md) and follow its
@@ -27,7 +31,8 @@ skill instead.
 
 ## Author native Doxbrix content
 
-- Write `.mdx` when using Doxbrix components.
+- Write every new page as `.mdx`, never `.md`, whether or not it uses
+  components; an existing page keeps its file name.
 - Include `title` and an outcome-focused `description` in frontmatter.
 - Use standard Markdown for ordinary prose.
 - Use a rich component only when it communicates the content more clearly.
@@ -50,8 +55,7 @@ Do not emit Docusaurus directives such as `:::tip`, Docusaurus theme imports, or
 
 ## Compose professional pages
 
-Doxbrix renders rich pages; use that to make every page complete and
-scannable, following the authoring skill's page-depth reference:
+Map the authoring skill's page-depth contract onto Doxbrix components:
 
 - Landing page: an opening value statement, a `<CardGroup>` with one card per
   audience, a capability list, a `<Mermaid>` lifecycle diagram, and a closing
@@ -70,11 +74,8 @@ Use components only where they clarify; never as decoration.
 
 ## Maintain navigation
 
-Implement the semantic top/left navigation plan composed by
-`$doxloop-authoring`. Map major reader surfaces to Doxbrix spaces or supported
-site links and map left-navigation groups to nested `docs.json` nodes. Preserve
-the planned labels, order, hierarchy, and routes unless Doxbrix requires a
-documented adaptation; do not copy empty template groups.
+Map major reader surfaces to Doxbrix spaces or supported site links and
+left-navigation groups to nested `docs.json` nodes; do not create empty groups.
 
 Treat `docs.json` at the project root as the canonical manifest for new native
 Doxbrix projects. Existing projects with a non-empty `contentDir` keep the
@@ -87,8 +88,8 @@ Preserve supported link, label, divider, and API nodes.
 
 ## Apply captured branding
 
-Use the identity and any confirmed external design profile gathered through
-`$doxloop-authoring` and [references/manifest.md](references/manifest.md):
+Write the confirmed application identity as [references/manifest.md](references/manifest.md)
+describes:
 
 - write colors, mode, fonts, logos, favicon, and backgrounds under `theme`;
 - copy public logos and licensed local font files into the documentation content
@@ -98,9 +99,3 @@ Use the identity and any confirmed external design profile gathered through
 
 Do not invent missing brand values or reference files outside the documentation
 project.
-
-## Verify
-
-Run `doxloop test` and `doxloop preview --open`. Confirm rich blocks, navigation,
-page title, description, code highlighting, and responsive layout render in the
-Doxbrix preview.

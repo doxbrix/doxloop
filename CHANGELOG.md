@@ -5,6 +5,319 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+### Changed
+
+- **Docs get the spaces the plan asks for again.** Since authoring moved to
+  batches, Doxloop builds the navigation, but plan sections never said which
+  space they belong to, so most pages landed in the first space and planned
+  spaces were dropped as empty (a 23 Sept Memos plan with three spaces came
+  out with one and a half). Each plan section now names its space, older
+  plans get one by name ("APIs" → "API & integrations"), and missing spaces
+  are created in the plan's order. Replaying that run gives all three.
+- **Setup checks what used to fail a first run.** The wizard picks a signed-in
+  assistant, says plainly when one is signed out (with the command to fix it
+  or a one-click switch), starts at reasoning "high" with screenshots on,
+  refuses reasoning values the model does not offer, and keeps unfinished
+  answers as a draft (never passwords or tokens).
+- **Sign-in pages are detected.** "Check page" opens the app in a headless
+  browser, so a single-page app that sends visitors to `/auth` or
+  `/_/#/login` is reported, sign-in is switched on and its route filled in;
+  "Continue without signing in" stays available and tells the planner not to
+  ask for credentials. Hash-routed app URLs such as `https://host/_/#/` are
+  accepted again.
+- **Plans and runs fail with the agent's real reason.** Planning and retries
+  check the assistant's sign-in first; a failed plan shows the agent's own
+  error and offers "Retry with" another assistant. Codex and Claude sessions
+  run with only Doxloop's tools, and the computer stays awake while a job runs
+  (`DOXLOOP_KEEP_AWAKE=0` turns it off).
+- **Quieter, more honest screens.** Form help moved into info tooltips; the
+  plan page warns when few guides will have screenshots and gives a rough
+  time and token estimate; review counts agree, coverage reads "Screenshots
+  in 2 of 41 guides", and the apply dialog closes when it is done. The live
+  log hides colour codes, raw JSON replies, and stdin noise.
+- **Consistent output.** Pages are always `.mdx` for Doxbrix, sections are not
+  split into one-page duplicate groups, regex text is no longer read as a
+  link, a leftover starter page is removed instead of rewritten, and missing
+  parameter examples no longer start agent fix sessions when the endpoint
+  already has a request sample.
+
+- **A batch that writes nothing is no longer reported as finished.** On 21
+  Sept 2026 a 34-page Uptime Kuma run wrote 16 pages: five of its nine batch
+  sessions hung waiting for the model, were stopped at their 16-minute cap,
+  and — because Codex exits 0 when stopped — were counted as complete. The
+  final check then deleted every link to the 18 unwritten pages and the run
+  reported success. A batch is now judged by which planned files it actually
+  wrote (compared with their content before the session): missing pages are
+  retried once in a fresh session, and pages still missing fail the run with
+  their names, so "Retry" continues with only the unfinished pages.
+- **A silent session is stopped after six minutes, not sixteen.** Every
+  session has an inactivity watchdog: when the agent prints nothing for
+  `DOXLOOP_AGENT_IDLE_MINUTES` (default 6, 0 disables it), the session is
+  stopped and the batch retries in a fresh session instead of waiting for
+  the wall-clock cap. Writers are also told to save each page as soon as it
+  is complete, so a stopped session keeps the pages it finished.
+- **Two batch sessions at a time by default, not three.** All three model
+  streams in flight hung at the same second in the run above;
+  `DOXLOOP_AUTHORING_PARALLEL` still raises the number.
+- **Accepting one file of a new site's proposal works.** Accepting a single
+  page before the proposal's navigation and starter-page replacements failed
+  with "starter-content" and "unnavigated-page" errors on files the reviewer
+  had not accepted yet. Errors that the not-yet-accepted part of the same
+  proposal resolves no longer block; the rest still do.
+- **Answering a plan's questions no longer regenerates the whole plan.** A
+  revision used to return the entire plan again (five minutes to apply three
+  answers on a 34-page plan). The reviser now returns only the pages it
+  changed as a patch that Doxloop merges into the existing plan, answered
+  questions are removed deterministically, and an unreachable capture
+  application is a warning for a revision rather than a failed job.
+- **Broken links to pages the same proposal still adds do not block a
+  partial accept either**, and the authoring progress never reads "36 of
+  32": the count is capped at the planned total. Writers are told to create
+  pages as whole-file adds and rewrite existing pages whole, after
+  line-level hunks against long prose failed Codex's patch verification in
+  every real run.
+- **Smaller evidence packs.** Per-batch packs are capped near 60 KB
+  (fewer, shorter excerpts per page) after 85–143 KB packs made up most of
+  each session's uncached input.
+- **An update request is triaged before any research runs.** On 17 Sept
+  2026 a one-line request to add icons to the sidebar ran the same research
+  as a product-wide create run: a product audit and three audits of the
+  crawled Vikunja docs, five minutes and 567k tokens, before planning even
+  started, because the research sessions were chosen from the project
+  configuration alone. Now the request decides: a navigation, icon, ordering,
+  branding, or metadata request researches nothing and is planned from the
+  current navigation in one session; a request that names existing pages
+  audits only the product surface behind them and skips the existing-site
+  audit and the application exploration; a product-wide request runs the
+  full research as before. Clear cases are decided from the request text; an
+  ambiguous one gets a short triage session that reads nothing, and when that
+  fails the full research runs. The decision is kept on the plan and shown
+  first among the review advisories. A navigation-only plan carries the exact
+  change in a new `workspaceInstructions` field, which generation applies in
+  one short session after the pages are written, so a plan whose pages are
+  all preserved still does the approved work.
+- **Research briefs are reused across plans on unchanged sources.** A second
+  update on the same source snapshot used to redo every research session.
+  The brief key no longer includes the plan id, so the newest plan's product
+  and existing-documentation briefs are borrowed (and copied under the new
+  plan) when the sources, capture intent, agent, and model match; the
+  application brief stays plan-local because it names captures saved under
+  its own plan. A page-scoped audit is keyed by its pages and also accepts a
+  full audit of the same sources.
+- **Generation runs three batches at a time again, and the run does less
+  repeated work.** A 40-page run measured on 16 Sept 2026 wrote 12 pages in
+  25 minutes because batches had gone back to running one after another and
+  every batch redid the same research. Now: the writer sessions run up to
+  three at a time (`DOXLOOP_AUTHORING_PARALLEL`, default 3); the planning
+  stage's screenshots are adopted even when the browser tool saved them at the
+  project root instead of the plan's capture directory (before, every one of
+  them was silently re-captured); missing captures are taken in a few pooled
+  browser sessions of several guides each instead of one sign-in per guide,
+  and a capture session that stops no longer aborts the run before any page
+  is written; Doxloop signs in with the saved credentials itself before
+  leaving a login-gated entry screen to the agent; evidence packs now carry
+  the research findings for each page (linked through the plan's
+  capabilities), anchor a cited file on the quoted label, and pick the label
+  catalog entries about the page instead of the file's first 140 lines;
+  planning cites two to four line-numbered evidence files per page; and the
+  writer is told which directories its evidence lives in and to keep tests,
+  fixtures, migrations, generated bundles, other-language catalogs and
+  lockfiles out of its searches.
+- **Doxloop owns the metadata; agents own page bodies and images.** The
+  evidence map is now Doxloop's record: an agent-written evidence file is
+  input — its claims are kept, its source paths only where the file exists,
+  and the plan's citations plus the source files the session actually opened
+  (from its tool calls) are always present; a `verified` over no real path
+  becomes `inferred`. A writer session's copy of the screenshot manifest is
+  never merged back — the manifest belongs to the capture stage and is
+  decided from the images on disk. A plan's `captureIds` that name no image
+  the application research saved are blanked at planning time with a note,
+  instead of being treated as done. And the last three hard failures after
+  writing — a page outside the plan, a page or screenshot count over the
+  approved batch, a page attributed to a source scoped to another route —
+  are now review notes on the proposal (the stray attribution is removed
+  from the evidence map), not a discarded run.
+- **A run that ends "generated" is one the reviewer can apply.** The
+  validation that "Accept all" performs now runs as the last step of
+  generation, after Doxloop's own repairs: navigation and frontmatter,
+  links, embeds of images that no longer exist, navigation entries for pages
+  that do not, starter pages the plan superseded, and unplanned pages the
+  writer left outside the navigation. What cannot be repaired is shown on the
+  proposal; nothing waits for the click to fail. Images a check sets aside
+  are moved to `.doxloop/quarantine/` inside the run instead of deleted, so a
+  wrong downgrade costs a note, never the picture. `doxloop replay
+  <run-directory>` re-runs exactly this pipeline over a copy of a recorded
+  run's workspace in seconds, so a change to any of these steps is verified
+  against real manifests and pages before the next half-hour run.
+- **A proposal no longer loses its screenshots over bookkeeping.** A verified
+  manifest step whose image exists but that lacks a `target` (every capture
+  reused from planning) or `alt` counted as a defect: a run retook thirteen
+  good images, then the acceptance check downgraded them all, deleted the
+  PNGs, and left the landing page with a broken image link the proposal could
+  not be applied over. Doxloop now fills `target` from the step's action and
+  `alt` from its expected state; only a missing image is a defect. A generated
+  starter page the plan did not replace is removed in the final check instead
+  of being handed to a fix session that rewrote it into an unnavigated page.
+- **Capture status is decided from the image on disk, not from the agent's
+  word.** Capture sessions had recorded `status: "captured"`, which is not a
+  manifest status, so every image they took counted as a defect: a real run
+  retook thirteen screenshots it already had (5.5 minutes, 9.4M tokens) and
+  still ended with three invalid rows. After every capture and retake session
+  Doxloop now verifies each step whose PNG exists at the recorded path, is at
+  least 320×180 and is not blank, and resets any other claimed capture to
+  planned with the reason in the log; the capture prompt also names the four
+  allowed statuses.
+- **Mechanical sessions think less.** Capture, fix-round, and retake sessions
+  run at low reasoning effort (`DOXLOOP_SUPPORT_EFFORT`); writers keep the
+  plan's effort, or `DOXLOOP_AUTHORING_EFFORT` when set. On a real run 86% of
+  the output tokens — and, at ~200 tokens a second, most of the wall time —
+  were hidden reasoning, and a session that adds a code-fence language or
+  signs in and takes a picture gains nothing from it.
+- **Writers no longer re-read the same files every batch.** The skill
+  references every batch needs (editorial style, page depth, the evidence-map
+  section, the generator's component and manifest syntax, screenshots when
+  captures are on) are inlined once at the start of the writer prompt as a
+  stable prefix the prompt cache serves; each batch's evidence file arrives
+  pre-seeded with an entry per page from the plan's citations; and the
+  contract carries the titles and icons of the pages already written. A real
+  run spent about 120 turns on those reads across ten batches. Unlabeled code
+  fences get the `text` language from the post-pass instead of a fix session.
+- **A link to a page another batch has not written yet is not a defect.** The
+  per-batch check used to send it to a fix session, which removed the link
+  — a page linking to the guide written a minute later lost the link for
+  good. Those links are checked once at the end of the run, and the
+  navigation spaces the first batch creates for later sections are no longer
+  pruned between batches.
+- **Standard and comprehensive plans have no page cap.** The 12- and 40-page
+  defaults were back; a comprehensive plan for a product with more screens was
+  silently trimmed to forty. A reviewer can still set a cap on the plan
+  review's batch-limits panel.
+
+- Planning now saves reusable screenshots with state and label evidence. Approved
+  writers embed saved images; missing states use separate capture sessions.
+  Evidence packs resolve source symbols and translation keys and reuse planning
+  findings. New plans use bounded scope and meaningful images instead of a fixed
+  screenshot count per page type.
+- Planning and generation share a persistent token/cost ledger across retries. No limit applies unless `sync.budget.maxUsd`, `DOXLOOP_MAX_USD` or `DOXLOOP_MAX_TOKENS` is set explicitly.
+  Quota exhaustion stops scheduling, child crashes can retry, and completed
+  writing is retained separately from validation repairs. See
+  [generation performance](docs/generation-performance.md) for defaults and overrides.
+
+- **The live log shows when each step happened and what the agent is doing
+  while it is quiet.** Every line a run writes now carries the local time it
+  arrived, in the control center and in the full log file, so the time each
+  step took can be read off the log. A tool call that took longer than a
+  second shows its duration when it finishes. A stretch with no output gets a
+  progress line every 30 seconds naming the current phase: waiting for the
+  agent's first response, thinking, writing a long reply (with how much has
+  streamed so far), or waiting for a named tool call to finish. A planning
+  session that thought for three minutes and then streamed a 90 KB plan used
+  to show nothing after "Using ToolSearch" and read as a hang; the same run
+  now reports its progress. Tool lookups also show what was looked up.
+
+- **A finished proposal no longer arrives with errors that block applying
+  it.** Three causes were fixed. Doxloop's navigation repair added every page
+  to the first space in docs.json, so a plan with "Guides", "Self-hosting",
+  and "API" spaces left the last two empty; pages now go to the space their
+  plan section or path names, and a space nothing landed in is removed. A
+  planned page written over a starter file (the landing page as the site's
+  index) is now recognised there, so links to its planned path are rewritten
+  to the file that exists instead of staying broken. And the end-of-run check
+  now sweeps the whole workspace, not only the planned pages: a link that
+  resolves to no page becomes plain text, and any remaining error in a starter
+  page or docs.json gets one fix session. The "not applied" message now lists
+  only the errors that block, not every depth warning.
+- **Batched authoring sessions sign in with saved credentials.** The
+  per-batch prompts never carried the sign-in handling the old single-session
+  prompt had, so a project with saved credentials still stopped at the login
+  page and recorded every authenticated screenshot step as text-only (28 of 41
+  planned captures in one run). Every batch, fix, and retake session now gets
+  the capture and sign-in instructions, and is told that a redirect to the
+  sign-in page is not a blocker while sign-in material is available.
+- **No page cap for standard and comprehensive plans.** New plans were capped
+  at 12 or 40 pages with no way to change it before planning. Standard and
+  comprehensive scopes now have no page limit: the planner is told the
+  evidence sets the size, and the wizard shows "No page limit". A cap can
+  still be set on the plan review. Starter plans stay at five pages.
+- **Depth fixes stop padding.** The fix session for thin-page warnings now
+  adds only evidence-backed parts, leaves a complete page alone and says so,
+  and never fills a page with generic advice, restated steps, or demo data.
+  The authoring skill also states that what the capture application shows is
+  fixture state, so pages describe the reader's own project instead of a demo
+  route id or task name.
+- **A resumed run shows the pages it kept.** The authoring progress counter
+  started at "0 of N" on resume and only ever reached the pages the fix
+  sessions touched, which read as a run starting from scratch. Pages the run
+  found finished now count as done from the start.
+- **The end-of-run screenshot check no longer crashes with `EISDIR`.** A
+  planned page path such as `guides/manage-tasks` names both the page file
+  and the directory holding its captures; the check read the directory as the
+  page and the whole run failed at its last step. Only files are read now.
+- **The screenshot retake session can start again.** The recorded session
+  and saved credentials were removed before the retake session ran, so its
+  capture browser failed to initialise every time; they are now kept until
+  the retake has finished.
+- **Planning runs as parallel research sessions plus one synthesis session.**
+  Instead of one session that read the sources, browsed the application,
+  audited every crawled page, and then wrote the plan, Doxloop now starts
+  short research sessions, up to four at a time (`DOXLOOP_PLANNING_PARALLEL`):
+  a product-surface audit, an application exploration when screenshots are
+  wanted, and one existing-documentation audit per twenty crawled pages. Each
+  returns a compact brief that is saved under the plan, and one further
+  session writes the plan from the briefs without browsing or re-reading. The
+  application session works within a budget of thirty browser calls. A
+  retried plan reruns only the briefs that are missing. `DOXLOOP_PLANNING_STAGED=0`
+  restores the single-session planner.
+- **Planning prompts and replies are much smaller.** The deterministic source
+  inventory the planner receives on every turn is now grouped text (about 10k
+  characters for a mid-sized product instead of 120k characters of JSON), with
+  regex hits on code lines summarised per file; the planner is told not to
+  read the authoring skill files; the corrective pass after a failed planning
+  gate returns only the pages it changed as a patch that Doxloop merges by
+  page id, instead of the whole plan again; and existing-page dispositions
+  list snapshot paths only, with titles and URLs filled in from the snapshot.
+- **A plan reply that stops short of its closing brackets no longer fails the
+  run.** Codex returned a 60k-character plan twice with the final `]}` missing,
+  and both attempts were rejected as "not a valid documentation-plan JSON
+  object". Doxloop now closes a reply that ends on a completed object or array
+  (a stray closing tag after it is ignored), reads the plan, and reports the
+  fix as an advisory on the plan review. A reply that is cut off inside a
+  value is still rejected, and the retry prompt now quotes the exact defect
+  and the reply's tail instead of a generic message, so the agent can correct
+  it. The planning prompt also states that the object's own closing brace must
+  be the last character before `</doxloop-plan>`.
+- **Reliable, cheaper, faster generation.** Approved plans are now written in
+  short batches of fresh agent sessions (four pages each by default, tunable
+  with `DOXLOOP_AUTHORING_BATCH_PAGES`), up to three batches at a time
+  (`DOXLOOP_AUTHORING_PARALLEL`; the landing page and a new site's setup run
+  first, alone), instead of one session that ran for hundreds of turns
+  re-reading a 600k-token context. Each batch gets its own plan slice, an
+  evidence pack with the excerpts the plan cites, and its own manifest and
+  evidence slices that Doxloop merges back, so concurrent sessions never edit
+  the same file. Depth warnings are fixed once at the end in a few concurrent
+  sessions instead of after every batch. Between batches Doxloop repairs
+  frontmatter, navigation entries, broken local links, and the evidence map
+  itself, validates the workspace, and sends only the remaining defects to a
+  short fix session. A batch that stops is retried once in a fresh session and
+  the rest of the run continues; a resumed run writes only the pages that are
+  still missing.
+- **Screenshots never fail a finished run.** Doxloop captures each guide's
+  entry screen itself with Playwright before the agent starts, checks every
+  image after the run, gives the agent one targeted retake session for the
+  problems it finds, and then keeps any remaining step as text with the
+  problem listed on the proposal instead of discarding the pages.
+- **Token usage is recorded.** Every run and request shows the tokens, cached
+  share, cost when the agent reports it, and number of sessions, in the run
+  log, the proposal, and the request history.
+- **Smaller prompts.** The authoring skill has a fast path for plan batches
+  that reads only the references a batch needs, the screenshot reference is
+  split into workflow and schema halves, and JSON injected into planner prompts
+  is compact. The agent is no longer asked to run `doxloop test`, node, or
+  python inside its sandbox, where they failed on every run.
+- A page the plan did not name but the writer modified is now a reviewable
+  change with an advisory rather than a reason to reject the whole proposal.
+  Undersized element captures are accepted down to 200×100.
+
 ### Added
 
 - **Rewrite existing documentation.** **Add source → Existing documentation**
@@ -122,6 +435,25 @@ uses semantic versioning after its first stable release.
 
 ### Fixed
 
+- **A research brief with swapped closing brackets no longer fails the plan.**
+  An update run on 17 Sept 2026 failed twice in a row with "malformed research
+  brief JSON object (Expected ',' or ']' after array element)": Codex ended the
+  product brief's top-level `unknowns` string array with `"}]}` instead of
+  `"]}`, and the retry made the same slip. The reply reader that already
+  appends missing closers now also rewrites a trailing run of wrong closers
+  with the ones the open structures need, records the fix as a repair note,
+  and still refuses a wrong closer that has more content after it. Applies to
+  plans, plan patches, and research briefs alike.
+- **Sidebar sections with nothing under them.** When the writer laid the
+  plan's top-level areas out as groups inside one space ("Self-hosting",
+  "API & integrations") and left them empty, the end-of-run navigation repair
+  created each plan section ("Install & upgrade", "API reference") as a
+  sibling group instead of nesting it, so the preview showed the area
+  headers with no pages beneath them while every page sat one group further
+  down. The repair now nests a section group under the area group the page
+  path or the plan's top-level list names, matches existing groups
+  case-insensitively, and removes any group still empty when the run ends.
+  The preview also no longer renders a group that has nothing visible in it.
 - **Saved sign-in reached the planner but not the writer.** Generation runs
   in a throwaway workspace under `.doxloop/runs`, and the capture browser's
   session and credentials are keyed by project path, so the authoring run

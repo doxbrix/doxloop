@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultReviewChange, hunkStateKey, isSupportingChange, reviewFileGroups } from './review-presentation'
+import { defaultReviewChange, hunkStateKey, isSupportingChange, proposalDecisionCounts, reviewFileGroups, screenshotCoverageText } from './review-presentation'
 
 const changes = [
   { id: 'change-1', path: '.doxloop/evidence-map.json', category: 'evidence' },
@@ -32,5 +32,26 @@ describe('review presentation', () => {
     const accepted = { hunks: [{ id: 'h1', acceptedAt: 'now' }, { id: 'h2' }] }
     expect(hunkStateKey(pending)).not.toBe(hunkStateKey(accepted))
     expect(hunkStateKey(accepted)).toBe('h1:a,h2:p')
+  })
+})
+
+describe('review progress and screenshot coverage', () => {
+  test('counts files, not hunks, so the totals match the file heading', () => {
+    const decided = [
+      { hunks: [{ id: 'a', acceptedAt: 't' }, { id: 'b', acceptedAt: 't' }] },
+      { hunks: [{ id: 'c', rejectedAt: 't' }] },
+      { hunks: [{ id: 'd' }, { id: 'e' }, { id: 'f', acceptedAt: 't' }] },
+      { hunks: [{ id: 'g', acceptedAt: 't' }, { id: 'h', rejectedAt: 't' }] },
+      { hunks: [] },
+    ]
+    expect(proposalDecisionCounts(decided)).toEqual({ accepted: 2, rejected: 1, remaining: 2 })
+    expect(proposalDecisionCounts(decided, true)).toEqual({ accepted: 3, rejected: 1, remaining: 1 })
+    const counts = proposalDecisionCounts(decided)
+    expect(counts.accepted + counts.rejected + counts.remaining).toBe(decided.length)
+  })
+  test('frames screenshots as guide coverage', () => {
+    expect(screenshotCoverageText({ captured: 2, guides: 2 }, 41)).toBe('Screenshots in 2 of 41 guides · 2 screenshots verified')
+    expect(screenshotCoverageText({ captured: 1, guides: 1 })).toBe('Screenshots in 1 guide · 1 screenshot verified')
+    expect(screenshotCoverageText({ captured: 5, guides: 3 }, 2)).toBe('Screenshots in 3 guides · 5 screenshots verified')
   })
 })

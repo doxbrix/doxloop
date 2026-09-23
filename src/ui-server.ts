@@ -13,7 +13,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createServer as createNetServer } from 'node:net'
 import { extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus } from './agents.js'
+import { hashRouted } from './application-url.js'
+import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus, chooseAgent } from './agents.js'
+import { agentDisplayName, agentSignedOutMessage } from './agent-failure.js'
 import { applySyncConfig, computeConfiguredDrift, disableSync, formatSyncStatus, parseSyncMode, parseTriggerList } from './autosync.js'
 import { authenticatedRequest, authenticatedRequestOptional, loadUserConfig, logout } from './auth.js'
 import { parseClaudeEffort, parseReasoning } from './author.js'
@@ -33,10 +35,13 @@ import {
   resumeDocumentationPlan,
   retryDocumentationPlan,
   markDocumentationPlanInterrupted,
+  updateDocumentationPlanExecution,
+  type ExecutionChange,
 } from './documentation-plan.js'
 import { DoxloopError } from './errors.js'
 import { deployCredentialState, saveDeployCredential } from './deploy-credentials.js'
-import { applyWorkflowStageLine, finishWorkflowStages, parseJobOutcome, parseJobOutcomeLine, parseWorkflowStage, type JobOutcome, type WorkflowStage } from './job-events.js'
+import { applyWorkflowStageLine, cleanJobOutputLines, finishWorkflowStages, JobLogDisplayFilter, parseJobOutcome, parseJobOutcomeLine, parseWorkflowStage, stampJobLine, stripJobLineStamp, type JobOutcome, type WorkflowStage } from './job-events.js'
+import { keepAwake } from './keep-awake.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { addGenerator } from './generator-manager.js'
 import {
@@ -58,6 +63,7 @@ import {
   loadProject,
   parseDesignReference,
   parseSpec,
+  projectDefaultModel,
   saveProjectSettings,
   scaffoldProject,
   validateProjectSourceBoundaries,
@@ -66,7 +72,7 @@ import { importExistingDocumentation, inspectExistingDocumentation } from './pro
 import { MintlifyImports } from './mintlify-import.js'
 import { forgetProject, listRecentProjects, rememberProject } from './project-registry.js'
 import { effectiveDeployment } from './settings.js'
-import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent } from './screenshot-workflow.js'
+import { assertScreenshotPlanningReadiness, checkApplicationReadiness, normalizeScreenshotIntent, type ApplicationReadinessOptions } from './screenshot-workflow.js'
 import { checkScreenCaptureBrowser, startCaptureSignIn, type CaptureSignInSession } from './screen-capture-provider.js'
 import {
   captureAuthContext,
@@ -129,6 +135,7 @@ import {
   syncReviewSourceDiff,
 } from './sync-review.js'
 import type {
+  DocumentationPlan,
   DocumentationPlanFailure,
   AgentName,
   ApplicationConfig,
@@ -283,8 +290,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
       if (job.status !== 'running') continue
       job.status = 'cancelled'
       job.finishedAt = new Date().toISOString()
-      job.lines.push('The Doxloop UI server stopped and cancelled this run.')
-      queueUiJobLog(runtime, job.id, '\nThe Doxloop UI server stopped and cancelled this run.\n')
+      noteJob(runtime, job, 'The Doxloop UI server stopped and cancelled this run.')
       stopJobChild(job.child)
       if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId).catch(() => undefined)
     }
@@ -506,6 +512,7 @@ async function handleApi(
     if (jobAction[2] === 'retry') {
       if (job.status === 'running' || !job.retry) throw new DoxloopError('This job does not have a safe retry checkpoint.')
       assertNoActiveDocumentationJob(runtime)
+      if (job.type.startsWith('plan:')) await assertAgentSignedIn(job.retry.agent)
       // A continuation resumes from the plan's own failure record, so it needs
       // no stage reset; the other plan stages restore their durable state first.
       if (job.planId && runtime.root && job.type.startsWith('plan:') && job.type !== 'plan:continue') {
@@ -514,15 +521,14 @@ async function handleApi(
       }
       const retry = job.retry
       const next = startCliJob(runtime, job.type, retry.args, retry.cwd, retry.agent, retry.planId)
-      next.lines.push(`Retrying interrupted run ${job.id} from its last durable stage.`)
+      noteJob(runtime, next, `Retrying interrupted run ${job.id} from its last durable stage.`)
       sendJson(response, 202, publicJob(next))
       return
     }
     if (job.status === 'running') {
       job.status = 'cancelled'
       job.finishedAt = new Date().toISOString()
-      job.lines.push('The run was cancelled from the Doxloop UI.')
-      queueUiJobLog(runtime, job.id, '\nThe run was cancelled from the Doxloop UI.\n')
+      noteJob(runtime, job, 'The run was cancelled from the Doxloop UI.')
       stopJobChild(job.child)
       if (runtime.root && job.planId) await cancelDocumentationPlan(runtime.root, job.planId)
       delete job.child
@@ -861,14 +867,14 @@ async function handleApi(
   if (request.method === 'GET' && url.pathname === '/api/application/readiness') {
     const root = requireProject(runtime)
     const project = await loadProject(root)
-    sendJson(response, 200, await checkApplicationReadiness(project.application, await captureAuthContext(root)))
+    sendJson(response, 200, await checkApplicationReadiness(project.application, await captureAuthContext(root), readinessProbeOptions('project')))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/application/readiness') {
     const root = requireProject(runtime)
     const project = await loadProject(root)
     const application = applicationFromBody(await readJsonBody(request), project)
-    sendJson(response, 200, await checkApplicationReadiness(application, await captureAuthContext(root)))
+    sendJson(response, 200, await checkApplicationReadiness(application, await captureAuthContext(root), readinessProbeOptions('project')))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/setup/application/readiness') {
@@ -879,7 +885,7 @@ async function handleApi(
     sendJson(response, 200, await checkApplicationReadiness(application, {
       ...(runtime.pendingCaptureSession ? { session: runtime.pendingCaptureSession.state } : {}),
       credentials: body.hasCredentials === true,
-    }))
+    }, readinessProbeOptions('setup')))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/application/auth') {
@@ -997,6 +1003,9 @@ async function handleApi(
     if (targetPages !== undefined && (!Number.isInteger(targetPages) || targetPages < 1 || targetPages > 500)) {
       throw new DoxloopError('Target page count must be a whole number between 1 and 500.')
     }
+    // A signed-out assistant fails every planning session within a second;
+    // say so before a plan is created rather than after it fails.
+    await assertAgentSignedIn(requestedAgent ?? project.defaultAgent)
     const plan = await createDocumentationPlan(root, {
       mode,
       scope: scope as 'starter' | 'standard' | 'comprehensive' | 'custom',
@@ -1006,7 +1015,7 @@ async function handleApi(
       clarificationMode: clarificationMode as 'review' | 'defaults' | 'stop',
       execution: {
         ...(requestedAgent ?? project.defaultAgent ? { agent: (requestedAgent ?? project.defaultAgent)! } : {}),
-        ...(optionalString(body.model) ? { model: optionalString(body.model)! } : {}),
+        ...(optionalString(body.model) ?? projectDefaultModel(project, requestedAgent ?? project.defaultAgent) ? { model: (optionalString(body.model) ?? projectDefaultModel(project, requestedAgent ?? project.defaultAgent))! } : {}),
         ...(optionalString(body.reasoning) ? { reasoning: parseReasoning(optionalString(body.reasoning))! } : {}),
         ...(optionalString(body.effort) ? { effort: parseClaudeEffort(optionalString(body.effort))! } : {}),
         screenshots: screenshotIntent,
@@ -1036,16 +1045,21 @@ async function handleApi(
     const root = requireProject(runtime)
     const id = planAction[1]!
     const action = planAction[2]!
+    const actionBody = recordBody(await readJsonBody(request))
     if (action === 'retry') {
       // A plan that never got past planning has no pages to approve, so the
       // approval rules do not apply; the planning stage simply runs again.
-      const plan = await readDocumentationPlan(root, id)
-      if (plan.status !== 'failed' || plan.failure?.stage !== 'propose') {
+      const failedPlan = await readDocumentationPlan(root, id)
+      if (failedPlan.status !== 'failed' || failedPlan.failure?.stage !== 'propose') {
         throw new DoxloopError('Only a plan whose planning stage failed can be retried here. Retry generation from the plan review, or ask the agent to revise the plan.')
       }
       assertNoActiveDocumentationJob(runtime)
+      // The body may switch the assistant; a signed-out pinned assistant gives
+      // way to the project's default one.
+      const prepared = await preparePlanRunAgent(root, failedPlan, actionBody)
       await retryDocumentationPlan(root, id, 'propose')
-      const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', id, '--cwd', root], root, plan.execution.agent, id)
+      const job = startCliJob(runtime, 'plan:propose', ['plan', 'propose', '--id', id, '--cwd', root], root, prepared.plan.execution.agent, id)
+      if (prepared.note) noteJob(runtime, job, prepared.note)
       sendJson(response, 202, publicJob(job))
       return
     }
@@ -1057,12 +1071,12 @@ async function handleApi(
       sendJson(response, 200, await resumeDocumentationPlan(root, id))
       return
     }
-    const plan = await readDocumentationPlan(root, id)
+    let plan = await readDocumentationPlan(root, id)
     if (action === 'continue') {
       // Pick up a failed run where it stopped instead of starting over: a
       // planning failure keeps the plan the agent proposed; a generation
       // failure keeps the pages and screenshots already in the workspace.
-      const strategy = optionalString(recordBody(await readJsonBody(request)).strategy) ?? 'resume'
+      const strategy = optionalString(actionBody.strategy) ?? 'resume'
       if (strategy !== 'resume' && strategy !== 'ignore-errors') throw new DoxloopError('Continuation strategy must be resume or ignore-errors.')
       // The job may complete after the browser rendered failed-plan actions.
       // Return the completed plan instead of turning that stale click into an
@@ -1077,13 +1091,16 @@ async function handleApi(
         sendJson(response, 200, { plan: await ignoreDocumentationPlanError(root, id) })
         return
       }
-      const job = startCliJob(runtime, 'plan:continue', ['plan', 'continue', '--id', id, '--strategy', strategy, '--cwd', root], root, plan.execution.agent, id)
+      const prepared = await preparePlanRunAgent(root, plan, actionBody)
+      const job = startCliJob(runtime, 'plan:continue', ['plan', 'continue', '--id', id, '--strategy', strategy, '--cwd', root], root, prepared.plan.execution.agent, id)
+      if (prepared.note) noteJob(runtime, job, prepared.note)
       sendJson(response, 202, { job: publicJob(job) })
       return
     }
     assertNoActiveDocumentationJob(runtime)
     if (action === 'clarify') {
-      const body = recordBody(await readJsonBody(request))
+      await assertAgentSignedIn(plan.execution.agent)
+      const body = actionBody
       const answers = stringRecord(body.answers)
       const useRecommendations = body.useRecommendations === true
       const feedback = documentationPlanClarificationFeedback(plan, answers, useRecommendations)
@@ -1094,14 +1111,18 @@ async function handleApi(
       return
     }
     if (action === 'revise') {
-      const feedback = optionalString(recordBody(await readJsonBody(request)).feedback)
+      const feedback = optionalString(actionBody.feedback)
       if (!feedback) throw new DoxloopError('Describe how the documentation plan should change.')
+      await assertAgentSignedIn(plan.execution.agent)
       await beginDocumentationPlanRevision(root, id)
       const job = startCliJob(runtime, 'plan:revise', ['plan', 'revise', '--id', id, '--feedback', feedback, '--cwd', root], root, plan.execution.agent, id)
       sendJson(response, 202, publicJob(job))
       return
     }
+    const prepared = await preparePlanRunAgent(root, plan, actionBody)
+    plan = prepared.plan
     const job = startCliJob(runtime, 'plan:generate', ['plan', 'generate', '--id', id, '--cwd', root], root, plan.execution.agent, id)
+    if (prepared.note) noteJob(runtime, job, prepared.note)
     sendJson(response, 202, publicJob(job))
     return
   }
@@ -1215,7 +1236,7 @@ async function handleApi(
     sendJson(response, 202, { job: publicJob(job) })
     return
   }
-  const proposalLifecycle = /^\/api\/proposals\/([a-z0-9-]+)\/(undo|archive|recover)$/.exec(url.pathname)
+  const proposalLifecycle = /^\/api\/proposals\/([a-z0-9-]+)\/(undo|archive|recover|repair)$/.exec(url.pathname)
   if (request.method === 'POST' && proposalLifecycle) {
     const root = requireProject(runtime)
     const result = proposalLifecycle[2] === 'undo'
@@ -1224,7 +1245,9 @@ async function handleApi(
         ? await recoverSyncRun(root, proposalLifecycle[1]!, {
             ignoreScreenshotProblems: recordBody(await readJsonBody(request)).ignoreScreenshotProblems === true,
           })
-        : await archiveSyncRun(root, proposalLifecycle[1]!)
+        : proposalLifecycle[2] === 'repair'
+          ? await recoverSyncRun(root, proposalLifecycle[1]!, { repair: true })
+          : await archiveSyncRun(root, proposalLifecycle[1]!)
     sendJson(response, 200, result)
     return
   }
@@ -1328,7 +1351,7 @@ async function handleApi(
     if (mode === 'update') appendOption(args, 'request', requestText || undefined)
     else if (requestText) args.push(requestText)
     appendOption(args, 'agent', requestedAgent)
-    appendOption(args, 'model', optionalString(body.model))
+    appendOption(args, 'model', optionalString(body.model) ?? projectDefaultModel(project, effectiveAgent))
     if (effectiveAgent === 'codex') appendOption(args, 'reasoning', optionalString(body.reasoning))
     if (effectiveAgent === 'claude') appendOption(args, 'effort', optionalString(body.effort))
     const screenshotIntent = normalizeScreenshotIntent(body.screenshots)
@@ -1748,7 +1771,7 @@ async function switchProject(runtime: UiRuntime, root: string): Promise<void> {
     if (job.status !== 'running') continue
     job.status = 'cancelled'
     job.finishedAt = new Date().toISOString()
-    job.lines.push('The preview stopped because another project was opened.')
+    noteJob(runtime, job, 'The preview stopped because another project was opened.')
     queueUiJobLog(runtime, job.id, '\nThe preview stopped because another project was opened.\n')
     job.child?.stdout?.removeAllListeners('data')
     job.child?.stderr?.removeAllListeners('data')
@@ -1791,7 +1814,7 @@ async function loadRuntimeJobs(root: string): Promise<{ jobs: Map<string, UiJob>
     job.status = 'failed'
     job.finishedAt = new Date().toISOString()
     job.recovered = true
-    job.lines.push('The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.')
+    appendJobLines(job, ['The previous Doxloop UI server stopped before this run completed. Partial logs were preserved and this stage can be retried safely.'])
     recovered = true
     await reconcileInterruptedPlan(root, job, 'The previous Doxloop UI server stopped before this run completed. Retry the stage to run it again.')
   }
@@ -1942,6 +1965,14 @@ async function updateProjectFromUi(root: string, raw: unknown): Promise<void> {
     const agent = parseAgent(rawAgent)
     if (rawAgent && !agent) throw new DoxloopError('Unsupported default agent.')
     update.defaultAgent = agent
+    // A model belongs to the agent it was chosen for, so clearing or
+    // switching the agent drops it unless the request names a new one.
+    if (!('defaultModel' in body)) update.defaultModel = agent === project.defaultAgent ? project.defaultModel : undefined
+  }
+  if ('defaultModel' in body) {
+    const model = optionalString(body.defaultModel)?.trim()
+    const agent = 'defaultAgent' in body ? update.defaultAgent : project.defaultAgent
+    update.defaultModel = agent && model ? model : undefined
   }
   if (body.documentation !== undefined) {
     update.documentation = documentationFromBody(body.documentation, project.documentation)
@@ -2315,7 +2346,7 @@ function documentationFromBody(raw: unknown, current: DocumentationBrief): Docum
   return result
 }
 
-function applicationFromBody(raw: unknown, project?: DoxloopProject): ApplicationConfig {
+export function applicationFromBody(raw: unknown, project?: DoxloopProject): ApplicationConfig {
   const body = recordBody(raw)
   const baseUrl = stringValue(body.baseUrl)
   let parsed: URL
@@ -2324,8 +2355,10 @@ function applicationFromBody(raw: unknown, project?: DoxloopProject): Applicatio
   } catch {
     throw new DoxloopError('Application URL is invalid.')
   }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new DoxloopError('Application URL must use HTTP(S) without credentials, query, or fragment.')
+  // A hash-routed single-page app (`https://host/_/#/`) keeps its routes in
+  // the fragment; any other fragment, a query, or credentials is rejected.
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || (parsed.hash && !hashRouted(parsed))) {
+    throw new DoxloopError('Application URL must be an http:// or https:// address without a sign-in, query string, or #fragment (a hash route such as #/ is fine).')
   }
   const screenshots = body.screenshots === undefined ? undefined : recordBody(body.screenshots)
   const source = optionalString(body.source)
@@ -2450,9 +2483,9 @@ function startAgentInstallJob(runtime: UiRuntime, agent: AgentName): UiJob {
   const append = (output: string): void => {
     const lines = output.split(/\r?\n/).filter(Boolean)
     if (lines.length === 0) return
-    appendJobLines(job, lines)
+    const stamped = appendJobLines(job, lines)
     job.lastOutputAt = new Date().toISOString()
-    queueUiJobLog(runtime, job.id, output.endsWith('\n') ? output : `${output}\n`)
+    queueUiJobLog(runtime, job.id, `${stamped.join('\n')}\n`)
     publishJobs(runtime)
   }
   runtime.jobs.set(id, job)
@@ -2502,6 +2535,9 @@ async function reconcileInterruptedPlan(root: string | undefined, job: UiJob, me
   }
 }
 
+/** Long agent runs the computer must stay awake for; laptop sleep used to kill their batches. */
+const KEEP_AWAKE_JOB_TYPES = /^(?:plan:|proposal:(?:resume|revise)|author:|sync$|page-edit:)/
+
 function startCliJob(
   runtime: UiRuntime,
   type: string,
@@ -2529,29 +2565,63 @@ function startCliJob(
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   job.child = child
-  const append = (chunk: Buffer | string): void => {
-    const text = chunk.toString()
-    const lines = text.split(/\r?\n/).filter(Boolean)
-    appendJobLines(job, lines)
+  // Agent output is cleaned (colour codes, stdin notices, Codex internals)
+  // for both views; machine-readable replies are summarized in the live view
+  // only, so the full log keeps what a plan replay needs.
+  const display = new JobLogDisplayFilter()
+  const releaseAwake = KEEP_AWAKE_JOB_TYPES.test(type) ? keepAwake.acquire() : undefined
+  const appendLines = (raw: string[]): void => {
+    const lines = cleanJobOutputLines(raw)
+    if (lines.length === 0) return
+    // Lines are stamped with their arrival time as one unit, so the log file
+    // and the control center agree on when each step happened.
+    const stamped = appendJobLines(job, lines, new Date(), display)
     for (const line of lines) {
       applyWorkflowStageLine(job.stages, line)
       const outcome = parseJobOutcomeLine(line)
       if (outcome) job.outcome = outcome
     }
     job.lastOutputAt = new Date().toISOString()
-    queueUiJobLog(runtime, job.id, text)
+    queueUiJobLog(runtime, job.id, `${stamped.join('\n')}\n`)
     publishJobs(runtime)
   }
-  child.stdout?.on('data', append)
-  child.stderr?.on('data', append)
+  // A chunk can end mid-line; each stream keeps its partial line until the
+  // newline arrives so a timestamp never lands in the middle of a line.
+  const partial = { stdout: '', stderr: '' }
+  const append = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+    partial[stream] += chunk.toString()
+    const pieces = partial[stream].split(/\r?\n/)
+    partial[stream] = pieces.pop() ?? ''
+    appendLines(pieces.filter(Boolean))
+  }
+  const flush = (stream: 'stdout' | 'stderr'): void => {
+    const rest = partial[stream]
+    partial[stream] = ''
+    if (rest.trim()) appendLines([rest])
+  }
+  child.stdout?.on('data', (chunk: Buffer | string) => append('stdout', chunk))
+  child.stderr?.on('data', (chunk: Buffer | string) => append('stderr', chunk))
+  child.stdout?.once('end', () => flush('stdout'))
+  child.stderr?.once('end', () => flush('stderr'))
+  const settleDisplay = (): void => {
+    releaseAwake?.()
+    const pending = display.finish()
+    if (pending.length > 0) job.lines.push(...trimJobLines(pending.map((line) => stampJobLine(line))))
+  }
   child.once('error', (error) => {
-    append(error.message)
+    flush('stdout')
+    flush('stderr')
+    appendLines([error.message])
+    settleDisplay()
     job.status = 'failed'
     finishWorkflowStages(job.stages, 'failed')
     job.finishedAt = new Date().toISOString()
     publishJobs(runtime)
   })
   child.once('exit', (code, signal) => {
+    flush('stdout')
+    flush('stderr')
+    settleDisplay()
     if (job.status === 'cancelled') return
     job.exitCode = code ?? 1
     job.status = code === 0 && !signal ? 'succeeded' : 'failed'
@@ -2590,6 +2660,92 @@ function publicJob(job: UiJob): Omit<UiJob, 'child' | 'retry'> & { retryable: bo
 function persistedJob(job: UiJob): Omit<UiJob, 'child'> {
   const { child: _child, ...rest } = job
   return rest
+}
+
+/**
+ * Whether the assistant that will run is signed in. `unknown` (a slow or odd
+ * status command, or an assistant not on PATH, which the run reports itself)
+ * never blocks. DOXLOOP_SKIP_AGENT_AUTH_CHECK=1 turns the check off.
+ */
+async function agentSignInState(agent: AgentName | undefined): Promise<{ name: AgentName; status: 'authenticated' | 'unauthenticated' | 'unknown' } | undefined> {
+  if (process.env.DOXLOOP_SKIP_AGENT_AUTH_CHECK === '1') return undefined
+  let selected: { name: AgentName; executable: string }
+  try {
+    selected = await chooseAgent(agent)
+  } catch {
+    return undefined
+  }
+  try {
+    return { name: selected.name, status: (await agentAuthenticationStatus(selected)).status }
+  } catch {
+    return { name: selected.name, status: 'unknown' }
+  }
+}
+
+/** Refuse to start an agent run with a signed-out assistant (HTTP 400). */
+async function assertAgentSignedIn(agent: AgentName | undefined): Promise<void> {
+  const state = await agentSignInState(agent)
+  if (state?.status === 'unauthenticated') throw new DoxloopError(agentSignedOutMessage(state.name), 2)
+}
+
+type SignInLookup = (agent: AgentName | undefined) => Promise<{ name: AgentName; status: 'authenticated' | 'unauthenticated' | 'unknown' } | undefined>
+
+/**
+ * Decide which assistant a plan stage runs with before its job starts. A
+ * body `{ agent?, model?, reasoning?, effort? }` re-points the plan (a new
+ * agent without a model uses that agent's project default, or its own); with
+ * no body, a pinned agent that has signed out gives way to the project's
+ * signed-in default agent. The chosen agent must not be signed out.
+ * Returns the execution change to persist (if any) and a note for the log.
+ */
+export async function resolvePlanRunExecution(input: {
+  pinned: AgentName | undefined
+  body: Record<string, unknown>
+  project: Pick<DoxloopProject, 'defaultAgent' | 'defaultModel'>
+  signIn: SignInLookup
+}): Promise<{ change?: ExecutionChange; note?: string }> {
+  const { pinned, body, project, signIn } = input
+  const requestedAgent = parseAgent(optionalString(body.agent))
+  const requestedModel = optionalString(body.model)
+  const requestedReasoning = optionalString(body.reasoning) ? parseReasoning(optionalString(body.reasoning)) : undefined
+  const requestedEffort = optionalString(body.effort) ? parseClaudeEffort(optionalString(body.effort)) : undefined
+  if (requestedAgent || requestedModel || requestedReasoning || requestedEffort) {
+    const change: ExecutionChange = {}
+    if (requestedAgent && requestedAgent !== pinned) {
+      change.agent = requestedAgent
+      change.model = requestedModel ?? projectDefaultModel(project, requestedAgent)
+    } else if (requestedModel) {
+      change.model = requestedModel
+    }
+    if (requestedReasoning) change.reasoning = requestedReasoning
+    if (requestedEffort) change.effort = requestedEffort
+    const state = await signIn(change.agent ?? pinned)
+    if (state?.status === 'unauthenticated') throw new DoxloopError(agentSignedOutMessage(state.name), 2)
+    return { change }
+  }
+  const state = await signIn(pinned)
+  if (state?.status !== 'unauthenticated') return {}
+  const fallback = project.defaultAgent
+  if (fallback && fallback !== state.name) {
+    const fallbackState = await signIn(fallback)
+    if (fallbackState?.status === 'authenticated') {
+      return {
+        change: { agent: fallback, model: projectDefaultModel(project, fallback) },
+        note: `${agentDisplayName(state.name)} is signed out, so this run uses ${agentDisplayName(fallback)}, the project's default assistant.`,
+      }
+    }
+  }
+  throw new DoxloopError(agentSignedOutMessage(state.name), 2)
+}
+
+async function preparePlanRunAgent(
+  root: string,
+  plan: DocumentationPlan,
+  body: Record<string, unknown>,
+): Promise<{ plan: DocumentationPlan; note?: string }> {
+  const resolved = await resolvePlanRunExecution({ pinned: plan.execution.agent, body, project: await loadProject(root), signIn: agentSignInState })
+  const next = resolved.change ? await updateDocumentationPlanExecution(root, plan.id, resolved.change) : plan
+  return { plan: next, ...(resolved.note ? { note: resolved.note } : {}) }
 }
 
 function assertNoActiveDocumentationJob(runtime: UiRuntime): void {
@@ -2642,7 +2798,7 @@ export async function availableLocalPort(): Promise<number> {
 async function waitForPreviewServer(url: string, job: UiJob, expectedRoot?: string): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (job.status !== 'running') {
-      throw new DoxloopError(job.lines.at(-1) ?? 'The documentation preview failed to start.')
+      throw new DoxloopError(stripJobLineStamp(job.lines.at(-1) ?? '') || 'The documentation preview failed to start.')
     }
     try {
       const response = await fetch(expectedRoot ? `${url}/__doxloop/identity` : url, { cache: 'no-store' })
@@ -2748,9 +2904,22 @@ function trimJobLines(lines: string[]): string[] {
       : line)
 }
 
-function appendJobLines(job: UiJob, lines: string[]): void {
-  job.lines.push(...trimJobLines(lines))
+/**
+ * Keep new output lines on the job, each stamped with the time it arrived.
+ * Returns the stamped lines in full, for the log file; the job itself keeps
+ * only the recent, length-capped tail.
+ */
+function appendJobLines(job: UiJob, lines: string[], at = new Date(), display?: JobLogDisplayFilter): string[] {
+  const stamped = lines.map((line) => stampJobLine(line, at))
+  job.lines.push(...trimJobLines(display ? display.push(stamped) : stamped))
   if (job.lines.length > MAX_JOB_LINES) job.lines.splice(0, job.lines.length - MAX_JOB_LINES)
+  return stamped
+}
+
+/** A message from the control center itself, kept on the job and in its log file like agent output. */
+function noteJob(runtime: UiRuntime, job: UiJob, message: string): void {
+  const [line] = appendJobLines(job, [message])
+  queueUiJobLog(runtime, job.id, `${line}\n`)
 }
 
 function publishJobs(runtime: UiRuntime): void {
@@ -2890,6 +3059,15 @@ function containedBy(root: string, candidate: string): boolean {
   return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
+/**
+ * The readiness endpoints also load the page in the headless browser, since a
+ * single-page app answers 200 and only then sends the visitor to sign in.
+ * DOXLOOP_READINESS_BROWSER_PROBE=0 turns the browser visit off.
+ */
+function readinessProbeOptions(context: 'setup' | 'project'): ApplicationReadinessOptions {
+  return { browserProbe: process.env.DOXLOOP_READINESS_BROWSER_PROBE !== '0', context }
+}
+
 export function uiErrorStatus(error: unknown): number {
   return error instanceof DoxloopError ? (error.exitCode === 2 ? 400 : 409) : 500
 }
@@ -2928,7 +3106,7 @@ export function pageEditJobSpec(
   if (body.allowRelated === true) args.push('--allow-related')
   if (screenshots === 'enabled') args.push('--screenshots')
   appendOption(args, 'agent', requestedAgent)
-  appendOption(args, 'model', optionalString(body.model))
+  appendOption(args, 'model', optionalString(body.model) ?? projectDefaultModel(project, effectiveAgent))
   if (effectiveAgent === 'codex') appendOption(args, 'reasoning', parseReasoning(optionalString(body.reasoning)))
   if (effectiveAgent === 'claude') appendOption(args, 'effort', parseClaudeEffort(optionalString(body.effort)))
   args.push('--cwd', root)

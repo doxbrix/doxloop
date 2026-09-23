@@ -6,6 +6,7 @@ import {
   doxbrixDocument,
   firstSitePage,
   previewErrorPage,
+  redirectTarget,
 } from './preview.js'
 import {
   docusaurusInstallInvocation,
@@ -17,6 +18,18 @@ const roots: string[] = []
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+describe('preview redirects', () => {
+  test('follows a redirect only when its target page is served', () => {
+    const site = { version: 1 as const, spaces: [{ name: 'Guides', nav: [{ type: 'page' as const, file: 'index' }, { type: 'page' as const, file: 'quickstart' }] }] }
+    const pages = new Map([['index', '/docs/index.mdx'], ['quickstart', '/docs/quickstart.mdx'], ['guides/index', '/docs/guides/index.mdx']])
+    expect(redirectTarget('/quickstart', site, pages)).toBe('/quickstart')
+    expect(redirectTarget('/guides', site, pages)).toBe('/guides')
+    expect(redirectTarget('/', site, pages)).toBe('/')
+    expect(redirectTarget('/getting-started/product-overview', site, pages)).toBeUndefined()
+    expect(redirectTarget(undefined, site, pages)).toBeUndefined()
+  })
 })
 
 describe('generator preview', () => {

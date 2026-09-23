@@ -6,16 +6,20 @@ grouped parameters, generated request example, and response tabs.
 
 - [Page contract](#page-contract)
 - [Canonical syntax](#canonical-syntax)
-- [Verification](#verification)
+- [Format requirements](#format-requirements)
 
 ## Page contract
 
 - Prefer one endpoint page and one `<ApiEndpoint>` block per operation.
 - Use the page title for the operation name, such as `List projects`.
 - Open with one short sentence describing the observable behavior.
-- Put `method`, `path`, `baseUrl`, `summary`, and `description` on
-  `<ApiEndpoint>`.
-- Add one `<Param>` for every verified path, query, header, or body parameter.
+- Put `method`, `path`, `baseUrl`, and `summary` on `<ApiEndpoint>`. Add
+  `description` when the operation needs more than its summary; the card shows
+  it under the summary and omits it when absent.
+- Add one `<Param>` for every verified path, query, header, or body parameter,
+  with an `example` for each one whose value the evidence shows. Doxloop asks
+  for missing examples once per endpoint, and not at all when the section
+  already shows a verified request (a cURL or HTTP sample naming the path).
 - Add one `<Response>` for the successful status and each important verified
   error status.
 - Keep example values realistic but visibly non-secret.
@@ -87,14 +91,11 @@ Do not use a Markdown parameter table, a prose-only endpoint, or separate cURL
 and response fences in place of `<ApiEndpoint>`. The reader generates the
 request presentation from the block attributes and parameter examples.
 
-## Verification
+## Format requirements
 
-Run `doxloop test`, then inspect the page in `doxloop preview --open`. Confirm:
-
-- every component opening tag, including `<ApiEndpoint>`, `<Param>`, and
-  `<Response>`, ends with `>` on the same physical line where it begins;
-- the method and path appear in the endpoint bar;
-- header, path, and query parameters appear in their proper sections;
-- required and type badges are correct;
-- the request example uses the verified base URL and parameter examples;
-- success and error statuses appear as response tabs with valid example bodies.
+- Every component opening tag, including `<ApiEndpoint>`, `<Param>`, and
+  `<Response>`, ends with `>` on the same physical line where it begins.
+- Every `<Response>` carries a status, a verified `contentType`, and a valid
+  example body; success and each documented error status get their own block.
+- The `baseUrl` and every parameter `example` are the verified values the
+  generated request presentation will show.

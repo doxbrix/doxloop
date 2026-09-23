@@ -772,20 +772,26 @@ function validateDoxbrixApiEndpoints(
         ),
       )
     }
+    // Doxbrix titles the endpoint card with `summary` and shows `description`
+    // under it only when present (its own OpenAPI importer omits an empty
+    // one), so one of the two is the contract. Demanding both produced 98
+    // warnings on a real run whose endpoints all had a summary and whose
+    // prose already described each operation.
     if (
-      stringAttribute(attributes.summary) === '' ||
+      stringAttribute(attributes.summary) === '' &&
       stringAttribute(attributes.description) === ''
     ) {
       issues.push(
         warning(
           'api-endpoint-description',
-          `${label} should include both summary and description attributes.`,
+          `${label} should include a summary attribute.`,
           file,
         ),
       )
     }
 
     const pathParameters = new Set<string>()
+    const withoutExample: string[] = []
     const paramPattern = /<Param\b([^>]*)>([\s\S]*?)<\/Param>/g
     for (const [paramIndex, paramMatch] of [
       ...body.matchAll(paramPattern),
@@ -815,15 +821,20 @@ function validateDoxbrixApiEndpoints(
           )
         }
       }
-      if (stringAttribute(param.example) === '') {
-        issues.push(
-          warning(
-            'api-endpoint-param-example',
-            `${label} parameter "${name || paramIndex + 1}" should include a verified example for the generated request.`,
-            file,
-          ),
-        )
-      }
+      if (stringAttribute(param.example) === '') withoutExample.push(name || String(paramIndex + 1))
+    }
+    // One suggestion per endpoint, not per parameter, and none when the page
+    // already shows a request for this endpoint in a code sample: a real run
+    // spent two fix sessions on 204 per-parameter warnings for endpoints
+    // whose cURL examples were already complete.
+    if (withoutExample.length > 0 && !hasRequestSample(content, raw, match.index ?? 0, (match.index ?? 0) + match[0].length, path)) {
+      issues.push(
+        warning(
+          'api-endpoint-param-example',
+          `${label} parameter${withoutExample.length === 1 ? '' : 's'} ${withoutExample.map((name) => `"${name}"`).join(', ')} should include a verified example for the generated request.`,
+          file,
+        ),
+      )
     }
 
     for (const placeholder of path.matchAll(/\{([^}]+)}/g)) {
@@ -890,6 +901,30 @@ function validateDoxbrixApiEndpoints(
     }
   }
   return issues
+}
+
+/**
+ * Whether the section around an <ApiEndpoint> (from the heading before it to
+ * the next heading or endpoint) carries a fenced request for it: a cURL
+ * command, an HTTPie call, or a raw HTTP request line naming its path.
+ */
+export function hasRequestSample(masked: string, raw: string, start: number, end: number, path: string): boolean {
+  // Section boundaries come from the masked page, where a `# comment` inside
+  // a shell fence is blank, not a heading; the fences come from the raw page.
+  const before = masked.slice(0, start)
+  const headings = [...before.matchAll(/^#{1,6}\s/gm)]
+  const sectionStart = headings.at(-1)?.index ?? 0
+  const after = masked.slice(end)
+  const next = after.search(/^#{1,6}\s|<ApiEndpoint\b/m)
+  const sectionEnd = next === -1 ? raw.length : end + next
+  const section = `${raw.slice(sectionStart, start)}\n${raw.slice(end, sectionEnd)}`
+  const staticPath = path.split(/[{:]/)[0]!.replace(/\/+$/, '')
+  for (const fence of section.matchAll(/^\s*(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\s*\1\s*$/gm)) {
+    const code = fence[2] ?? ''
+    const request = /\bcurl\b|\bhttp(?:ie)?\s+(?:GET|POST|PUT|PATCH|DELETE)\b|\bfetch\(|^\s*(?:GET|POST|PUT|PATCH|DELETE)\s+\S/im.test(code)
+    if (request && (staticPath === '' || code.includes(staticPath))) return true
+  }
+  return false
 }
 
 function componentAttributes(

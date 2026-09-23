@@ -175,8 +175,80 @@ export async function discoverDocumentationSources(root: string): Promise<Discov
   return { inventory, cacheHit: false }
 }
 
+/** Compact JSON for prompt injection; the on-disk cache stays pretty-printed. */
+/**
+ * Evidence kinds whose rows are regex hits on code lines (`const oauth =
+ * require('./oauth.js')`, `update:modelValue`). Hundreds of them tell the
+ * planner nothing a file list does not, so they are summarised per file.
+ */
+const SUMMARISED_EVIDENCE_KINDS: ReadonlySet<DiscoveryEvidenceKind> = new Set(['authentication', 'authorization', 'event', 'integration'])
+const MAXIMUM_LISTED_ROWS_PER_KIND = 160
+const MAXIMUM_SUMMARISED_FILES_PER_KIND = 24
+
+/**
+ * The inventory as the planner reads it: grouped text instead of one JSON
+ * line. The same JSON for a mid-sized product ran to 120k characters and was
+ * re-sent on every planning turn; grouping rows by kind and file keeps every
+ * citation (source, path, kind, label, line) at a fraction of the size.
+ */
 export function formatDiscoveryInventory(inventory: DocumentationDiscoveryInventory): string {
-  return JSON.stringify(inventory, null, 2)
+  const lines: string[] = []
+  const { totals, suggestedPages } = inventory
+  lines.push(`Inventory ${inventory.cacheKey.slice(0, 12)} generated ${inventory.generatedAt}: ${totals.sources} source${totals.sources === 1 ? '' : 's'}, ${totals.filesScanned} files scanned, ${totals.publicSignals} public signals, ${totals.existingPages} existing documentation page${totals.existingPages === 1 ? '' : 's'}. Suggested page counts: starter ${suggestedPages.starter}, standard ${suggestedPages.standard}, comprehensive ${suggestedPages.comprehensive}.`)
+  if (inventory.existingPages.length > 0) lines.push(`Existing documentation pages: ${inventory.existingPages.join(', ')}`)
+  if (inventory.navigationFiles.length > 0) lines.push(`Navigation files: ${inventory.navigationFiles.join(', ')}`)
+  for (const source of inventory.sources) {
+    lines.push('')
+    const coverage = source.truncated
+      ? `${source.filesScanned} of ${source.filesAvailable} files scanned (partial)`
+      : `${source.filesScanned} file${source.filesScanned === 1 ? '' : 's'} scanned`
+    const facts = [
+      source.languages.length > 0 ? source.languages.join(', ') : undefined,
+      source.packageNames.length > 0 ? `packages ${source.packageNames.join(', ')}` : undefined,
+      coverage,
+      source.revision ? `revision ${source.revision.slice(0, 12)}` : undefined,
+    ].filter((item): item is string => Boolean(item))
+    lines.push(`Source "${source.name}" (${source.kind}, ${source.location}): ${facts.join('; ')}. Cite rows as source "${source.name}" with the path, kind, label, and line shown.`)
+    if (source.uiLabelCatalogs.length > 0) lines.push(`  UI label catalogs: ${source.uiLabelCatalogs.join(', ')}`)
+    for (const warning of source.warnings) lines.push(`  Warning: ${warning}`)
+    const byKind = new Map<DiscoveryEvidenceKind, DiscoveryEvidence[]>()
+    for (const row of source.evidence) {
+      const rows = byKind.get(row.kind) ?? []
+      rows.push(row)
+      byKind.set(row.kind, rows)
+    }
+    for (const [kind, rows] of byKind) {
+      lines.push(SUMMARISED_EVIDENCE_KINDS.has(kind) ? summarisedKindLine(kind, rows) : listedKindLines(kind, rows))
+    }
+  }
+  return lines.join('\n')
+}
+
+function summarisedKindLine(kind: DiscoveryEvidenceKind, rows: DiscoveryEvidence[]): string {
+  const counts = new Map<string, number>()
+  for (const row of rows) counts.set(row.path, (counts.get(row.path) ?? 0) + 1)
+  const files = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+  const shown = files.slice(0, MAXIMUM_SUMMARISED_FILES_PER_KIND).map(([path, count]) => (count === 1 ? path : `${path} (${count})`))
+  const rest = files.length - shown.length
+  return `  ${kind} (${rows.length} matches in ${files.length} file${files.length === 1 ? '' : 's'}; read the files for the behavior): ${shown.join(', ')}${rest > 0 ? `, +${rest} more files` : ''}`
+}
+
+function listedKindLines(kind: DiscoveryEvidenceKind, rows: DiscoveryEvidence[]): string {
+  const byPath = new Map<string, DiscoveryEvidence[]>()
+  let listed = 0
+  for (const row of rows) {
+    if (listed >= MAXIMUM_LISTED_ROWS_PER_KIND) break
+    const group = byPath.get(row.path) ?? []
+    group.push(row)
+    byPath.set(row.path, group)
+    listed += 1
+  }
+  const groups = [...byPath.entries()].map(([path, group]) =>
+    `${path}: ${group.map((row) => (row.line === undefined ? row.label : `${row.label} @${row.line}`)).join('; ')}`,
+  )
+  const rest = rows.length - listed
+  const header = `  ${kind} (${rows.length})${rest > 0 ? `, first ${listed} shown, +${rest} more` : ''}:`
+  return `${header}\n${groups.map((group) => `    ${group}`).join('\n')}`
 }
 
 async function discoverSource(
@@ -647,4 +719,21 @@ function isDiscoveryInventory(value: DocumentationDiscoveryInventory, cacheKey: 
 function evidencePriority(kind: DiscoveryEvidenceKind): number {
   const index = KIND_PRIORITY.indexOf(kind)
   return index === -1 ? KIND_PRIORITY.length : index
+}
+
+/**
+ * What the planner must know about the inventory beyond its rows: which
+ * files hold the strings readers see, and whether the inventory is partial.
+ */
+export function discoveryGuidance(discovery: DocumentationDiscoveryInventory): string {
+  const lines: string[] = []
+  const catalogs = discovery.sources.flatMap((source) => (source.uiLabelCatalogs ?? []).map((path) => `${source.name}: ${path}`))
+  if (catalogs.length > 0) {
+    lines.push(`UI label catalogs (the exact English strings the product displays; read them before naming any button, tab, field, or menu, and quote the displayed value rather than its key):\n${catalogs.map((item) => `- ${item}`).join('\n')}`)
+  }
+  const partial = discovery.sources.filter((source) => source.truncated)
+  if (partial.length > 0) {
+    lines.push(`Partial inventory: ${partial.map((source) => `${source.name} (${source.filesScanned} of ${source.filesAvailable} files)`).join(', ')}. Product code was inventoried first; read the source directly for any surface the inventory may have cut off before deciding it does not exist.`)
+  }
+  return lines.length ? `${lines.join('\n\n')}\n` : ''
 }

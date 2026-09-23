@@ -14,6 +14,7 @@ import {
   existingDocumentationPlanShape,
   existingDocumentationPlanningInstructions,
   existingDocumentationWritingRequirements,
+  extractPlanOutput,
 } from './documentation-plan.js'
 import { saveProjectSettings, scaffoldProject } from './project.js'
 import type { DocumentationPlan, SourceBinding } from './types.js'
@@ -152,6 +153,18 @@ describe('existing documentation authoring guidance', () => {
     expect(prompt).toContain('- legacy: existing documentation site https://docs.example.com/, crawled into the read-only Markdown snapshot at ../.doxloop-sources/x/legacy/docs-abc (2 pages; index.md lists every page with its original URL)')
     expect(prompt).toContain('never copy its prose verbatim')
   })
+})
+
+test('a pretty-printed plan whose audit findings also carry pages arrays is read as the outer plan', () => {
+  const pretty = JSON.stringify(proposal, null, 2)
+  const transcript = `Findings first.\n<doxloop-plan>\n${pretty}\n</doxloop-plan>\nCodex finished`
+  const plan = extractPlanOutput(transcript, 'codex') as { productProfile: string; pages: unknown[]; existingDocumentation: unknown[] }
+  expect(plan.productProfile).toBe('Note-taking service')
+  expect(plan.pages).toHaveLength(2)
+  expect(plan.existingDocumentation).toHaveLength(1)
+  // A lone finding or assessment object is never mistaken for a plan.
+  expect(() => extractPlanOutput(JSON.stringify(assessment.findings[0]), 'codex')).toThrow('did not return a valid documentation-plan')
+  expect(() => extractPlanOutput(JSON.stringify(assessment), 'codex')).toThrow('did not return a valid documentation-plan')
 })
 
 test('plan JSON with an existing documentation audit round-trips through the shape', () => {

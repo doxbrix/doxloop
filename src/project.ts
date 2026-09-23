@@ -145,6 +145,8 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     !isSourceBindings(project.sources) ||
     (project.defaultAgent !== undefined &&
       !['codex', 'claude', 'gemini'].includes(project.defaultAgent)) ||
+    (project.defaultModel !== undefined &&
+      (typeof project.defaultModel !== 'string' || project.defaultModel.trim() === '')) ||
     (project.documentation !== undefined &&
       !isDocumentationBrief(project.documentation)) ||
     (project.sync !== undefined && !isSyncConfig(project.sync))
@@ -162,6 +164,7 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
       ? { generatorPackage: project.generatorPackage }
       : {}),
     ...(project.defaultAgent ? { defaultAgent: project.defaultAgent } : {}),
+    ...(project.defaultAgent && project.defaultModel ? { defaultModel: project.defaultModel } : {}),
     sources: project.sources,
     designReferences: project.designReferences ?? [],
     ...(project.application ? { application: project.application } : {}),
@@ -169,6 +172,18 @@ export async function loadProject(root: string): Promise<DoxloopProject> {
     documentation: project.documentation ?? defaultDocumentationBrief(),
     sync: { ...defaultSyncConfig(), ...(project.sync ?? {}) },
   }
+}
+
+/**
+ * The project's saved default model, but only for the agent it was chosen
+ * for: a Codex model ID must not be handed to Claude Code or Gemini.
+ */
+export function projectDefaultModel(
+  project: Pick<DoxloopProject, 'defaultAgent' | 'defaultModel'>,
+  agent: string | undefined,
+): string | undefined {
+  if (!agent || !project.defaultModel || agent !== project.defaultAgent) return undefined
+  return project.defaultModel
 }
 
 export async function saveDefaultAgent(
@@ -186,6 +201,7 @@ export async function saveProjectSettings(
     [Key in
       | 'title'
       | 'defaultAgent'
+      | 'defaultModel'
       | 'sources'
       | 'designReferences'
       | 'application'
@@ -197,7 +213,7 @@ export async function saveProjectSettings(
   const path = join(root, PROJECT_FILE)
   const raw = await readJson<Record<string, unknown>>(path)
   const next: Record<string, unknown> = { ...raw, ...changes }
-  for (const key of ['defaultAgent', 'application', 'deployment', 'sync'] as const) {
+  for (const key of ['defaultAgent', 'defaultModel', 'application', 'deployment', 'sync'] as const) {
     if (key in changes && changes[key] === undefined) delete next[key]
   }
   await writeJson(path, next)

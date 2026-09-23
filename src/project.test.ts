@@ -12,6 +12,7 @@ import {
   parseDesignReference,
   parseSource,
   resolveSeparateProjectLayout,
+  projectDefaultModel,
   saveProjectSettings,
   scaffoldProject,
   validateProjectSourceBoundaries,
@@ -267,6 +268,7 @@ describe('project scaffolding', () => {
     await saveProjectSettings(root, {
       title: 'Payments API',
       defaultAgent: 'codex',
+      defaultModel: 'gpt-5.6-luna',
       documentation: {
         ...(await loadProject(root)).documentation,
         primaryAudience: 'API developers',
@@ -284,6 +286,7 @@ describe('project scaffolding', () => {
     expect(await loadProject(root)).toMatchObject({
       title: 'Payments API',
       defaultAgent: 'codex',
+      defaultModel: 'gpt-5.6-luna',
       documentation: {
         primaryAudience: 'API developers',
         audiences: ['API developers', 'Platform engineers'],
@@ -297,6 +300,12 @@ describe('project scaffolding', () => {
       },
     })
     expect((await loadSiteConfig(root)).name).toBe('Payments API')
+
+    await saveProjectSettings(root, { defaultModel: undefined })
+    expect(await loadProject(root)).not.toHaveProperty('defaultModel')
+    expect(projectDefaultModel({ defaultAgent: 'codex', defaultModel: 'gpt-5.6-luna' }, 'codex')).toBe('gpt-5.6-luna')
+    expect(projectDefaultModel({ defaultAgent: 'codex', defaultModel: 'gpt-5.6-luna' }, 'claude')).toBeUndefined()
+    expect(projectDefaultModel({ defaultModel: 'gpt-5.6-luna' }, 'codex')).toBeUndefined()
   })
 
   test('rejects malformed Doxbrix navigation with an actionable field path', async () => {

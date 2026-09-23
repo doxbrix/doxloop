@@ -168,3 +168,16 @@ describe('workspace watcher', () => {
     expect(new Set(seen)).toEqual(new Set(['page:guides/setup.mdx', 'navigation:docs.json', 'evidence:.doxloop/evidence-map.json']))
   })
 })
+
+test('pages a resumed run keeps count as done from the start', () => {
+  const { tracker: resumed, events } = tracker({ plannedPages: 35, pageLabel: 'Continuing the interrupted authoring run' })
+  resumed.begin()
+  resumed.retain(Array.from({ length: 33 }, (_, index) => `./guides/page-${index}.mdx`))
+  expect(events.at(-1)).toMatchObject({ id: 'authoring-pages', status: 'running', progress: { done: 33, total: 35 } })
+  // A kept page the fix session edits is not counted twice; a new page is.
+  resumed.record({ kind: 'page', path: 'guides/page-1.mdx' })
+  resumed.record({ kind: 'page', path: 'guides/new.mdx' })
+  expect(events.at(-1)).toMatchObject({ progress: { done: 34, total: 35 } })
+  resumed.finish()
+  expect(events.filter((event) => event.id === 'authoring-pages').at(-1)).toMatchObject({ status: 'completed', label: 'Continuing the interrupted authoring run', progress: { done: 34, total: 35 } })
+})

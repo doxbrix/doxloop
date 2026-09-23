@@ -68,6 +68,7 @@ export interface Project {
   contentDir: string
   generator: string
   defaultAgent?: string
+  defaultModel?: string
   sources: Source[]
   designReferences: Array<{ url: string }>
   documentation: {
@@ -135,7 +136,7 @@ export interface DocumentationPlanPage {
   rationale: string
   evidence: string[]
   evidenceDetails: Array<{ source: string; path: string; kind?: string; label?: string; line?: number }>
-  visuals?: { mode: 'none' | 'recommended' | 'required'; rationale: string; estimatedCaptures: number; startPath?: string; workflow?: string; captureSequence?: string[] }
+  visuals?: { mode: 'none' | 'recommended' | 'required'; rationale: string; estimatedCaptures: number; startPath?: string; workflow?: string; captureSequence?: string[]; captureIds?: string[] }
   /** Concept pages default to a required Mermaid diagram; the reviewer can change it per page. */
   diagram?: 'required' | 'none'
 }
@@ -278,6 +279,19 @@ export interface SourceDiff {
   removed: number
 }
 
+export interface AgentUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  totalTokens: number
+  costUsd?: number
+  turns: number
+  sessions: number
+  maxContextTokens: number
+  durationMs: number
+}
+
 export interface Proposal {
   id: string
   status: string
@@ -301,6 +315,7 @@ export interface Proposal {
   undo?: { status: 'available' | 'undone' | 'unavailable'; undoneAt?: string; reason?: string }
   validation?: { pages: number; errors: number; warnings: number; issues?: Array<{ severity: 'error' | 'warning'; code: string; message: string; file?: string }> }
   screenshots?: { intent: 'auto' | 'enabled' | 'disabled'; status: 'not-requested' | 'planned' | 'verified' | 'skipped' | 'failed'; planned: number; captured: number; textOnly: number; guides: number; manifest?: string; message?: string; ignoredProblems?: number }
+  usage?: AgentUsage
   error?: string
   resumedAt?: string
   advisories?: string[]
@@ -335,6 +350,7 @@ export interface HistoryRequest {
   validationWarnings?: number
   sourceSummary?: string
   error?: string
+  usage?: AgentUsage
 }
 
 export interface HistoryPageEntry {

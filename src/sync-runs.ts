@@ -1,3 +1,4 @@
+import { mergeAgentUsage } from './agent-log.js'
 import { safePath } from './direct-edit.js'
 import { approvedBatchLimits, batchLimits } from './batch-limits.js'
 import { withProjectLock } from './project-lock.js'
@@ -37,7 +38,8 @@ import {
   syncPageRegistry,
   type SyncRunContext,
 } from './history.js'
-import { loadProject, pageExtensions as documentationPageExtensions, readPage } from './project.js'
+import { applyAuthoringPostPass, removeSupersededStarterPages } from './authoring-postpass.js'
+import { loadProject, pageExtensions as documentationPageExtensions, projectDefaultModel, readPage } from './project.js'
 import { listPages as listDocumentationPages, resolveEditScope } from './pages.js'
 import { recordReviewPreference } from './review-learning.js'
 import {
@@ -54,6 +56,8 @@ import { changedSourcePaths, collectSourceChanges, formatSourceChanges, sourceSn
 import { lineHunks, textLines } from './text-diff.js'
 import { formatValidation, isStarterContent, validateProject } from './validation.js'
 import type {
+  ValidationIssue,
+  AgentUsage,
   AgentName,
   DocumentationPlan,
   DoxloopProject,
@@ -109,6 +113,9 @@ const EXCLUDED_PREFIXES = [
   // Raw browser captures are run scratch space. Adopted images are placed
   // beside the pages that use them, so the staging folder is never a change.
   '.doxloop/capture-output',
+  // Images a downgrade set aside stay with the run for recovery; they are
+  // never proposed.
+  '.doxloop/quarantine',
   // History is a derived local index. Copying it into a proposal workspace would
   // offer the database back as a binary documentation change.
   '.doxloop/doxloop.db',
@@ -260,7 +267,7 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
   const history: SyncRunContext = {
     requestText: editRequest?.instruction ?? options.authoring?.historyRequest ?? options.authoring?.request,
     agent: options.authoring?.agent ?? options.project.defaultAgent,
-    model: options.authoring?.model,
+    model: options.authoring?.model ?? projectDefaultModel(options.project, options.authoring?.agent ?? options.project.defaultAgent),
     reasoningEffort: options.authoring?.reasoning ?? options.authoring?.effort,
     runDir: join(SYNC_RUNS_DIRECTORY, id),
   }
@@ -294,7 +301,9 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
     ...(options.authoring?.agent ?? options.project.defaultAgent
       ? { agent: (options.authoring?.agent ?? options.project.defaultAgent)! }
       : {}),
-    ...(options.authoring?.model ? { model: options.authoring.model } : {}),
+    ...(options.authoring?.model ?? projectDefaultModel(options.project, options.authoring?.agent ?? options.project.defaultAgent)
+      ? { model: (options.authoring?.model ?? projectDefaultModel(options.project, options.authoring?.agent ?? options.project.defaultAgent))! }
+      : {}),
     ...(options.authoring?.reasoning ? { reasoning: options.authoring.reasoning } : {}),
     ...(options.authoring?.effort ? { effort: options.authoring.effort } : {}),
     ...((options.plan || options.project.sync.budget?.maxMinutes) ? { timeoutMinutes: Math.min(options.plan ? batchLimits(options.plan.execution.limits).maxMinutes : 120, options.project.sync.budget?.maxMinutes ?? 120) } : {}),
@@ -333,13 +342,19 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
       followUps: editRequest.followUps,
     }) : undefined
     let failureDetail: string | undefined
+    let usage: AgentUsage | undefined
     const exitCode = await (options.author ?? runAuthor)({
       onFailure: (detail) => { failureDetail = detail },
+      onUsage: (recorded) => { usage = recorded },
       root: workspace,
       captureAuthRoot: options.root,
       mode: editRequest ? 'update' : persisted.mode,
       nonInteractive: true,
       recordHistory: false,
+      // A plan-first run writes its pages in short batches with Doxloop's
+      // repairs and validation between them; edits and revisions are one
+      // scoped session.
+      ...(options.plan && !editRequest && !options.revisionOf ? { planBatches: true } : {}),
       ...(editRequest ? { recordOperationalState: false } : {}),
       ...(changeSummary ? { changeSummary } : {}),
       ...(options.project.defaultAgent ? { agent: options.project.defaultAgent } : {}),
@@ -358,6 +373,7 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
         progressLabel: 'Editing selected pages',
       } : options.revisionOf ? { progressLabel: 'Revising proposed pages' } : {}),
     })
+    if (usage) run = { ...run, usage }
     if (exitCode !== 0) {
       throw new DoxloopError(agentExitMessage(exitCode, failureDetail))
     }
@@ -380,6 +396,7 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
       changes: finalized.changes,
       validation: finalized.validation,
       screenshots: finalized.screenshots,
+      ...withAdvisories(run, finalized.advisories),
       undo: { status: 'unavailable', reason: 'Undo becomes available after the complete proposal is applied.' },
     }
     await writeRun(options.root, run)
@@ -387,7 +404,8 @@ async function createSyncRunLocked(options: CreateSyncRunOptions): Promise<SyncR
     await recordSyncRun(options.root, run, history)
     return run
   } catch (error) {
-    run = failedRun(run, error, {
+    run = await failedRun(run, error, {
+      workspace: runWorkspace(options.root, run.id),
       screenshotIntent,
       expectedScreenshots,
       recovery: { resumable: workspaceCreated && !options.revisionOf, ignorable: workspaceCreated },
@@ -429,16 +447,24 @@ async function readPersistedAuthoring(root: string, id: string): Promise<RunAuth
   }
 }
 
-function failedRun(
+async function failedRun(
   run: SyncRun,
   error: unknown,
   details: {
+    workspace: string
     screenshotIntent: ScreenshotIntent
     expectedScreenshots: { guides: number; captures: number }
     recovery: NonNullable<SyncRun['recovery']>
   },
-): SyncRun {
+): Promise<SyncRun> {
   const message = error instanceof Error ? error.message : String(error)
+  let captured = 0
+  let textOnly = 0
+  try {
+    captured = (await describeScreenshotManifestProgress(details.workspace, undefined)).verified
+    const manifest = JSON.parse(await readFile(join(details.workspace, SCREENSHOT_MANIFEST_FILE), 'utf8'))
+    textOnly = (manifest.guides ?? []).flatMap((guide: { steps?: Array<{ status?: string; textOnlyReason?: string }> }) => guide.steps ?? []).filter((step: { status?: string; textOnlyReason?: string }) => step.status === 'text-only' && step.textOnlyReason?.trim()).length
+  } catch { /* A failure before capture has no saved progress. */ }
   return {
     ...run,
     status: 'failed',
@@ -449,8 +475,8 @@ function failedRun(
         intent: details.screenshotIntent,
         status: 'failed',
         planned: details.expectedScreenshots.captures,
-        captured: 0,
-        textOnly: 0,
+        captured,
+        textOnly,
         guides: details.expectedScreenshots.guides,
         message,
       },
@@ -476,8 +502,9 @@ async function finalizeProposalWorkspace(input: {
   tolerateScreenshotDefects?: boolean
   /** Claim, consolidate, and place captures the agent left unrecorded. */
   repairCaptures?: boolean
-  label: 'generated' | 'recovered' | 'resumed'
-}): Promise<{ changes: SyncFileChange[]; validation: SyncRun['validation'] & object; screenshots: ScreenshotRunSummary }> {
+  label: 'generated' | 'recovered' | 'resumed' | 'repaired'
+}): Promise<{ changes: SyncFileChange[]; validation: SyncRun['validation'] & object; screenshots: ScreenshotRunSummary; advisories: string[] }> {
+  const advisories: string[] = []
   const { context, workspace, directory } = input
   if (context.nextSyncState) {
     await writeFile(
@@ -496,17 +523,32 @@ async function finalizeProposalWorkspace(input: {
     await collapseDuplicateCaptures(workspace, context.plan)
     await embedMissingCaptures(workspace, context.plan)
   }
+  // A capture shortfall is never a reason to discard finished pages: every
+  // defect becomes a text-only step and is listed on the run for review.
   const screenshotResult = await validateScreenshotManifest(workspace, context.plan, input.screenshotIntent, {
-    ...(input.tolerateScreenshotDefects ? { tolerateDefects: true } : {}),
+    ...(input.tolerateScreenshotDefects !== false ? { tolerateDefects: true } : {}),
   })
   if (screenshotResult.manifest) {
     await writeFile(join(directory, 'screenshots.json'), `${JSON.stringify(screenshotResult.manifest, null, 2)}\n`, 'utf8')
   }
-  const validation = await validateProject(workspace)
+  let validation = await validateProject(workspace)
+  if (validation.errors > 0 && !context.editRequest && context.plan) {
+    // The accept check is the same validation; running Doxloop's repairs here
+    // means a run that ends "generated" is one the reviewer can apply.
+    const repaired = await repairWorkspaceBeforeReview(workspace, context.project, context.plan, validation.issues)
+    for (const line of repaired) advisories.push(`Repaired before review: ${line}`)
+    if (repaired.length > 0) validation = await validateProject(workspace)
+  }
   if (validation.errors > 0 && !context.editRequest) {
-    throw new DoxloopError(
-      `The ${input.label} proposal did not pass validation:\n${formatValidation(validation)}`,
-    )
+    if (!context.plan) {
+      throw new DoxloopError(
+        `The ${input.label} proposal did not pass validation:\n${formatValidation(validation)}`,
+      )
+    }
+    // A plan run already had Doxloop's repairs and fix sessions; what is left
+    // is for the reviewer to see and revise, and applying stays blocked until
+    // the errors are gone.
+    advisories.push(`${validation.errors} validation error${validation.errors === 1 ? '' : 's'} remain in this proposal; it cannot be applied until they are fixed. Use Repair proposal to let Doxloop fix links and navigation without an agent, or ask for a revision of the affected pages: ${[...new Set(validation.issues.filter((issue) => issue.severity === 'error').map((issue) => issue.file ?? 'project'))].slice(0, 12).join(', ')}.`)
   }
   const collected = await collectProposalChanges(context.root, workspace, directory, context.project)
   if (context.plan) {
@@ -525,6 +567,15 @@ async function finalizeProposalWorkspace(input: {
           if (page.kind === 'modified') counted += 1
           continue
         }
+        // An existing page the plan did not name but the writer touched (a
+        // landing page gaining links to the new pages, a related guide's
+        // cross-reference) is reviewable like any other change; only new or
+        // deleted pages expand the batch.
+        if (page.kind === 'modified') {
+          counted += 1
+          advisories.push(`${page.path} was modified although the plan did not name it; review that change before accepting.`)
+          continue
+        }
         outside.push(`${page.path} (${page.kind}, not in the plan)`)
         continue
       }
@@ -533,17 +584,14 @@ async function finalizeProposalWorkspace(input: {
       else if (page.kind === 'deleted' && planned.action !== 'remove') outside.push(`${page.path} (deleted, but planned to ${planned.action})`)
       counted += 1
     }
-    if (outside.length > 0) {
-      throw new DoxloopError(`The agent exceeded the approved page batch. The workspace is preserved for recovery; no live pages were changed. Pages outside the approved plan: ${outside.join(', ')}.`)
-    }
-    if (counted > limits.maxPages) {
-      throw new DoxloopError(`The agent exceeded the approved page batch: ${counted} pages changed, but the approved batch allows ${limits.maxPages}. The workspace is preserved for recovery; no live pages were changed.`)
-    }
-    if (screenshotResult.summary.captured > limits.maxScreenshots) {
-      throw new DoxloopError(`The agent exceeded the approved screenshot batch: ${screenshotResult.summary.captured} screenshots captured, but the approved batch allows ${limits.maxScreenshots}. The workspace is preserved for recovery.`)
-    }
+    // Scope overruns are reviewable, not fatal: the pages are in the
+    // proposal with a note, and the reviewer rejects the ones they do not
+    // want. Failing here discarded a finished run over one extra page.
+    if (outside.length > 0) advisories.push(`Outside the approved plan (review before accepting): ${outside.join(', ')}.`)
+    if (counted > limits.maxPages) advisories.push(`${counted} pages changed; the approved batch allows ${limits.maxPages}. Reject the extra pages if they are not wanted.`)
+    if (screenshotResult.summary.captured > limits.maxScreenshots) advisories.push(`${screenshotResult.summary.captured} screenshots captured; the approved batch allows ${limits.maxScreenshots}.`)
   }
-  await assertProposalSourceScopes(workspace, collected, context.project)
+  advisories.push(...await repairProposalSourceScopes(workspace, collected, context.project))
   const changes = await enrichProposalRationales(context.root, workspace, collected, context, validation)
   if (changes.length === 0) {
     throw new DoxloopError(
@@ -553,6 +601,7 @@ async function finalizeProposalWorkspace(input: {
     )
   }
   return {
+    advisories,
     changes,
     validation: {
       pages: validation.pages.length,
@@ -564,6 +613,33 @@ async function finalizeProposalWorkspace(input: {
   }
 }
 
+/**
+ * Doxloop's deterministic repairs over a finished workspace: navigation and
+ * frontmatter, links to pages that exist, embeds of images that do not, and
+ * the generated starter pages the plan superseded. No agent session.
+ */
+export async function repairWorkspaceBeforeReview(
+  workspace: string,
+  project: DoxloopProject,
+  plan: DocumentationPlan,
+  issues: ValidationIssue[],
+): Promise<string[]> {
+  const lines: string[] = []
+  try {
+    const report = await applyAuthoringPostPass({ workspace, project: await loadProject(workspace).catch(() => project), plan, pages: plan.pages, unlinkUnresolved: true, pruneEmptySpaces: true })
+    lines.push(...report.repairs)
+    const starters = await removeSupersededStarterPages(workspace, issues, report)
+    if (starters.length > 0) {
+      // Their navigation entries and links go with them.
+      const again = await applyAuthoringPostPass({ workspace, project: await loadProject(workspace).catch(() => project), plan, pages: plan.pages, unlinkUnresolved: true, pruneEmptySpaces: true })
+      lines.push(...starters.map((file) => `${file}: removed the starter page the plan superseded.`), ...again.repairs)
+    }
+  } catch (error) {
+    lines.push(`post-pass could not run: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return lines
+}
+
 export interface RecoverSyncRunOptions {
   /**
    * Accept the preserved output even though its screenshots do not satisfy
@@ -571,6 +647,13 @@ export interface RecoverSyncRunOptions {
    * on the proposal so the reviewer can see exactly what was skipped.
    */
   ignoreScreenshotProblems?: boolean
+  /**
+   * Repair a finished proposal that validation errors keep from being
+   * applied: run Doxloop's deterministic post-pass over its workspace
+   * (navigation placement, broken links turned into plain text, evidence
+   * entries) and collect the proposal again. No agent session is started.
+   */
+  repair?: boolean
 }
 
 /**
@@ -585,7 +668,8 @@ export async function recoverSyncRun(root: string, id: string, options: RecoverS
 async function recoverSyncRunLocked(root: string, id: string, options: RecoverSyncRunOptions): Promise<SyncRun> {
   const run = await readSyncRun(root, id)
   if (run.archivedAt) throw new DoxloopError(`Proposal ${id} is archived and cannot be recovered.`)
-  if (run.status !== 'failed' && run.status !== 'generating') {
+  const repairable = options.repair === true && run.status === 'awaiting-review'
+  if (run.status !== 'failed' && run.status !== 'generating' && !repairable) {
     throw new DoxloopError(`Only a failed or interrupted proposal can be recovered; ${id} is ${run.status}.`)
   }
   const workspace = runWorkspace(root, id)
@@ -593,6 +677,13 @@ async function recoverSyncRunLocked(root: string, id: string, options: RecoverSy
     throw new DoxloopError(`Proposal ${id} no longer has a preserved workspace to recover. Generate a new proposal instead.`)
   }
   const project = await loadProject(root)
+  if (options.repair) {
+    const approved = await recoveryPlan(root, runDirectory(root, id), run.planId)
+    if (approved) {
+      const report = await applyAuthoringPostPass({ workspace, project: await loadProject(workspace).catch(() => project), plan: approved, pages: approved.pages, unlinkUnresolved: true, pruneEmptySpaces: true })
+      for (const line of report.repairs) process.stdout.write(`Repaired: ${line}\n`)
+    }
+  }
   // Sources that changed while the run sat failed never block continuing it:
   // the work in the workspace is still worth reviewing, and the reviewer is
   // told to read it against the current evidence instead.
@@ -640,7 +731,7 @@ async function recoverSyncRunLocked(root: string, id: string, options: RecoverSy
       screenshotIntent,
       repairCaptures: true,
       ...(options.ignoreScreenshotProblems ? { tolerateScreenshotDefects: true } : {}),
-      label: 'recovered',
+      label: options.repair ? 'repaired' : 'recovered',
     })
     const { error: _previousError, recovery: _recovery, ...cleanRun } = run
     const next: SyncRun = {
@@ -652,7 +743,7 @@ async function recoverSyncRunLocked(root: string, id: string, options: RecoverSy
       validation: finalized.validation,
       screenshots: finalized.screenshots,
       sourceSnapshot: currentSnapshot,
-      ...withAdvisory(run, sourcesChanged ? SOURCES_CHANGED_RECOVERED : undefined),
+      ...withAdvisories(withAdvisoryRun(run, sourcesChanged ? SOURCES_CHANGED_RECOVERED : undefined), finalized.advisories),
       undo: { status: 'unavailable', reason: 'Undo becomes available after the complete proposal is applied.' },
     }
     await writeRun(root, next)
@@ -678,16 +769,22 @@ const LEGACY_STALE_SOURCE_ERROR = 'Configured source evidence changed after this
 
 /** Add a reviewer note to a run without repeating one it already carries. */
 function withAdvisory(run: SyncRun, advisory: string | undefined): { advisories?: string[] } {
-  const existing = run.advisories ?? []
-  const advisories = advisory && !existing.includes(advisory) ? [...existing, advisory] : existing
+  return withAdvisories(run, advisory ? [advisory] : [])
+}
+function withAdvisories(run: Pick<SyncRun, 'advisories'>, notes: string[]): { advisories?: string[] } {
+  const advisories = [...(run.advisories ?? [])]
+  for (const note of notes) if (note && !advisories.includes(note)) advisories.push(note)
   return advisories.length > 0 ? { advisories } : {}
+}
+function withAdvisoryRun(run: SyncRun, advisory: string | undefined): SyncRun {
+  return { ...run, ...withAdvisory(run, advisory) }
 }
 
 function historyContext(id: string, authoring: RunAuthoringRecord, project: DoxloopProject): SyncRunContext {
   return {
     requestText: authoring.historyRequest ?? authoring.request,
     agent: authoring.agent ?? project.defaultAgent,
-    model: authoring.model,
+    model: authoring.model ?? projectDefaultModel(project, authoring.agent ?? project.defaultAgent),
     reasoningEffort: authoring.reasoning ?? authoring.effort,
     runDir: join(SYNC_RUNS_DIRECTORY, id),
   }
@@ -781,13 +878,16 @@ async function resumeSyncRunLocked(root: string, id: string, options: ResumeSync
     }) : authoring.request
     const continuation = await continuationBrief(workspace, plan, run, screenshotIntent, originalRequest, sourcesChanged)
     let failureDetail: string | undefined
+    let usage: AgentUsage | undefined
     const exitCode = await (options.author ?? runAuthor)({
       onFailure: (detail) => { failureDetail = detail },
+      onUsage: (recorded) => { usage = recorded },
       root: workspace,
       captureAuthRoot: root,
       mode: authoring.mode,
       nonInteractive: true,
       recordHistory: false,
+      ...(plan && !authoring.editRequest ? { planBatches: true } : {}),
       ...(authoring.editRequest ? { recordOperationalState: false } : {}),
       request: continuation,
       screenshots: screenshotIntent,
@@ -806,6 +906,7 @@ async function resumeSyncRunLocked(root: string, id: string, options: ResumeSync
         plannedPages: authoring.editRequest.paths.length,
       } : {}),
     })
+    if (usage) next = { ...next, usage: mergeAgentUsage(run.usage, usage) ?? usage }
     if (exitCode !== 0) {
       throw new DoxloopError(agentExitMessage(exitCode, failureDetail))
     }
@@ -849,13 +950,15 @@ async function resumeSyncRunLocked(root: string, id: string, options: ResumeSync
       changes: finalized.changes,
       validation: finalized.validation,
       screenshots: finalized.screenshots,
+      ...withAdvisories(next, finalized.advisories),
       undo: { status: 'unavailable', reason: 'Undo becomes available after the complete proposal is applied.' },
     }
     await writeRun(root, next)
     await recordSyncRun(root, next, history)
     return next
   } catch (error) {
-    next = failedRun(next, error, {
+    next = await failedRun(next, error, {
+      workspace,
       screenshotIntent,
       expectedScreenshots,
       recovery: { resumable: true, ignorable: true },
@@ -1134,7 +1237,7 @@ async function editSyncRunChangeLocked(
     const sourceChanges = await collectSourceChanges(root, project.sources)
     const plan = await optionalApprovedPlan(root)
     const collected = await collectProposalChanges(root, workspace, runDirectory(root, id), project)
-    await assertProposalSourceScopes(workspace, collected, project)
+    for (const note of await repairProposalSourceScopes(workspace, collected, project)) process.stdout.write(`${note}\n`)
     let changes = await enrichProposalRationales(root, workspace, collected, {
       root,
       project,
@@ -1251,6 +1354,48 @@ export async function acceptSyncChanges(root: string, id: string, selections: Ac
   return withProjectLock(root, 'write', () => acceptSyncChangesLocked(root, id, selections, options))
 }
 
+/** Project-relative paths of the proposal's changes that still have hunks neither accepted nor rejected. */
+export function pendingProposalPaths(changes: Array<{ path: string; hunks: Array<{ acceptedAt?: string; rejectedAt?: string }> }>): Set<string> {
+  return new Set(
+    changes
+      .filter((change) => change.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt))
+      .map((change) => change.path.replaceAll('\\', '/')),
+  )
+}
+
+const PAGE_FILE = /\.(?:mdx?|rst|ipynb|txt)$/i
+
+/**
+ * Whether a validation error is one the not-yet-accepted part of the same
+ * proposal takes care of: an error on a file the proposal still replaces,
+ * or a page missing from a navigation the proposal still updates. Such an
+ * error is real for the workspace as it stands and gone once the reviewer
+ * accepts the rest, so it must not block accepting one file at a time.
+ */
+export function resolvedByPendingChanges(issue: { code: string; file?: string; message?: string }, pending: Set<string>): boolean {
+  if (pending.size === 0) return false
+  const file = issue.file?.replaceAll('\\', '/')
+  if (file && pending.has(file)) return true
+  if (issue.code === 'unnavigated-page') {
+    for (const path of pending) {
+      if (!PAGE_FILE.test(path) && !path.startsWith('.doxloop/') && !path.startsWith('assets/')) return true
+    }
+  }
+  if (issue.code === 'broken-link') {
+    // "Local link target does not exist: /administration/api-keys" — the
+    // target page is one the proposal still adds.
+    const target = (issue.message ?? '').match(/:\s*(\S+)\s*$/)?.[1]?.replace(/^\/+/, '').replace(/[#?].*$/, '').replace(/\/+$/, '')
+    if (target) {
+      const stem = target.replace(PAGE_FILE, '')
+      for (const path of pending) {
+        const pendingStem = path.replace(PAGE_FILE, '')
+        if (pendingStem === stem || pendingStem === `${stem}/index` || pendingStem.endsWith(`/${stem}`)) return true
+      }
+    }
+  }
+  return false
+}
+
 /** Apply selected hunks after proving the real files still match this proposal. */
 async function acceptSyncChangesLocked(
   root: string,
@@ -1342,9 +1487,21 @@ async function acceptSyncChangesLocked(
 
     const validation = await validateProject(root)
     if (validation.errors > 0) {
-      throw new DoxloopError(
-        `The selected changes were not applied because they would leave invalid documentation:\n${formatValidation(validation)}`,
-      )
+      // Only errors block; listing every depth warning alongside them hid
+      // the one line the reviewer had to act on. Errors that the rest of
+      // this proposal resolves (a starter page it replaces, a navigation
+      // entry its docs.json adds) do not block either: accepting one page
+      // of a new site before its navigation used to fail on exactly those.
+      const pending = pendingProposalPaths(nextChanges)
+      const blocking = {
+        ...validation,
+        issues: validation.issues.filter((issue) => issue.severity === 'error' && !resolvedByPendingChanges(issue, pending)),
+      }
+      if (blocking.issues.length > 0) {
+        throw new DoxloopError(
+          `The selected changes were not applied because they would leave invalid documentation:\n${formatValidation({ ...blocking, errors: blocking.issues.length })}`,
+        )
+      }
     }
     const complete = nextChanges.every((change) =>
       change.hunks.every((hunk) => hunk.acceptedAt !== undefined || hunk.rejectedAt !== undefined),
@@ -1687,24 +1844,35 @@ async function readWorkspaceBaseline(runRoot: string): Promise<Map<string, strin
   }
 }
 
-async function assertProposalSourceScopes(workspace: string, changes: SyncFileChange[], project: DoxloopProject): Promise<void> {
+/**
+ * A page attributed to a source scoped to another route is a bookkeeping
+ * slip, not a reason to discard the run: the attribution is removed from the
+ * evidence map and the reviewer is told. Before, one such entry failed the
+ * whole proposal after the pages were written.
+ */
+async function repairProposalSourceScopes(workspace: string, changes: SyncFileChange[], project: DoxloopProject): Promise<string[]> {
   const scoped = new Map(project.sources.filter((source) => source.scope?.routePrefix).map((source) => [source.name, source]))
-  if (!scoped.size) return
+  if (!scoped.size) return []
   let map: EvidenceMap
-  try { map = await readJson<EvidenceMap>(join(workspace, '.doxloop', 'evidence-map.json')) } catch { return }
+  try { map = await readJson<EvidenceMap>(join(workspace, '.doxloop', 'evidence-map.json')) } catch { return [] }
   const prefix = project.contentDir.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '')
+  const notes: string[] = []
   for (const change of changes.filter((item) => item.category === 'page')) {
     const route = change.path.replace(/\\/g, '/').replace(new RegExp(`^${escapeRegExp(prefix)}/?`), '').replace(/\.[^.]+$/, '')
-    for (const evidence of map.pages[change.path]?.sources ?? []) {
+    const entry = map.pages[change.path]
+    if (!entry) continue
+    entry.sources = entry.sources.filter((evidence) => {
       const source = scoped.get(evidence.source)
-      if (!source?.scope?.routePrefix) continue
+      if (!source?.scope?.routePrefix) return true
       const owned = source.scope.routePrefix.replace(/^\/+|\/+$/g, '')
       const shared = source.scope.sharedPages?.some((pattern) => matchesGlob(change.path, pattern) || matchesGlob(route, pattern)) ?? false
-      if (route !== owned && !route.startsWith(`${owned}/`) && !shared) {
-        throw new DoxloopError(`Source "${source.name}" is scoped to "${owned}", but the proposal attributes "${change.path}" to it. Move the page into that route or explicitly add it to source.scope.sharedPages.`)
-      }
-    }
+      if (route === owned || route.startsWith(`${owned}/`) || shared) return true
+      notes.push(`${change.path}: attribution to source "${source.name}" (scoped to "${owned}") was removed from the evidence map; move the page into that route or add it to source.scope.sharedPages if it belongs there.`)
+      return false
+    })
   }
+  if (notes.length > 0) await writeFile(join(workspace, '.doxloop', 'evidence-map.json'), `${JSON.stringify(map, null, 2)}\n`, 'utf8')
+  return notes
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }

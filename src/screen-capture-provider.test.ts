@@ -54,6 +54,7 @@ describe('screen capture provider', () => {
     expect(codex).toEqual([
       'exec',
       '--json',
+      '--disable', 'plugins', '--disable', 'apps',
       ...codexCaptureArguments(provider, true),
       '--sandbox', 'workspace-write', '--skip-git-repo-check', 'prompt',
     ])

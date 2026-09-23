@@ -47,6 +47,8 @@
 .proposal-screenshot-result.failed .screenshot-camera { color: var(--bad); background: var(--bad-soft); }
 .proposal-screenshot-result.ignored { background: #fffaeb; }
 .proposal-screenshot-result.ignored .screenshot-camera { color: var(--warn); background: #fdf1cf; }
+.proposal-usage { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-bottom: 1px solid var(--divider); color: var(--muted); font-size: 11.5px; }
+.proposal-usage svg { flex: none; }
 .proposal-lifecycle-notice.failed { align-items: flex-start; color: var(--bad); border-color: #fecdca; background: var(--bad-soft); }
 .proposal-lifecycle-notice.failed .proposal-failed-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
 .proposal-lifecycle-notice.failed .proposal-failed-copy strong { color: var(--bad); }
@@ -6706,3 +6708,34 @@ body:has(.shell .reference-sidebar-nav) {
 .capture-signin-block .form-actions.start { justify-content: flex-start; }
 
 .page-text-matches{max-height:260px;overflow:auto;padding:0 12px;list-style:none}.page-text-matches button{display:grid;gap:4px;text-align:left;width:100%;padding:8px;background:transparent;color:inherit;border:0;cursor:pointer}.page-text-matches small{white-space:normal;overflow-wrap:anywhere}.text-editor-body select,.text-editor-body input,.text-editor-body textarea{max-width:100%}.text-editor-body article{padding:12px 0;border-bottom:1px solid var(--border)}
+
+/* Failed planning: the reason, the assistant's sign-in state, and a retry that can switch assistant. */
+.plan-failed-panel { border-color: #f3c7c3; }
+.plan-failed-head { display: flex; gap: 12px; align-items: flex-start; }
+.plan-failed-icon { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: 10px; color: var(--bad); background: var(--bad-soft); }
+.plan-failed-head h2 { margin: 0 0 4px; color: var(--heading); font-size: 16px; line-height: 22px; font-weight: 650; }
+.plan-failed-head p { margin: 0; color: var(--text); font-size: 13.5px; line-height: 20px; }
+.plan-failed-error { margin: 14px 0 0; max-height: 180px; overflow: auto; padding: 10px 12px; border: 1px solid var(--divider); border-radius: 8px; background: var(--subtle); color: var(--text); font: 12px/18px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-retry-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 14px; }
+.plan-retry-row .field { flex: 1 1 260px; max-width: 360px; margin: 0; }
+.plan-failed-panel .note { margin-top: 12px; }
+
+/* Screenshot coverage warning shown just before approval. */
+.plan-coverage-warning { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; margin: 0 0 12px; padding: 14px 16px; border: 1px solid #f1d49a; border-radius: 11px; background: #fffaeb; }
+.plan-coverage-warning-icon { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 9px; color: var(--warn); background: var(--warn-soft); }
+.plan-coverage-warning > div:nth-child(2) { flex: 1 1 280px; min-width: 0; }
+.plan-coverage-warning strong { display: block; color: var(--heading); font-size: 14px; line-height: 20px; }
+.plan-coverage-warning p { margin: 2px 0 0; color: var(--text); font-size: 13px; line-height: 19px; }
+.plan-coverage-warning-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Plain run estimate above the approval bar and in the run limits. */
+.run-estimate { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 12px; color: var(--muted); font-size: 12.5px; line-height: 18px; }
+.run-estimate .icon { flex: none; margin-top: 2px; }
+.batch-limits-control .run-estimate { margin: 10px 0 0; }
+
+/* A verified run that still left most guides without images. */
+.proposal-screenshot-result.thin { background: #fffaeb; }
+.proposal-screenshot-result.thin .screenshot-camera { color: var(--warn); background: #fdf1cf; }
+
+.preview-notice-toast .toast-copy a { color: var(--info); font-weight: 600; overflow-wrap: anywhere; }
+.proposal-applied-dialog footer { flex-wrap: wrap; }

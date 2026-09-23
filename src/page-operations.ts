@@ -172,7 +172,8 @@ async function updateDoxbrixNavigation(root: string, project: DoxloopProject, in
 export async function readRedirects(root: string): Promise<Record<string, string>> {
   try {
     const raw = JSON.parse(await readFile(join(root, REDIRECTS_FILE), 'utf8')) as Record<string, unknown>
-    return Object.fromEntries(Object.entries(raw).filter(([from, to]) => safeRoute(from) && typeof to === 'string' && safeRoute(to) && to !== from)) as Record<string, string>
+    // The root always serves the navigation homepage; a stored root redirect only hides it.
+    return Object.fromEntries(Object.entries(raw).filter(([from, to]) => safeRoute(from) && from !== '/' && typeof to === 'string' && safeRoute(to) && to !== from)) as Record<string, string>
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error }
 }
 function safeRoute(route: string): boolean { return /^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(route) && !route.split('/').includes('..') }

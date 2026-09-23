@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { applicationUrl } from './application-url.js'
 import type { CaptureAuthMaterial, CaptureStorageState } from './capture-auth.js'
 import { DoxloopError } from './errors.js'
 import type { ApplicationConfig } from './types.js'
@@ -94,7 +95,7 @@ export interface CaptureSignInSession {
 export async function startCaptureSignIn(application: ApplicationConfig): Promise<CaptureSignInSession> {
   const viewport = application.screenshots?.viewport ?? { width: 1440, height: 900 }
   const path = application.authentication?.loginPath ?? application.screenshots?.startPath ?? application.readyPath ?? '/'
-  const url = new URL(path, application.baseUrl).toString()
+  const url = applicationUrl(application.baseUrl, path).toString()
   let chromium: BrowserType
   try {
     chromium = await loadChromium()
@@ -166,6 +167,7 @@ export function screenCaptureProvider(
   workspace: string,
   application: ApplicationConfig,
   auth?: Pick<CaptureAuthMaterial, 'storageStatePath' | 'secretsPath'>,
+  outputDirectory?: string,
 ): ScreenCaptureProvider {
   const require = createRequire(import.meta.url)
   const packageJson = require.resolve('@playwright/mcp/package.json')
@@ -181,7 +183,7 @@ export function screenCaptureProvider(
       'chrome',
       '--isolated',
       '--output-dir',
-      join(resolve(workspace), '.doxloop', 'capture-output'),
+      outputDirectory ?? join(resolve(workspace), '.doxloop', 'capture-output'),
       '--viewport-size',
       `${viewport.width}x${viewport.height}`,
       '--timeout-action',
@@ -236,7 +238,7 @@ export function claudeCaptureArguments(provider: ScreenCaptureProvider): string[
  * that file, keeping every other setting the user has there. `trust` lets the
  * capture tools run without a confirmation Gemini cannot get unattended.
  */
-export async function writeGeminiCaptureSettings(root: string, provider: ScreenCaptureProvider): Promise<string> {
+export async function writeGeminiCaptureSettings(root: string, provider?: ScreenCaptureProvider): Promise<string> {
   const directory = join(root, '.gemini')
   const path = join(directory, 'settings.json')
   await mkdir(directory, { recursive: true })
@@ -249,7 +251,8 @@ export async function writeGeminiCaptureSettings(root: string, provider: ScreenC
   }
   const existing = settings.mcpServers
   const servers = existing && typeof existing === 'object' && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {}
-  servers[provider.name] = geminiCaptureServer(provider)
+  if (provider) servers[provider.name] = geminiCaptureServer(provider)
+  else delete servers[SCREEN_CAPTURE_SERVER]
   settings.mcpServers = servers
   await writeFile(path, `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
   return path

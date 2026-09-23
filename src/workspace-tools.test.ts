@@ -78,6 +78,9 @@ test('native Docusaurus versions are visible and directly editable without chang
 })
 test('literal HTML, RST and Markdown links are checked while fenced examples are ignored', async () => {
   expect(contentLinks('<a href="https://example.com/a?x=1&amp;y=2">Link</a>\n`RST <https://example.com/b>`_\n.. _ref: https://example.com/c\n```html\n<a href="bad.md">example</a>\n```')).toEqual(['https://example.com/a?x=1&y=2', 'https://example.com/b', 'https://example.com/c'])
+  // Inline code and regex-shaped targets are not links (api/attachments.mdx in a real run).
+  expect(contentLinks('IDs match `[a-z]([a-z0-9-]{0,34}[a-z0-9])` and [a-z]([a-z0-9-]{0,34}[a-z0-9]) too; see `[x](/code-only)` and [real](/guides/real).')).toEqual(['/guides/real'])
+  expect(contentLinks('[Docs](/docs) and ``[x](/double-tick)`` and <Card href={props.href} /> and [t](${base}/x)')).toEqual(['/docs'])
   const root = await fixture()
   await writeFile(join(root, 'index.mdx'), (await readFile(join(root, 'index.mdx'), 'utf8')) + '\n<a href="missing.html">Missing</a>\n<a href="https://example.com/broken">Remote</a>\n')
   expect((await validateProject(root)).issues.some((issue) => issue.code === 'broken-link' && issue.message.includes('missing.html'))).toBe(true)

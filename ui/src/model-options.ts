@@ -39,13 +39,12 @@ export function modelReasoningLevels(agent: string, model: string): readonly str
 }
 
 /**
- * The reasoning level a fresh run starts with. Claude stays at "high": a
+ * The reasoning level a fresh run starts with: "high" for every agent. A
  * measured comprehensive run at "medium" was only a tenth faster and came back
  * with a fifth fewer words, two troubleshooting sections instead of ten, and
  * translation keys quoted in place of the labels the product shows.
  */
 export function preferredReasoningLevel(agent: string, model: string): string {
   const levels = modelReasoningLevels(agent, model)
-  if (agent === 'codex' && levels.includes('low')) return 'low'
   return levels.includes('high') ? 'high' : levels[0] ?? ''
 }

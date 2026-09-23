@@ -105,6 +105,75 @@ describe('screenshot workflow', () => {
     })
   })
 
+  test('a verified step with an image but no target or alt is filled in, never downgraded or deleted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
+    roots.push(root)
+    const file = 'assets/guides/planning/plan-x-abc.png'
+    await mkdir(join(root, 'assets', 'guides', 'planning'), { recursive: true })
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    const png = new PNG({ width: 640, height: 400 })
+    for (let index = 0; index < png.data.length; index += 4) {
+      png.data[index] = index % 255
+      png.data[index + 1] = Math.floor(index / (4 * 640)) % 255
+      png.data[index + 2] = 160
+      png.data[index + 3] = 255
+    }
+    await writeFile(join(root, file), PNG.sync.write(png))
+    await writeFile(join(root, 'guides', 'invite-member.mdx'), `1. Open the dialog.\n\n![Dialog](/${file})\n`).catch(async () => {
+      await mkdir(join(root, 'guides'), { recursive: true })
+      await writeFile(join(root, 'guides', 'invite-member.mdx'), `1. Open the dialog.\n\n![Dialog](/${file})\n`)
+    })
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({
+      schemaVersion: 1,
+      guides: [{
+        page: 'invite-member',
+        steps: [{
+          id: '01', action: 'Select Invite member from Team settings.', expectedState: 'The Invite member dialog is open.', purpose: 'Orient the reader.', capture: true, file, status: 'verified',
+          checks: { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true },
+        }],
+      }],
+    }))
+    await expect(validateScreenshotManifest(root, screenshotPlan(), 'enabled', { dryRun: true })).resolves.toMatchObject({ defects: [] })
+    await expect(validateScreenshotManifest(root, screenshotPlan(), 'enabled', { tolerateDefects: true })).resolves.toMatchObject({ summary: { captured: 1 } })
+    const saved = JSON.parse(await readFile(join(root, SCREENSHOT_MANIFEST_FILE), 'utf8'))
+    expect(saved.guides[0].steps[0]).toMatchObject({ status: 'verified', file, target: 'Select Invite member from Team settings.', alt: 'The Invite member dialog is open.' })
+    await expect(readFile(join(root, file))).resolves.toBeInstanceOf(Buffer)
+  })
+
+  test('a page whose path is also an asset directory is read as a file, not the directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
+    roots.push(root)
+    // `guides/manage-tasks/` holds the page's captures next to `guides/manage-tasks.mdx`;
+    // the extension-less plan path names both.
+    const file = 'guides/manage-tasks/01-list.png'
+    await mkdir(join(root, 'guides', 'manage-tasks'), { recursive: true })
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    const png = new PNG({ width: 640, height: 400 })
+    for (let index = 0; index < png.data.length; index += 4) {
+      png.data[index] = index % 255
+      png.data[index + 1] = Math.floor(index / (4 * 640)) % 255
+      png.data[index + 2] = 160
+      png.data[index + 3] = 255
+    }
+    await writeFile(join(root, file), PNG.sync.write(png))
+    await writeFile(join(root, 'guides', 'manage-tasks.mdx'), `1. Open the list.\n\n![Task list](/${file})\n`)
+    const plan = screenshotPlan()
+    plan.pages[0] = { ...plan.pages[0]!, id: 'manage-tasks', path: 'guides/manage-tasks' }
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({
+      schemaVersion: 1,
+      guides: [{
+        page: 'manage-tasks',
+        steps: [{
+          id: '01', action: 'Open the list.', expectedState: 'The task list is visible.', purpose: 'Orient the reader.', capture: true, target: 'Task list', file,
+          alt: 'Task list', status: 'verified',
+          checks: { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true },
+        }],
+      }],
+    }))
+    await expect(validateScreenshotManifest(root, plan, 'enabled', { dryRun: true })).resolves.toMatchObject({ defects: [] })
+    await expect(validateScreenshotManifest(root, plan, 'enabled')).resolves.toMatchObject({ summary: { status: 'verified', captured: 1, guides: 1 } })
+  })
+
   test('accepts a required run with screenshot problems ignored, recording each one as text-only', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
     roots.push(root)
@@ -155,7 +224,7 @@ describe('screenshot workflow', () => {
     await expect(validateScreenshotManifest(root, plan, 'enabled')).rejects.toThrow('2 screenshot problems')
     const tolerated = await validateScreenshotManifest(root, plan, 'enabled', { tolerateDefects: true })
     expect(tolerated.summary).toMatchObject({ status: 'verified', captured: 1, textOnly: 2, guides: 2, ignoredProblems: 2 })
-    expect(tolerated.summary.message).toContain('2 screenshot problems were ignored')
+    expect(tolerated.summary.message).toContain('2 screenshot problems remain after capture')
     expect(tolerated.summary.message).toContain('02-missing.png')
     // The manifest on disk now tells the truth about every step.
     const manifest = JSON.parse(await readFile(join(root, SCREENSHOT_MANIFEST_FILE), 'utf8')) as { guides: Array<{ page: string; steps: Array<{ status: string; file?: string; textOnlyReason?: string }> }> }
@@ -796,6 +865,38 @@ describe('screenshot workflow', () => {
     }
   })
 
+  test('reports a client-side sign-in wall the browser probe finds when no sign-in material exists', async () => {
+    const server = createServer((_request, response) => { response.statusCode = 200; response.end('<div id="root"></div>') })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    try {
+      if (!address || typeof address === 'string') throw new Error('Missing test server address')
+      const application = { baseUrl: `http://127.0.0.1:${address.port}` }
+      const probed: string[] = []
+      const wall = async (url: string) => { probed.push(url); return { signInPath: '/auth' } }
+      await expect(checkApplicationReadiness(application, { credentials: false }, { browserProbe: wall, context: 'setup' })).resolves.toMatchObject({
+        status: 'authentication-required',
+        reachable: true,
+        authentication: 'none',
+        signInPath: '/auth',
+        message: expect.stringContaining('Sign in once below'),
+      })
+      await expect(checkApplicationReadiness(application, { credentials: false }, { browserProbe: wall })).resolves.toMatchObject({
+        status: 'authentication-required',
+        message: expect.stringContaining('Settings → Visual evidence'),
+      })
+      // Saved credentials already handle a wall; the probe is not needed.
+      await expect(checkApplicationReadiness(application, { credentials: true }, { browserProbe: wall })).resolves.toMatchObject({ status: 'ready' })
+      expect(probed).toHaveLength(2)
+      // No wall, a failing probe, or no probe at all keep the HTTP result.
+      await expect(checkApplicationReadiness(application, { credentials: false }, { browserProbe: async () => undefined })).resolves.toMatchObject({ status: 'ready' })
+      await expect(checkApplicationReadiness(application, { credentials: false }, { browserProbe: async () => { throw new Error('no chrome') } })).resolves.toMatchObject({ status: 'ready' })
+      await expect(checkApplicationReadiness(application, { credentials: false })).resolves.toMatchObject({ status: 'ready' })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    }
+  })
+
   test('follows same-origin redirects and treats only sign-in, external, and looping redirects as blockers', async () => {
     const server = createServer((request, response) => {
       if (request.url === '/dashboard') { response.statusCode = 200; response.end('app shell'); return }
@@ -813,7 +914,7 @@ describe('screenshot workflow', () => {
       if (!address || typeof address === 'string') throw new Error('Missing test server address')
       const baseUrl = `http://127.0.0.1:${address.port}`
       const session = { cookies: [{ name: 'sid', value: 'valid', domain: '127.0.0.1', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' as const }], origins: [] }
-      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/auth-check' })).resolves.toMatchObject({ status: 'authentication-required', reachable: true })
+      await expect(checkApplicationReadiness({ baseUrl, readyPath: '/auth-check' })).resolves.toMatchObject({ status: 'authentication-required', reachable: true, signInPath: '/login' })
       // A signed-in session bounced from the sign-up route to the app shell is still a reachable page.
       await expect(checkApplicationReadiness({ baseUrl, readyPath: '/signup' }, { session, credentials: false })).resolves.toMatchObject({
         status: 'ready',
@@ -828,3 +929,26 @@ describe('screenshot workflow', () => {
     }
   })
 })
+
+describe('dry-run screenshot checks', () => {
+  test('collects every defect without downgrading steps or touching files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-dry-'))
+    roots.push(root)
+    const plan = screenshotPlan()
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    await writeFile(join(root, 'invite-member.mdx'), '1. Select **Invite member**.\n')
+    const manifest = {
+      schemaVersion: 1,
+      guides: [{ page: 'invite-member', steps: [{ id: '01', action: 'Select Invite member from Team settings.', expectedState: 'The Invite member dialog is open.', purpose: 'Orient the reader and prove the form opened.', capture: true, status: 'planned', sequenceItem: 1 }] }],
+    }
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify(manifest))
+    const checked = await validateScreenshotManifest(root, plan, 'enabled', { dryRun: true })
+    expect(checked.defects.length).toBeGreaterThan(0)
+    expect(checked.defects.join(' ')).toContain('was never captured')
+    expect(JSON.parse(await readFile(join(root, SCREENSHOT_MANIFEST_FILE), 'utf8'))).toEqual(manifest)
+    const tolerated = await validateScreenshotManifest(root, plan, 'enabled', { tolerateDefects: true })
+    expect(tolerated.summary.ignoredProblems).toBe(checked.defects.length)
+    expect(JSON.parse(await readFile(join(root, SCREENSHOT_MANIFEST_FILE), 'utf8')).guides[0].steps[0].status).toBe('text-only')
+  })
+})
+

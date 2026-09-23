@@ -699,3 +699,28 @@
   .ov-hero-facts { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .shell:has(.reference-sidebar-nav) .loading-bar { left: 0; }
 }
+
+/* Navbar at laptop widths: the running-task pill never wraps, the project
+   name gives way before the screen title, and secondary links fold to icons. */
+.workspace-crumbs { flex: 0 1 auto; }
+.workspace-crumb { flex: 0 1 auto; min-width: 3.5em; }
+.shell:has(.reference-sidebar-nav) .workspace-navbar .workspace-screen-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-crumbs > .icon { flex: none; }
+.workspace-activity-chip { flex: none; white-space: nowrap; }
+.shell:has(.reference-sidebar-nav) .workspace-support-link,
+.shell:has(.reference-sidebar-nav) .workspace-preview-primary { flex: none; white-space: nowrap; }
+.shell:has(.reference-sidebar-nav) .workspace-preview-primary:disabled { opacity: .85; cursor: progress; }
+.shell:has(.reference-sidebar-nav) .workspace-preview-primary .spinner { width: 14px; height: 14px; }
+
+@media (max-width: 1180px) {
+  .shell:has(.reference-sidebar-nav) .workspace-support-link > span { display: none; }
+  .shell:has(.reference-sidebar-nav) .workspace-preview-primary > .icon:last-child { display: none; }
+  .workspace-crumb { max-width: 180px; }
+}
+
+/* Field help lives behind an info mark so forms stay quiet. */
+.field-label { display: inline-flex; align-items: center; gap: 5px; }
+.field-hint { position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; color: #8a94a8; cursor: help; outline: none; }
+.field-hint:hover, .field-hint:focus-visible { color: var(--brand-dark); background: var(--brand-soft); }
+.field-hint::after { content: attr(data-hint); position: absolute; z-index: 60; left: 50%; bottom: calc(100% + 6px); width: max-content; max-width: 280px; padding: 7px 9px; border-radius: 7px; color: #fff; background: #1d2638; box-shadow: 0 6px 18px rgb(20 28 45 / 18%); font-size: 11.5px; font-weight: 500; line-height: 1.45; letter-spacing: 0; text-transform: none; white-space: normal; transform: translateX(-50%); opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.field-hint:hover::after, .field-hint:focus-visible::after { opacity: 1; }

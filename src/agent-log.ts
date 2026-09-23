@@ -5,7 +5,7 @@
  * the same whichever agent is running, and reports tool calls so stage
  * progress can be derived from what the agent does.
  */
-import type { AgentName } from './types.js'
+import type { AgentName, AgentUsage } from './types.js'
 
 export interface AgentLogFormatter {
   /** Why the agent stopped without a successful result, once it reported one. */
@@ -19,6 +19,12 @@ export interface AgentLogFormatter {
   /** The agent's own session id, when it reported one, so the session can be resumed. */
   sessionId?: string | undefined
   /**
+   * Token usage this agent session has reported so far, or undefined until the
+   * stream carries any. One formatter is one process launch, so `sessions` is
+   * always 1 here; callers merge resumed sessions with `mergeAgentUsage`.
+   */
+  readonly usage: AgentUsage | undefined
+  /**
    * Called for every tool call the agent makes. Tool names and inputs are
    * normalized to Claude's vocabulary (`Bash` with `command`, `Write` with
    * `file_path`, `mcp__<server>__<tool>`) so one classifier serves every agent.
@@ -26,12 +32,80 @@ export interface AgentLogFormatter {
   onToolCall: ((tool: string, input: JsonRecord) => void) | undefined
   push(chunk: Buffer | string): string[]
   finish(): string[]
+  /**
+   * What the agent is doing while its stream is quiet. Once nothing has been
+   * written for the heartbeat interval this returns one progress line naming
+   * the current phase and how long it has lasted — thinking, writing a long
+   * reply, or waiting for a tool call — so a silent stretch reads as
+   * progress instead of a hang. Callers poll it on a timer; `push` also
+   * checks it, so a stream that is busy but prints nothing reports too.
+   */
+  heartbeat(now?: number): string[]
 }
 
-export function createAgentLogFormatter(agent: AgentName): AgentLogFormatter {
-  if (agent === 'codex') return new CodexStreamLogFormatter()
-  if (agent === 'gemini') return new GeminiStreamLogFormatter()
-  return new ClaudeStreamLogFormatter()
+export interface AgentLogFormatterOptions {
+  /** Clock override for tests. */
+  now?: () => number
+  /** Quiet time before a heartbeat line is written. */
+  heartbeatMs?: number
+}
+
+/** Quiet time before a formatter names what the agent is doing. */
+export const AGENT_LOG_HEARTBEAT_MS = 30_000
+/** Tool calls faster than this get no duration suffix; the log's timestamps already cover them. */
+const TOOL_DURATION_THRESHOLD_MS = 1_000
+
+/**
+ * Tracks the phase an agent session is in — waiting for a response, thinking,
+ * writing, running a tool — so a quiet stretch can be named. Every line the
+ * formatter writes resets the quiet timer; a phase that outlasts the interval
+ * produces one heartbeat line per interval.
+ */
+class ActivityPulse {
+  private phase: { description: string; detail: (() => string | undefined) | undefined; startedAt: number } | undefined
+  private lastLineAt: number
+
+  constructor(private readonly now: () => number, private readonly intervalMs: number) {
+    this.lastLineAt = now()
+  }
+
+  begin(description: string, options: { detail?: () => string | undefined; startedAt?: number } = {}): void {
+    this.phase = { description, detail: options.detail, startedAt: options.startedAt ?? this.now() }
+  }
+
+  end(): void {
+    this.phase = undefined
+  }
+
+  /** Emitted lines reset the quiet timer; passes them through for chaining. */
+  mark(lines: string[]): string[] {
+    if (lines.length > 0) this.lastLineAt = this.now()
+    return lines
+  }
+
+  lines(now: number = this.now()): string[] {
+    if (!this.phase || now - this.lastLineAt < this.intervalMs) return []
+    this.lastLineAt = now
+    const detail = this.phase.detail?.()
+    return [`… ${this.phase.description}${detail ? ` (${detail})` : ''} · ${formatLogDuration(now - this.phase.startedAt)}`]
+  }
+}
+
+/** A finished tool call's duration, shown only once it is long enough to matter. */
+function toolDurationSuffix(startedAt: number | undefined, now: number): string {
+  if (startedAt === undefined) return ''
+  const elapsed = now - startedAt
+  return elapsed >= TOOL_DURATION_THRESHOLD_MS ? ` · ${formatLogDuration(elapsed)}` : ''
+}
+
+function charactersSoFar(count: number): string | undefined {
+  return count > 0 ? `${formatTokenCount(count)} characters so far` : undefined
+}
+
+export function createAgentLogFormatter(agent: AgentName, options: AgentLogFormatterOptions = {}): AgentLogFormatter {
+  if (agent === 'codex') return new CodexStreamLogFormatter(options)
+  if (agent === 'gemini') return new GeminiStreamLogFormatter(options)
+  return new ClaudeStreamLogFormatter(options)
 }
 
 /** Split a chunked stream into complete lines, keeping a partial tail. */
@@ -53,15 +127,184 @@ class LineBuffer {
 }
 
 export type JsonRecord = Record<string, unknown>
+
+/** The four token counters every agent's usage is normalized to. */
+interface TokenCounts {
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+}
+
+const ZERO_TOKENS: TokenCounts = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
+
+function addTokens(a: TokenCounts, b: TokenCounts): TokenCounts {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheCreation: a.cacheCreation + b.cacheCreation,
+  }
+}
+
+/** Input + cache read + cache creation: the context one request was served with. */
+function contextTokens(counts: TokenCounts): number {
+  return counts.input + counts.cacheRead + counts.cacheCreation
+}
+
+/**
+ * Claude's usage shape (`input_tokens`, `output_tokens`,
+ * `cache_read_input_tokens`, `cache_creation_input_tokens`), shared by
+ * assistant messages and the result event's cumulative `usage`.
+ */
+function claudeTokens(usage: JsonRecord | undefined): TokenCounts | undefined {
+  if (!usage) return undefined
+  const input = numberField(usage, 'input_tokens')
+  const output = numberField(usage, 'output_tokens')
+  if (input === undefined && output === undefined) return undefined
+  return {
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: numberField(usage, 'cache_read_input_tokens') ?? 0,
+    cacheCreation: numberField(usage, 'cache_creation_input_tokens') ?? 0,
+  }
+}
+
+/**
+ * Tracks the wall-clock span of a stream so a session that never reports a
+ * duration (a crash, a kill) still contributes elapsed time to the usage.
+ */
+class StreamClock {
+  private startedAt: number | undefined
+  private lastAt = 0
+
+  touch(): void {
+    const now = Date.now()
+    this.startedAt ??= now
+    this.lastAt = now
+  }
+
+  elapsedMs(): number {
+    return this.startedAt === undefined ? 0 : Math.max(0, this.lastAt - this.startedAt)
+  }
+}
+
+function buildUsage(
+  tokens: TokenCounts,
+  fields: { turns: number; maxContextTokens: number; durationMs: number; costUsd?: number | undefined },
+): AgentUsage {
+  return {
+    inputTokens: tokens.input,
+    outputTokens: tokens.output,
+    cacheReadTokens: tokens.cacheRead,
+    cacheCreationTokens: tokens.cacheCreation,
+    totalTokens: tokens.input + tokens.output + tokens.cacheRead + tokens.cacheCreation,
+    ...(fields.costUsd !== undefined ? { costUsd: fields.costUsd } : {}),
+    turns: fields.turns,
+    sessions: 1,
+    maxContextTokens: fields.maxContextTokens,
+    durationMs: fields.durationMs,
+  }
+}
+
+/**
+ * Combine the usage of several agent sessions (a run that resumed, or the
+ * plan and authoring phases of one request) into one total. Counters,
+ * sessions, turns, and durations add up; the context high-water mark is the
+ * largest seen; cost is present when any part reported one.
+ */
+export function mergeAgentUsage(...parts: Array<AgentUsage | undefined>): AgentUsage | undefined {
+  const present = parts.filter((part): part is AgentUsage => part !== undefined)
+  if (present.length === 0) return undefined
+  const merged: AgentUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalTokens: 0,
+    turns: 0,
+    sessions: 0,
+    maxContextTokens: 0,
+    durationMs: 0,
+  }
+  let cost: number | undefined
+  for (const part of present) {
+    merged.inputTokens += part.inputTokens
+    merged.outputTokens += part.outputTokens
+    merged.cacheReadTokens += part.cacheReadTokens
+    merged.cacheCreationTokens += part.cacheCreationTokens
+    merged.totalTokens += part.totalTokens
+    merged.turns += part.turns
+    merged.sessions += part.sessions
+    merged.maxContextTokens = Math.max(merged.maxContextTokens, part.maxContextTokens)
+    merged.durationMs += part.durationMs
+    if (part.costUsd !== undefined) cost = (cost ?? 0) + part.costUsd
+  }
+  if (cost !== undefined) merged.costUsd = cost
+  return merged
+}
+
+/** `1234` → `1.2k`, `1_234_567` → `1.2M`; whole thousands drop the `.0`. */
+export function formatTokenCount(count: number): string {
+  const scaled = (value: number, suffix: string): string => {
+    const text = value.toFixed(1)
+    return `${text.endsWith('.0') ? text.slice(0, -2) : text}${suffix}`
+  }
+  if (count >= 1_000_000) return scaled(count / 1_000_000, 'M')
+  if (count >= 1_000) return scaled(count / 1_000, 'k')
+  return String(Math.round(count))
+}
+
+/** Share of the context the model read from cache, as a whole percentage, or undefined when nothing was cached. */
+function cachedPercent(usage: AgentUsage): number | undefined {
+  if (usage.cacheReadTokens === 0 && usage.cacheCreationTokens === 0) return undefined
+  const context = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+  return context > 0 ? Math.round((usage.cacheReadTokens / context) * 100) : undefined
+}
+
+function formatUsageCost(cost: number): string {
+  return cost > 0 && cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`
+}
+
+/**
+ * One line for the UI: `1.2M tokens · 98% cached · $1.42 · 3 sessions`. Cost
+ * is omitted when the agent never reported one; sessions when there was one.
+ */
+export function formatAgentUsage(usage: AgentUsage): string {
+  const parts = [`${formatTokenCount(usage.totalTokens)} tokens`]
+  const cached = cachedPercent(usage)
+  if (cached !== undefined) parts.push(`${cached}% cached`)
+  if (usage.costUsd !== undefined) parts.push(formatUsageCost(usage.costUsd))
+  if (usage.sessions !== 1) parts.push(`${usage.sessions} sessions`)
+  return parts.join(' · ')
+}
+
+/** The usage tail of a finished/stopped summary line: `1.2M tokens (98% cached) · $1.42`. */
+function usageSummary(usage: AgentUsage | undefined): string {
+  if (!usage || usage.totalTokens === 0) return ''
+  const cached = cachedPercent(usage)
+  const cost = usage.costUsd !== undefined ? ` · ${formatUsageCost(usage.costUsd)}` : ''
+  return ` · ${formatTokenCount(usage.totalTokens)} tokens${cached !== undefined ? ` (${cached}% cached)` : ''}${cost}`
+}
+
 type ClaudeStreamBlock =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; characters: number }
   | { type: 'tool'; id?: string; name: string; json: string; input?: JsonRecord }
+
+/** A tool call the agent has made whose result has not arrived yet. */
+interface PendingToolCall {
+  activity: string
+  startedAt: number
+}
 
 /** Convert Claude Code's JSONL stream into concise, durable UI log lines. */
 export class ClaudeStreamLogFormatter implements AgentLogFormatter {
   private buffer = ''
   private readonly blocks = new Map<number, ClaudeStreamBlock>()
-  private readonly tools = new Map<string, string>()
+  private readonly tools = new Map<string, PendingToolCall>()
+  private readonly now: () => number
+  private readonly pulse: ActivityPulse
   private streamedContent = false
   private lastText = ''
   /** Why Claude stopped without a successful result, once its result event arrives. */
@@ -72,18 +315,58 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
   sessionId: string | undefined
   /** Called for every tool call Claude makes, with the parsed input when it is readable. */
   onToolCall: ((tool: string, input: JsonRecord) => void) | undefined
+  /**
+   * Usage per assistant message id. With `--include-partial-messages` the same
+   * assistant message is emitted once per content block, each carrying that
+   * message's usage, so the last report per id wins instead of adding up.
+   */
+  private readonly messageUsage = new Map<string, TokenCounts>()
+  /** Assistant messages that carried usage but no id; nothing to de-duplicate on. */
+  private anonymousUsage: TokenCounts = ZERO_TOKENS
+  private maxContextTokens = 0
+  /** The result event's cumulative usage, preferred over the running sum once it arrives. */
+  private resultTokens: TokenCounts | undefined
+  private resultTurns: number | undefined
+  private resultDurationMs: number | undefined
+  private resultCostUsd: number | undefined
+  private readonly clock = new StreamClock()
+
+  constructor(options: AgentLogFormatterOptions = {}) {
+    this.now = options.now ?? Date.now
+    this.pulse = new ActivityPulse(this.now, options.heartbeatMs ?? AGENT_LOG_HEARTBEAT_MS)
+  }
+
+  heartbeat(now: number = this.now()): string[] {
+    return this.pulse.lines(now)
+  }
+
+  get usage(): AgentUsage | undefined {
+    const seen = this.messageUsage.size > 0 || contextTokens(this.anonymousUsage) + this.anonymousUsage.output > 0
+    if (!seen && !this.resultTokens && this.resultTurns === undefined) return undefined
+    let running = this.anonymousUsage
+    for (const counts of this.messageUsage.values()) running = addTokens(running, counts)
+    return buildUsage(this.resultTokens ?? running, {
+      turns: this.resultTurns ?? this.messageUsage.size,
+      maxContextTokens: this.maxContextTokens,
+      durationMs: this.resultDurationMs ?? this.clock.elapsedMs(),
+      costUsd: this.resultCostUsd,
+    })
+  }
 
   push(chunk: Buffer | string): string[] {
     this.buffer += chunk.toString()
     const lines = this.buffer.split(/\r?\n/)
     this.buffer = lines.pop() ?? ''
-    return lines.flatMap((line) => this.formatLine(line))
+    const written = this.pulse.mark(lines.flatMap((line) => this.formatLine(line)))
+    // A stream busy with thinking or a long reply prints nothing for minutes;
+    // the deltas still arrive, so the heartbeat is checked here as well.
+    return [...written, ...this.pulse.lines()]
   }
 
   finish(): string[] {
     const remaining = this.buffer
     this.buffer = ''
-    return remaining ? this.formatLine(remaining) : []
+    return this.pulse.mark(remaining ? this.formatLine(remaining) : [])
   }
 
   private formatLine(line: string): string[] {
@@ -99,7 +382,9 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
     }
 
     const type = stringField(message, 'type')
+    this.clock.touch()
     if (type === 'stream_event') return this.formatStreamEvent(jsonRecord(message.event))
+    if (type === 'assistant') this.recordAssistantUsage(jsonRecord(message.message))
     if (type === 'assistant' && !this.streamedContent) {
       return this.formatAssistantMessage(jsonRecord(message.message))
     }
@@ -124,18 +409,26 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
       if (!content) return []
       const contentType = stringField(content, 'type')
       if (contentType === 'text') {
-        this.blocks.set(index, { type: 'text', text: stringField(content, 'text') ?? '' })
+        const block: ClaudeStreamBlock = { type: 'text', text: stringField(content, 'text') ?? '' }
+        this.blocks.set(index, block)
         this.streamedContent = true
+        this.pulse.begin('Claude is writing its reply', { detail: () => charactersSoFar(block.text.length) })
       } else if (contentType === 'tool_use') {
         const name = stringField(content, 'name') ?? 'tool'
-        this.blocks.set(index, {
+        const block: ClaudeStreamBlock = {
           type: 'tool',
           ...(stringField(content, 'id') ? { id: stringField(content, 'id')! } : {}),
           name,
           json: '',
           ...(jsonRecord(content.input) ? { input: jsonRecord(content.input)! } : {}),
-        })
+        }
+        this.blocks.set(index, block)
         this.streamedContent = true
+        this.pulse.begin(`Claude is preparing a ${name} call`, { detail: () => charactersSoFar(block.json.length) })
+      } else if (contentType === 'thinking' || contentType === 'redacted_thinking') {
+        const block: ClaudeStreamBlock = { type: 'thinking', characters: 0 }
+        this.blocks.set(index, block)
+        this.pulse.begin('Claude is thinking', { detail: () => charactersSoFar(block.characters) })
       }
       return []
     }
@@ -148,6 +441,8 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
         block.text += stringField(delta, 'text') ?? ''
       } else if (block.type === 'tool' && stringField(delta, 'type') === 'input_json_delta') {
         block.json += stringField(delta, 'partial_json') ?? ''
+      } else if (block.type === 'thinking' && stringField(delta, 'type') === 'thinking_delta') {
+        block.characters += (stringField(delta, 'thinking') ?? '').length
       }
       return []
     }
@@ -156,7 +451,14 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
     const block = this.blocks.get(index)
     this.blocks.delete(index)
     if (!block) return []
-    if (block.type === 'text') return this.textLines(block.text)
+    if (block.type === 'thinking') {
+      this.awaitNextStep()
+      return []
+    }
+    if (block.type === 'text') {
+      this.awaitNextStep()
+      return this.textLines(block.text)
+    }
 
     let input = block.input ?? {}
     if (block.json) {
@@ -167,9 +469,65 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
       }
     }
     const activity = formatClaudeToolActivity(block.name, input)
-    if (block.id) this.tools.set(block.id, activity)
+    this.beginToolCall(block.id, activity)
     this.onToolCall?.(block.name, input)
     return [`→ ${activity}`]
+  }
+
+  /** Claude Code runs the tool as soon as its call is complete; the result arrives as a user message. */
+  private beginToolCall(id: string | undefined, activity: string): void {
+    const startedAt = this.now()
+    if (id) this.tools.set(id, { activity, startedAt })
+    this.pulse.begin(`waiting for ${activity} to finish`, { startedAt })
+  }
+
+  /** A block or tool result just ended: the next event is either another tool result or Claude's own. */
+  private awaitNextStep(): void {
+    const pending = [...this.tools.values()].at(-1)
+    if (pending) this.pulse.begin(`waiting for ${pending.activity} to finish`, { startedAt: pending.startedAt })
+    else this.pulse.begin("waiting for Claude's next step")
+  }
+
+  private recordAssistantUsage(message: JsonRecord | undefined): void {
+    const counts = message ? claudeTokens(jsonRecord(message.usage)) : undefined
+    if (!counts) return
+    this.maxContextTokens = Math.max(this.maxContextTokens, contextTokens(counts))
+    const id = message ? stringField(message, 'id') : undefined
+    if (id) this.messageUsage.set(id, counts)
+    else this.anonymousUsage = addTokens(this.anonymousUsage, counts)
+  }
+
+  /**
+   * The result event's totals: its `usage` object when present, else the sum
+   * of its per-model `modelUsage` map, else nothing (the running sum stands).
+   */
+  private recordResultUsage(message: JsonRecord): void {
+    this.resultTurns = numberField(message, 'num_turns') ?? this.resultTurns
+    this.resultDurationMs = numberField(message, 'duration_ms') ?? this.resultDurationMs
+    this.resultCostUsd = numberField(message, 'total_cost_usd') ?? this.resultCostUsd
+    const totals = claudeTokens(jsonRecord(message.usage))
+    if (totals) {
+      this.resultTokens = totals
+      return
+    }
+    const perModel = jsonRecord(message.modelUsage)
+    if (!perModel) return
+    let summed: TokenCounts | undefined
+    let cost: number | undefined
+    for (const entry of Object.values(perModel)) {
+      const record = jsonRecord(entry)
+      if (!record) continue
+      summed = addTokens(summed ?? ZERO_TOKENS, {
+        input: numberField(record, 'inputTokens') ?? 0,
+        output: numberField(record, 'outputTokens') ?? 0,
+        cacheRead: numberField(record, 'cacheReadInputTokens') ?? 0,
+        cacheCreation: numberField(record, 'cacheCreationInputTokens') ?? 0,
+      })
+      const modelCost = numberField(record, 'costUSD')
+      if (modelCost !== undefined) cost = (cost ?? 0) + modelCost
+    }
+    if (summed) this.resultTokens = summed
+    if (this.resultCostUsd === undefined && cost !== undefined) this.resultCostUsd = cost
   }
 
   private formatAssistantMessage(message: JsonRecord | undefined): string[] {
@@ -186,8 +544,7 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
         const name = stringField(block, 'name') ?? 'tool'
         const input = jsonRecord(block.input) ?? {}
         const activity = formatClaudeToolActivity(name, input)
-        const id = stringField(block, 'id')
-        if (id) this.tools.set(id, activity)
+        this.beginToolCall(stringField(block, 'id'), activity)
         this.onToolCall?.(name, input)
         lines.push(`→ ${activity}`)
       }
@@ -203,14 +560,18 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
       const block = jsonRecord(rawBlock)
       if (!block || stringField(block, 'type') !== 'tool_result') continue
       const id = stringField(block, 'tool_use_id')
-      const activity = (id && this.tools.get(id)) || 'Tool action'
+      const pending = id ? this.tools.get(id) : undefined
+      if (id) this.tools.delete(id)
+      const activity = pending?.activity ?? 'Tool action'
+      const duration = toolDurationSuffix(pending?.startedAt, this.now())
       if (block.is_error === true) {
         const detail = compactClaudeValue(block.content)
-        lines.push(`✗ ${activity} failed${detail ? `: ${detail}` : ''}`)
+        lines.push(`✗ ${activity} failed${detail ? `: ${detail}` : ''}${duration}`)
       } else {
-        lines.push(`✓ ${activity}`)
+        lines.push(`✓ ${activity}${duration}`)
       }
     }
+    this.awaitNextStep()
     return lines
   }
 
@@ -219,6 +580,7 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
     if (subtype === 'init') {
       const model = stringField(message, 'model')
       this.sessionId = stringField(message, 'session_id') ?? this.sessionId
+      this.pulse.begin("waiting for Claude's first response")
       return [`Claude session started${model ? ` · ${model}` : ''}`]
     }
     if (subtype === 'api_retry') {
@@ -239,6 +601,8 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
     const turns = numberField(message, 'num_turns')
     const duration = numberField(message, 'duration_ms')
     const result = stringField(message, 'result')
+    this.recordResultUsage(message)
+    this.pulse.end()
     // A result event that is an error but has no `errors` list carries the
     // failure in its text (or in the last assistant text), such as
     // "API Error: Server error mid-response".
@@ -249,7 +613,7 @@ export class ClaudeStreamLogFormatter implements AgentLogFormatter {
       this.transientFailure = stop.transient
     }
     const reason = stop?.reason
-    const summary = `Claude ${success ? 'finished' : 'stopped'}${turns !== undefined ? ` · ${turns} turns` : ''}${duration !== undefined ? ` · ${formatLogDuration(duration)}` : ''}${reason ? ` · ${reason}` : ''}`
+    const summary = `Claude ${success ? 'finished' : 'stopped'}${turns !== undefined ? ` · ${turns} turns` : ''}${duration !== undefined ? ` · ${formatLogDuration(duration)}` : ''}${usageSummary(this.usage)}${reason ? ` · ${reason}` : ''}`
     return [...(result ? this.textLines(result) : []), summary]
   }
 
@@ -329,6 +693,7 @@ function formatClaudeToolActivity(name: string, input: JsonRecord): string {
   if (name === 'WebFetch') return `Fetching ${compactLogText(url ?? 'a web page')}`
   if (name === 'WebSearch') return `Searching the web${query ? ` for ${compactLogText(query)}` : ''}`
   if (name === 'Skill') return `Loading skill ${compactLogText(stringField(input, 'skill') ?? 'instructions')}`
+  if (name === 'ToolSearch') return `Looking up tools${query ? ` matching ${compactLogText(query)}` : ''}`
   if (name === 'Agent' || name === 'Task') return `Starting subtask${description || prompt ? `: ${compactLogText(description ?? prompt ?? '')}` : ''}`
   return `Using ${compactLogText(name)}`
 }
@@ -351,17 +716,58 @@ function compactClaudeValue(value: unknown): string {
  */
 export class CodexStreamLogFormatter implements AgentLogFormatter {
   private readonly lines = new LineBuffer()
-  private readonly startedItems = new Set<string>()
+  /** Items Codex has started, by id, with the time they started. */
+  private readonly startedItems = new Map<string, number>()
+  private readonly now: () => number
+  private readonly pulse: ActivityPulse
   private lastText = ''
   stopReason: string | undefined
   onToolCall: ((tool: string, input: JsonRecord) => void) | undefined
+  /** Sum of every `turn.completed` usage, or the last cumulative `token_count` total when the stream carries one. */
+  private tokens: TokenCounts | undefined
+  private turns = 0
+  private maxContextTokens = 0
+  private readonly clock = new StreamClock()
+
+  constructor(options: AgentLogFormatterOptions = {}) {
+    this.now = options.now ?? Date.now
+    this.pulse = new ActivityPulse(this.now, options.heartbeatMs ?? AGENT_LOG_HEARTBEAT_MS)
+  }
+
+  heartbeat(now: number = this.now()): string[] {
+    return this.pulse.lines(now)
+  }
+
+  get usage(): AgentUsage | undefined {
+    if (!this.tokens) return undefined
+    return buildUsage(this.tokens, {
+      turns: this.turns,
+      maxContextTokens: this.maxContextTokens,
+      durationMs: this.clock.elapsedMs(),
+    })
+  }
+
+  /**
+   * Codex counts cached prompt tokens inside `input_tokens`; Claude reports
+   * them separately. Split them out so "input" means uncached input for every
+   * agent and the four counters add up to the total either way.
+   */
+  private static tokensOf(usage: JsonRecord | undefined): TokenCounts | undefined {
+    if (!usage) return undefined
+    const input = numberField(usage, 'input_tokens')
+    const output = numberField(usage, 'output_tokens')
+    if (input === undefined && output === undefined) return undefined
+    const cached = Math.min(numberField(usage, 'cached_input_tokens') ?? 0, input ?? 0)
+    return { input: (input ?? 0) - cached, output: output ?? 0, cacheRead: cached, cacheCreation: 0 }
+  }
 
   push(chunk: Buffer | string): string[] {
-    return this.lines.push(chunk).flatMap((line) => this.formatLine(line))
+    const written = this.pulse.mark(this.lines.push(chunk).flatMap((line) => this.formatLine(line)))
+    return [...written, ...this.pulse.lines()]
   }
 
   finish(): string[] {
-    return this.lines.finish().flatMap((line) => this.formatLine(line))
+    return this.pulse.mark(this.lines.finish().flatMap((line) => this.formatLine(line)))
   }
 
   private formatLine(line: string): string[] {
@@ -375,7 +781,11 @@ export class CodexStreamLogFormatter implements AgentLogFormatter {
       return [line]
     }
     const type = stringField(message, 'type')
-    if (type === 'thread.started') return ['Codex session started']
+    this.clock.touch()
+    if (type === 'thread.started') {
+      this.pulse.begin("waiting for Codex's first response")
+      return ['Codex session started']
+    }
     if (type === 'turn.failed') {
       const error = jsonRecord(message.error)
       const detail = error ? stringField(error, 'message') : undefined
@@ -388,9 +798,24 @@ export class CodexStreamLogFormatter implements AgentLogFormatter {
       return [`Codex ${this.stopReason}`]
     }
     if (type === 'turn.completed') {
-      const usage = jsonRecord(message.usage)
-      const output = usage ? numberField(usage, 'output_tokens') : undefined
-      return [`Codex finished${output !== undefined ? ` · ${output} output tokens` : ''}`]
+      const counts = CodexStreamLogFormatter.tokensOf(jsonRecord(message.usage))
+      this.turns += 1
+      // A turn's usage is the sum over every request in the turn, not one
+      // request's context, so it says nothing about context size; only a
+      // token_count event's last_token_usage does.
+      if (counts) this.tokens = addTokens(this.tokens ?? ZERO_TOKENS, counts)
+      this.pulse.end()
+      return [`Codex finished · ${this.turns} turn${this.turns === 1 ? '' : 's'}${usageSummary(this.usage)}`]
+    }
+    if (type === 'token_count' || type === 'thread.token_usage') {
+      // Codex core's cumulative counter: `info.total_token_usage` is the
+      // session total so far and `info.last_token_usage` the latest request.
+      const info = jsonRecord(message.info) ?? jsonRecord(message.usage) ?? message
+      const total = CodexStreamLogFormatter.tokensOf(jsonRecord(info.total_token_usage) ?? jsonRecord(info.total))
+      const last = CodexStreamLogFormatter.tokensOf(jsonRecord(info.last_token_usage) ?? jsonRecord(info.last))
+      if (total) this.tokens = total
+      if (last) this.maxContextTokens = Math.max(this.maxContextTokens, contextTokens(last))
+      return []
     }
     if (type !== 'item.started' && type !== 'item.completed') return []
     const item = jsonRecord(message.item)
@@ -400,17 +825,22 @@ export class CodexStreamLogFormatter implements AgentLogFormatter {
 
   private itemStarted(item: JsonRecord): string[] {
     const id = stringField(item, 'id')
-    if (id) this.startedItems.add(id)
+    const startedAt = this.now()
+    if (id) this.startedItems.set(id, startedAt)
     const activity = this.activity(item)
     if (!activity) return []
     this.reportTool(item)
+    this.pulse.begin(`waiting for ${activity} to finish`, { startedAt })
     return [`→ ${activity}`]
   }
 
   private itemCompleted(item: JsonRecord): string[] {
     const kind = stringField(item, 'type')
     const id = stringField(item, 'id')
-    const started = id !== undefined && this.startedItems.delete(id)
+    const startedAt = id !== undefined ? this.startedItems.get(id) : undefined
+    const started = startedAt !== undefined
+    if (id) this.startedItems.delete(id)
+    this.pulse.begin("waiting for Codex's next step")
     if (kind === 'agent_message') return this.textLines(stringField(item, 'text') ?? '')
     if (kind === 'reasoning') return []
     if (kind === 'error') return [`✗ ${compactLogText(stringField(item, 'message') ?? 'Codex reported an error')}`]
@@ -425,7 +855,8 @@ export class CodexStreamLogFormatter implements AgentLogFormatter {
     const status = stringField(item, 'status')
     const exitCode = numberField(item, 'exit_code')
     const failed = status === 'failed' || status === 'declined' || (exitCode !== undefined && exitCode !== 0)
-    return [failed ? `✗ ${activity} failed${exitCode !== undefined && exitCode !== 0 ? ` (exit ${exitCode})` : ''}` : `✓ ${activity}`]
+    const duration = toolDurationSuffix(startedAt, this.now())
+    return [failed ? `✗ ${activity} failed${exitCode !== undefined && exitCode !== 0 ? ` (exit ${exitCode})` : ''}${duration}` : `✓ ${activity}${duration}`]
   }
 
   private activity(item: JsonRecord): string | undefined {
@@ -480,18 +911,33 @@ export class CodexStreamLogFormatter implements AgentLogFormatter {
  */
 export class GeminiStreamLogFormatter implements AgentLogFormatter {
   private readonly lines = new LineBuffer()
-  private readonly tools = new Map<string, string>()
+  private readonly tools = new Map<string, PendingToolCall>()
+  private readonly now: () => number
+  private readonly pulse: ActivityPulse
   private assistantText = ''
   private lastText = ''
   stopReason: string | undefined
   onToolCall: ((tool: string, input: JsonRecord) => void) | undefined
+  /** Set from the result event's `stats` when it carries token counts; Gemini reports nothing per message. */
+  usage: AgentUsage | undefined
+  private readonly clock = new StreamClock()
+
+  constructor(options: AgentLogFormatterOptions = {}) {
+    this.now = options.now ?? Date.now
+    this.pulse = new ActivityPulse(this.now, options.heartbeatMs ?? AGENT_LOG_HEARTBEAT_MS)
+  }
+
+  heartbeat(now: number = this.now()): string[] {
+    return this.pulse.lines(now)
+  }
 
   push(chunk: Buffer | string): string[] {
-    return this.lines.push(chunk).flatMap((line) => this.formatLine(line))
+    const written = this.pulse.mark(this.lines.push(chunk).flatMap((line) => this.formatLine(line)))
+    return [...written, ...this.pulse.lines()]
   }
 
   finish(): string[] {
-    return [...this.lines.finish().flatMap((line) => this.formatLine(line)), ...this.flushText()]
+    return this.pulse.mark([...this.lines.finish().flatMap((line) => this.formatLine(line)), ...this.flushText()])
   }
 
   private formatLine(line: string): string[] {
@@ -505,6 +951,7 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
       return [line]
     }
     const type = stringField(message, 'type')
+    this.clock.touch()
     if (type === 'message') {
       if (stringField(message, 'role') !== 'assistant') return []
       const content = stringField(message, 'content') ?? ''
@@ -517,6 +964,7 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
     const pending = this.flushText()
     if (type === 'init') {
       const model = stringField(message, 'model')
+      this.pulse.begin("waiting for Gemini's first response")
       return [...pending, `Gemini session started${model ? ` · ${model}` : ''}`]
     }
     if (type === 'tool_use') {
@@ -524,19 +972,24 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
       const parameters = jsonRecord(message.parameters) ?? {}
       const activity = formatGeminiToolActivity(name, parameters)
       const id = stringField(message, 'tool_id')
-      if (id) this.tools.set(id, activity)
+      const startedAt = this.now()
+      if (id) this.tools.set(id, { activity, startedAt })
       this.reportTool(name, parameters)
+      this.pulse.begin(`waiting for ${activity} to finish`, { startedAt })
       return [...pending, `→ ${activity}`]
     }
     if (type === 'tool_result') {
       const id = stringField(message, 'tool_id')
-      const activity = (id && this.tools.get(id)) || 'Tool action'
+      const call = id ? this.tools.get(id) : undefined
+      const activity = call?.activity ?? 'Tool action'
       if (id) this.tools.delete(id)
+      const duration = toolDurationSuffix(call?.startedAt, this.now())
+      this.pulse.begin("waiting for Gemini's next step")
       if (stringField(message, 'status') === 'error') {
         const detail = stringField(message, 'output') ?? stringField(message, 'error')
-        return [...pending, `✗ ${activity} failed${detail ? `: ${compactLogText(detail)}` : ''}`]
+        return [...pending, `✗ ${activity} failed${detail ? `: ${compactLogText(detail)}` : ''}${duration}`]
       }
-      return [...pending, `✓ ${activity}`]
+      return [...pending, `✓ ${activity}${duration}`]
     }
     if (type === 'error') {
       const detail = stringField(message, 'message')
@@ -549,6 +1002,8 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
       const stats = jsonRecord(message.stats)
       const duration = stats ? numberField(stats, 'duration_ms') : undefined
       const calls = stats ? numberField(stats, 'tool_calls') : undefined
+      this.usage = geminiUsage(stats, duration ?? this.clock.elapsedMs()) ?? this.usage
+      this.pulse.end()
       if (!success && !this.stopReason) {
         const detail = jsonRecord(message.error)
         const reason = detail ? stringField(detail, 'message') : stringField(message, 'error')
@@ -556,7 +1011,7 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
       }
       return [
         ...pending,
-        `Gemini ${success ? 'finished' : 'stopped'}${calls !== undefined ? ` · ${calls} tool calls` : ''}${duration !== undefined ? ` · ${formatLogDuration(duration)}` : ''}${!success && this.stopReason ? ` · ${this.stopReason}` : ''}`,
+        `Gemini ${success ? 'finished' : 'stopped'}${calls !== undefined ? ` · ${calls} tool calls` : ''}${duration !== undefined ? ` · ${formatLogDuration(duration)}` : ''}${usageSummary(this.usage)}${!success && this.stopReason ? ` · ${this.stopReason}` : ''}`,
       ]
     }
     return pending
@@ -587,6 +1042,43 @@ export class GeminiStreamLogFormatter implements AgentLogFormatter {
     this.lastText = normalized
     return normalized.split(/\r?\n/).filter(Boolean)
   }
+}
+
+/**
+ * Gemini's result `stats` either carry flat token counts (`input_tokens`,
+ * `output_tokens`, `cached_tokens`) or a per-model map whose `tokens` object
+ * has `prompt`, `candidates`, and `cached`. Anything else leaves usage unset.
+ */
+function geminiUsage(stats: JsonRecord | undefined, durationMs: number): AgentUsage | undefined {
+  if (!stats) return undefined
+  let counts: TokenCounts | undefined
+  const input = numberField(stats, 'input_tokens') ?? numberField(stats, 'prompt_tokens')
+  const output = numberField(stats, 'output_tokens') ?? numberField(stats, 'candidates_tokens')
+  if (input !== undefined || output !== undefined) {
+    const cached = Math.min(numberField(stats, 'cached_tokens') ?? numberField(stats, 'cached_content_tokens') ?? 0, input ?? 0)
+    counts = { input: (input ?? 0) - cached, output: output ?? 0, cacheRead: cached, cacheCreation: 0 }
+  } else {
+    const models = jsonRecord(stats.models)
+    for (const entry of Object.values(models ?? {})) {
+      const tokens = jsonRecord(jsonRecord(entry)?.tokens)
+      if (!tokens) continue
+      const prompt = numberField(tokens, 'prompt') ?? 0
+      const cached = Math.min(numberField(tokens, 'cached') ?? 0, prompt)
+      counts = addTokens(counts ?? ZERO_TOKENS, {
+        input: prompt - cached,
+        output: (numberField(tokens, 'candidates') ?? 0) + (numberField(tokens, 'thoughts') ?? 0),
+        cacheRead: cached,
+        cacheCreation: 0,
+      })
+    }
+  }
+  if (!counts) return undefined
+  return buildUsage(counts, {
+    turns: numberField(stats, 'turns') ?? numberField(stats, 'tool_calls') ?? 0,
+    // Gemini reports session totals only, so the largest context is unknown; the total input is an upper bound.
+    maxContextTokens: contextTokens(counts),
+    durationMs,
+  })
 }
 
 function formatGeminiToolActivity(name: string, parameters: JsonRecord): string {

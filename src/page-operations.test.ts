@@ -69,3 +69,10 @@ test('draft preview renders Markdown rather than serializing its render result',
   expect(previewPageContent("# Draft\n\nPreview this sentence.").html).toMatch(/<p[^>]*>Preview this sentence[.]<\/p>/)
   expect(previewPageContent("# Draft").html).not.toContain("[object Object]")
 })
+
+test('readRedirects ignores a stored root redirect and malformed entries', async () => {
+  const root = await fixture()
+  await mkdir(join(root, '.doxloop'), { recursive: true })
+  await writeFile(join(root, '.doxloop', 'redirects.json'), JSON.stringify({ '/': '/getting-started/product-overview', '/old': '/quickstart', '/loop': '/loop', '/bad': 42 }))
+  expect(await readRedirects(root)).toEqual({ '/old': '/quickstart' })
+})

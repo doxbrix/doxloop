@@ -3,6 +3,7 @@ import { toChildArray } from 'preact'
 import type { ComponentChildren, JSX, VNode } from 'preact'
 import { useEffect, useId, useRef, useState } from 'preact/hooks'
 import { Icon } from './icons'
+import { displayLogLines } from './log-lines'
 
 /**
  * The shared surface for every screen: a bordered white panel with an optional
@@ -93,11 +94,14 @@ export function Badge({ tone = 'neutral', icon, children }: { tone?: string; ico
   return <span class={`badge ${tone}`}>{icon && <Icon name={icon} size={12} />}{children}</span>
 }
 
+/**
+ * A labelled form control. Help text stays out of the way: it is a small info
+ * mark beside the label that shows the hint on hover or keyboard focus.
+ */
 export function Field(props: { label: string; hint?: string; children: ComponentChildren; wide?: boolean }) {
   return <label class={`field ${props.wide ? 'wide' : ''}`}>
-    <span class="field-label">{props.label}</span>
+    <span class="field-label">{props.label}{props.hint && <span class="field-hint" tabIndex={0} role="img" aria-label={props.hint} data-hint={props.hint} onClick={(event) => event.preventDefault()}><Icon name="info" size={12} /></span>}</span>
     {props.children}
-    {props.hint && <small>{props.hint}</small>}
   </label>
 }
 
@@ -179,11 +183,11 @@ export function Select({ icon, ...props }: JSX.SelectHTMLAttributes<HTMLSelectEl
   }, [open])
   return <span ref={root} class={`select-wrap custom-select ${icon ? 'with-icon' : ''}`}>
     {icon && <Icon name={icon} size={15} class="lead-icon" />}
-    <button type="button" class={`input custom-select-trigger ${className ?? ''}`} disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listboxId : undefined} aria-activedescendant={open ? `${listboxId}-${highlighted}` : undefined} onClick={() => open ? setOpen(false) : openMenu()} onKeyDown={onKeyDown}>
+    <button type="button" class={`input custom-select-trigger ${className ?? ''}`} disabled={disabled} aria-label={props['aria-label']} aria-labelledby={props['aria-labelledby']} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listboxId : undefined} aria-activedescendant={open ? `${listboxId}-${highlighted}` : undefined} onClick={() => open ? setOpen(false) : openMenu()} onKeyDown={onKeyDown}>
       <span>{selected?.label || 'Select an option'}</span><Icon name="chevronDown" size={14} />
     </button>
     {name && <input type="hidden" name={name} value={String(value ?? '')} />}
-    {open && typeof document !== 'undefined' && createPortal(<div ref={menu} id={listboxId} class="custom-select-menu" role="listbox" style={`left:${position.left}px;top:${position.top}px;width:${position.width}px`}>
+    {open && typeof document !== 'undefined' && createPortal(<div ref={menu} id={listboxId} class="custom-select-menu" role="listbox" aria-label={props['aria-label']} style={`left:${position.left}px;top:${position.top}px;width:${position.width}px`}>
       {options.map((option, index) => <button key={`${option.value}-${index}`} type="button" id={`${listboxId}-${index}`} role="option" aria-selected={index === selectedIndex} class={`${index === selectedIndex ? 'selected' : ''} ${index === highlighted ? 'highlighted' : ''}`} disabled={option.disabled} onMouseEnter={() => setHighlighted(index)} onClick={() => choose(option.value, option.disabled)}><span>{option.label}</span>{index === selectedIndex && <Icon name="check" size={14} />}</button>)}
     </div>, document.body)}
   </span>
@@ -306,7 +310,7 @@ export function Segmented<T extends string>({ value, onChange, items }: {
   onChange: (value: T) => void
   items: ReadonlyArray<readonly [T, string]>
 }) {
-  return <div class="segmented">{items.map(([id, label]) =>
+  return <div class="segmented" role="group">{items.map(([id, label]) =>
     <button key={id} type="button" class={value === id ? 'active' : ''} aria-pressed={value === id} onClick={() => onChange(id)}>{label}</button>)}</div>
 }
 
@@ -346,7 +350,7 @@ export function JobTable({ jobs, onCancel }: {
     {jobs.map((job) => <tr key={job.id} class="job-row">
       <td>
         <div class="job-name"><Icon name={JOB_ICON[job.status] ?? 'clock'} size={14} class={job.status === 'running' ? 'spin' : ''} /><span>{job.type.replaceAll(':', ' · ')}</span></div>
-        {job.lines.length > 0 && <details class="job-output"><summary>{job.lines.length} recent output line{job.lines.length === 1 ? '' : 's'}</summary><pre class="terminal">{job.lines.join('\n')}</pre><a class="job-full-log" href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log</a></details>}
+        {job.lines.length > 0 && <details class="job-output"><summary>{job.lines.length} recent output line{job.lines.length === 1 ? '' : 's'}</summary><pre class="terminal">{displayLogLines(job.lines).join('\n')}</pre><a class="job-full-log" href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log</a></details>}
       </td>
       <td><Badge tone={JOB_TONE[job.status] ?? 'neutral'}>{job.status}</Badge></td>
       <td class="muted-cell">{timeText(job.startedAt)}</td>

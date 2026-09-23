@@ -11,19 +11,27 @@ export type BatchScope = 'starter' | 'standard' | 'comprehensive' | 'custom'
  */
 export const SCREENSHOTS_PER_PAGE = 3
 export const MAX_BATCH_SCREENSHOTS = 300
+/** `maxPages` at this value means the evidence sets the size: no page cap. */
+export const UNLIMITED_PAGES = 500
+
+export function hasPageLimit(limits: Pick<BatchLimits, 'maxPages'>): boolean {
+  return limits.maxPages < UNLIMITED_PAGES
+}
 /**
  * The batch a new plan gets when the reviewer has not set limits by hand.
- * The depth chosen in the wizard or on the Update page has to mean what it
- * says: a comprehensive plan is not a five-page batch, and a large batch needs
- * the planning and authoring time to match. `maxMinutes` bounds one attempt.
+ * A starter plan is a small, bounded batch. Standard and comprehensive plans
+ * have no page cap: the evidence sets their size, and a cap of forty turned
+ * every large product into a forty-page plan with the rest silently dropped.
+ * Reviewers can still set a cap on the plan review's batch-limits panel.
+ * Existing approved plans retain their approved scope. `maxMinutes` bounds one attempt.
  */
 export function defaultBatchLimits(scope: BatchScope, screenshots: boolean, targetPages = 0): BatchLimits {
   const base = scope === 'starter'
     ? { maxPages: 5, maxMinutes: 15 }
     : scope === 'comprehensive'
-      ? { maxPages: 40, maxMinutes: 120 }
-      : { maxPages: 12, maxMinutes: 45 }
-  const maxPages = Math.min(500, Math.max(base.maxPages, targetPages))
+      ? { maxPages: UNLIMITED_PAGES, maxMinutes: 120 }
+      : { maxPages: UNLIMITED_PAGES, maxMinutes: 45 }
+  const maxPages = Math.min(UNLIMITED_PAGES, Math.max(base.maxPages, targetPages))
   return {
     maxPages,
     maxScreenshots: screenshots ? Math.min(MAX_BATCH_SCREENSHOTS, maxPages * SCREENSHOTS_PER_PAGE) : 0,

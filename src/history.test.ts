@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
-import { closeHistory, historyAvailable, openHistory } from './db.js'
+import { DATABASE_FILE, SCHEMA_VERSION, closeHistory, historyAvailable, openHistory } from './db.js'
 import { computeDrift } from './drift.js'
 import { writeEvidenceMap } from './evidence.js'
 import {
@@ -26,7 +26,7 @@ import {
 import { loadProject, scaffoldProject } from './project.js'
 import { collectSourceChanges, recordSyncState } from './sync.js'
 import { acceptSyncChanges, createSyncRun, rejectSyncRun } from './sync-runs.js'
-import type { SyncRun } from './types.js'
+import type { AgentUsage, SyncRun } from './types.js'
 
 const run = promisify(execFile)
 const roots: string[] = []
@@ -325,6 +325,100 @@ withSqlite('history storage', () => {
     expect(request?.status).toBe('completed')
     expect(request?.validationWarnings).toBe(1)
     expect(request?.durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  test('round-trips agent token usage through the request row', async () => {
+    const { root } = await fixture()
+    const id = await startRequest(root, { kind: 'update', requestText: 'Explain the limit', agent: 'claude' })
+    const usage: AgentUsage = {
+      inputTokens: 1200,
+      outputTokens: 800,
+      cacheReadTokens: 250_000,
+      cacheCreationTokens: 4000,
+      totalTokens: 256_000,
+      costUsd: 1.42,
+      turns: 37,
+      sessions: 2,
+      maxContextTokens: 98_000,
+      durationMs: 120_000,
+    }
+    await finishRequest(root, id, { status: 'completed', usage })
+
+    const [request] = await listRequests(root)
+    expect(request?.usage).toMatchObject({ ...usage, durationMs: expect.any(Number) })
+    expect(request?.usage?.durationMs).toBe(request?.durationMs)
+
+    // Finishing again without usage keeps what was recorded.
+    await finishRequest(root, id, { status: 'applied' })
+    expect((await listRequests(root))[0]?.usage?.totalTokens).toBe(256_000)
+  })
+
+  test('leaves usage undefined for requests that never reported any', async () => {
+    const { root } = await fixture()
+    const id = await startRequest(root, { kind: 'create' })
+    await finishRequest(root, id, { status: 'completed' })
+    const [request] = await listRequests(root)
+    expect(request?.usage).toBeUndefined()
+    expect(request?.status).toBe('completed')
+  })
+
+  test('mirrors a proposal\'s usage into history', async () => {
+    const { root } = await fixture()
+    const created = await proposal(root, 'Document the new limit of 20')
+    const usage: AgentUsage = {
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 30,
+      cacheCreationTokens: 40,
+      totalTokens: 100,
+      turns: 2,
+      sessions: 1,
+      maxContextTokens: 80,
+      durationMs: 1000,
+    }
+    await recordSyncRun(root, { ...created, usage })
+    const [request] = await listRequests(root)
+    expect(request?.id).toBe(created.id)
+    expect(request?.usage).toMatchObject({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheCreationTokens: 40, totalTokens: 100, turns: 2, sessions: 1, maxContextTokens: 80 })
+    expect(request?.usage?.costUsd).toBeUndefined()
+  })
+
+  test('adds the usage columns to a database created before they existed', async () => {
+    const { root } = await fixture()
+    const { DatabaseSync } = (await import('node:sqlite')) as unknown as { DatabaseSync: new (path: string) => { exec(sql: string): void; prepare(sql: string): { get(): unknown }; close(): void } }
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    const legacy = new DatabaseSync(join(root, DATABASE_FILE))
+    // The version-1 `requests` table, as shipped before usage was recorded.
+    legacy.exec(`
+      CREATE TABLE requests (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER,
+        kind TEXT NOT NULL, trigger TEXT NOT NULL, request_text TEXT, agent TEXT, model TEXT,
+        reasoning_effort TEXT, status TEXT NOT NULL, pages_changed INTEGER NOT NULL DEFAULT 0,
+        lines_added INTEGER NOT NULL DEFAULT 0, lines_removed INTEGER NOT NULL DEFAULT 0,
+        validation_pages INTEGER, validation_errors INTEGER, validation_warnings INTEGER,
+        source_summary TEXT, stale_pages_count INTEGER NOT NULL DEFAULT 0, error_message TEXT, run_dir TEXT
+      );
+      INSERT INTO requests (id, created_at, kind, trigger, status) VALUES ('req-legacy', '2026-01-01T00:00:00.000Z', 'create', 'manual', 'completed');
+      PRAGMA user_version = 1;
+    `)
+    legacy.close()
+
+    const database = await openHistory(root)
+    expect(database).toBeDefined()
+    const version = database?.prepare('PRAGMA user_version').get() as { user_version: number }
+    expect(version.user_version).toBe(SCHEMA_VERSION)
+    expect(SCHEMA_VERSION).toBe(2)
+
+    const [legacyRequest] = await listRequests(root)
+    expect(legacyRequest?.id).toBe('req-legacy')
+    expect(legacyRequest?.usage).toBeUndefined()
+
+    const id = await startRequest(root, { kind: 'update' })
+    await finishRequest(root, id, {
+      status: 'completed',
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 4, totalTokens: 10, turns: 1, sessions: 1, maxContextTokens: 8, durationMs: 5 },
+    })
+    expect((await listRequests(root)).find((request) => request.id === id)?.usage?.totalTokens).toBe(10)
   })
 
   test('records the pages an authoring run wrote straight to disk', async () => {

@@ -103,3 +103,58 @@ export function planPrimaryAction(plan: { status: string; failure?: { stage: str
   if (plan.status === 'failed') return plan.failure?.stage === 'propose' ? 'retry-planning' : 'retry-generating'
   return 'approve'
 }
+
+/** Task pages a reader follows on screen: the pages screenshots are for. */
+export function isGuidePage(page: Pick<DocumentationPlanPage, 'type'>): boolean {
+  const type = page.type.trim().toLowerCase().replace(/[\s_]+/g, '-')
+  return /(^|-)(how-?to|tutorials?|guides?|quickstart|walkthrough)s?($|-)/.test(type)
+}
+
+export interface PlanScreenshotCoverage {
+  guides: number
+  withScreenshots: number
+  /** Why coverage is thin, when the evidence says so. */
+  reason: 'sign-in' | 'unreachable' | 'unknown'
+}
+
+const SIGN_IN_ROUTE = /(sign-?in|sign-?up|log-?in|register|auth|password)/i
+
+/**
+ * Warn before approval when most guides will be text-only although the
+ * project asked for screenshots. A plan whose only screenshots are of the
+ * sign-in screens means the planner never got past the login page.
+ */
+export function planScreenshotCoverage(
+  pages: Array<Pick<DocumentationPlanPage, 'type' | 'priority' | 'visuals'>>,
+  intent: 'auto' | 'enabled' | 'disabled',
+  readiness?: { status?: string; reachable?: boolean; signInPath?: string },
+): PlanScreenshotCoverage | undefined {
+  if (intent === 'disabled') return undefined
+  const guides = pages.filter((page) => page.priority !== 'later' && isGuidePage(page))
+  if (guides.length < 3) return undefined
+  const visual = guides.filter((page) => page.visuals && page.visuals.mode !== 'none')
+  if (visual.length * 2 >= guides.length) return undefined
+  const onlySignInScreens = visual.length > 0 && visual.every((page) => SIGN_IN_ROUTE.test(page.visuals?.startPath ?? ''))
+  const reason = readiness?.status === 'authentication-required' || readiness?.signInPath || onlySignInScreens
+    ? 'sign-in'
+    : readiness && readiness.reachable === false ? 'unreachable' : 'unknown'
+  return { guides: guides.length, withScreenshots: visual.length, reason }
+}
+
+export interface RetryAgentOption {
+  name: string
+  status: 'authenticated' | 'unauthenticated' | 'unknown'
+}
+
+/**
+ * The assistant a failed plan should retry with by default: the one it used
+ * if it is still signed in, otherwise the project default, otherwise any
+ * signed-in assistant. Retrying with a signed-out assistant fails the same way.
+ */
+export function retryAgentChoice(agents: RetryAgentOption[], planAgent: string | undefined, defaultAgent: string | undefined): string {
+  const signedIn = (name: string | undefined) => Boolean(name) && agents.some((agent) => agent.name === name && agent.status === 'authenticated')
+  if (signedIn(planAgent)) return planAgent!
+  if (signedIn(defaultAgent)) return defaultAgent!
+  const any = agents.find((agent) => agent.status === 'authenticated') ?? agents.find((agent) => agent.status === 'unknown')
+  return any?.name ?? planAgent ?? defaultAgent ?? agents[0]?.name ?? ''
+}

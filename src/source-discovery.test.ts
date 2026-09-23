@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { scaffoldProject } from './project.js'
-import { MAXIMUM_SUGGESTED_PAGES, discoverDocumentationSources, suggestedPageCounts } from './source-discovery.js'
+import { MAXIMUM_SUGGESTED_PAGES, discoverDocumentationSources, formatDiscoveryInventory, suggestedPageCounts } from './source-discovery.js'
 
 const roots: string[] = []
 
@@ -44,6 +44,16 @@ describe('deterministic source discovery', () => {
       expect.objectContaining({ kind: 'configuration', label: 'PUBLIC_API_URL', path: '.env.example' }),
     ]))
     expect(JSON.stringify(first.inventory)).not.toContain('never-inventory-this')
+    // The prompt copy is grouped text, far smaller than the JSON cache, and
+    // keeps every citation field: source, path, kind, label, and line.
+    const formatted = formatDiscoveryInventory(first.inventory)
+    expect(formatted.length).toBeLessThan(JSON.stringify(first.inventory).length)
+    expect(formatted).toContain('Source "product"')
+    expect(formatted).toMatch(/configuration \(\d+\):\n(?:.*\n)*?\s+\.env\.example: .*PUBLIC_API_URL @\d+/)
+    expect(formatted).toMatch(/error \(\d+\)/)
+    // Regex hits on code lines are summarised per file instead of listed.
+    expect(formatted).toMatch(/event \(\d+ matches? in \d+ files?; read the files for the behavior\)/)
+    expect(formatted).not.toContain('job.completed')
     expect(first.inventory.sources[0]?.evidence.some((item) => item.path === '.env')).toBe(false)
 
     const second = await discoverDocumentationSources(root)

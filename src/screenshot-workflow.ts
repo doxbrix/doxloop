@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
+import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { PNG } from 'pngjs'
+import { applicationUrl } from './application-url.js'
+import { probeSignInWall, type SignInProbe } from './application-probe.js'
 import { sessionCookieHeader, type CaptureAuthContext } from './capture-auth.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
@@ -27,6 +29,30 @@ export interface ApplicationReadiness {
    * fall back on, or no sign-in material at all.
    */
   authentication?: 'none' | 'session' | 'credentials' | 'expired'
+  /**
+   * The sign-in route a browser visit ended on, when the page is a sign-in
+   * wall that only shows once client-side routing runs (a single-page app
+   * that answers 200 and then redirects to `/auth`).
+   */
+  signInPath?: string
+}
+
+export interface ApplicationReadinessOptions {
+  /**
+   * Load the page in the headless browser when the HTTP check says it is
+   * ready and no sign-in material exists, to catch client-side sign-in walls.
+   * `true` uses the managed browser; a function replaces it (tests).
+   */
+  browserProbe?: boolean | SignInProbe
+  /** Where the message is shown: the setup wizard or a project's settings. */
+  context?: 'setup' | 'project'
+}
+
+/** The message for a sign-in wall the browser probe found. */
+export function signInWallMessage(signInPath: string, context: 'setup' | 'project' = 'project'): string {
+  return context === 'setup'
+    ? `The application sends visitors to its sign-in page (${signInPath}). Sign in once below so screenshots show the signed-in product.`
+    : `The application sends visitors to its sign-in page (${signInPath}). Sign in with the browser or save sign-in credentials under Settings → Visual evidence so screenshots show the signed-in product.`
 }
 
 interface ScreenshotManifest {
@@ -62,7 +88,7 @@ interface ScreenshotManifestStep {
 }
 
 /** Generator-native committed asset root for guide screenshots. */
-const GUIDE_ASSET_ROOTS: Record<string, string> = {
+export const GUIDE_ASSET_ROOTS: Record<string, string> = {
   doxbrix: 'assets/guides',
   docusaurus: 'static/img/guides',
   mkdocs: 'docs/assets/guides',
@@ -305,7 +331,7 @@ export async function collapseDuplicateCaptures(
         const stripped = removeImageReference(content, file)
         if (stripped !== content) await writeFile(pagePath, stripped, 'utf8')
       }
-      await rm(safeWorkspacePath(workspace, file), { force: true })
+      await quarantineImage(workspace, file)
       step.capture = false
       step.status = 'text-only'
       step.textOnlyReason = `This step shows the same screen as "${original}", so it adds no new image.`
@@ -321,7 +347,7 @@ export async function collapseDuplicateCaptures(
 }
 
 /** Drop an image reference, and the frame wrapper it leaves behind. */
-function removeImageReference(content: string, file: string): string {
+export function removeImageReference(content: string, file: string): string {
   const basename = file.replaceAll('\\', '/').split('/').at(-1)!
   const lines = content.split('\n')
   const kept: string[] = []
@@ -413,7 +439,7 @@ async function guidePagePath(
     ...plan.target.pageExtensions.map((extension) => join(root, `${page.path}${extension.startsWith('.') ? extension : `.${extension}`}`)),
     ...plan.target.pageExtensions.map((extension) => join(root, page.path, `index${extension.startsWith('.') ? extension : `.${extension}`}`)),
   ]) {
-    if (await pathExists(candidate)) return candidate
+    if (await isFilePath(candidate)) return candidate
   }
   return undefined
 }
@@ -445,7 +471,31 @@ export function screenshotPlanSummary(plan: Pick<DocumentationPlan, 'pages'>): {
 
 const MAX_READINESS_REDIRECTS = 5
 
-export async function checkApplicationReadiness(application?: ApplicationConfig, auth?: CaptureAuthContext): Promise<ApplicationReadiness> {
+export async function checkApplicationReadiness(application?: ApplicationConfig, auth?: CaptureAuthContext, options: ApplicationReadinessOptions = {}): Promise<ApplicationReadiness> {
+  const readiness = await httpApplicationReadiness(application, auth)
+  if (!options.browserProbe || readiness.status !== 'ready' || !readiness.url) return readiness
+  // Sign-in material already handles a wall; only an anonymous visit needs the browser.
+  if (readiness.authentication !== 'none' || auth?.credentials) return readiness
+  const probe = typeof options.browserProbe === 'function' ? options.browserProbe : probeSignInWall
+  let wall: Awaited<ReturnType<SignInProbe>>
+  try {
+    wall = await probe(readiness.url)
+  } catch {
+    return readiness
+  }
+  if (!wall) return readiness
+  return {
+    configured: true,
+    reachable: true,
+    status: 'authentication-required',
+    url: readiness.url,
+    authentication: 'none',
+    signInPath: wall.signInPath,
+    message: signInWallMessage(wall.signInPath, options.context),
+  }
+}
+
+async function httpApplicationReadiness(application?: ApplicationConfig, auth?: CaptureAuthContext): Promise<ApplicationReadiness> {
   if (!application) {
     return {
       configured: false,
@@ -455,9 +505,9 @@ export async function checkApplicationReadiness(application?: ApplicationConfig,
     }
   }
   const readinessPath = application.readyPath ?? application.screenshots?.startPath
-  const url = readinessPath ? new URL(readinessPath, application.baseUrl).toString() : application.baseUrl
+  const url = readinessPath ? applicationUrl(application.baseUrl, readinessPath).toString() : application.baseUrl
   const cookie = sessionCookieHeader(auth?.session, url)
-  const signInRequired = (): ApplicationReadiness => {
+  const signInRequired = (signInPath?: string): ApplicationReadiness => {
     if (auth?.credentials) {
       return {
         configured: true,
@@ -476,6 +526,7 @@ export async function checkApplicationReadiness(application?: ApplicationConfig,
       status: 'authentication-required',
       url,
       authentication: auth?.session ? 'expired' : 'none',
+      ...(signInPath ? { signInPath } : {}),
       message: auth?.session
         ? 'The saved browser session has expired. Sign in with the browser again under Settings → Visual evidence before capturing.'
         : 'The application is reachable but needs sign-in. Sign in with the browser or save sign-in credentials under Settings → Visual evidence.',
@@ -515,7 +566,7 @@ export async function checkApplicationReadiness(application?: ApplicationConfig,
         let redirect: URL | undefined
         try { if (location) redirect = new URL(location, current) } catch { /* Report the invalid redirect below. */ }
         if (redirect && redirect.origin === origin) {
-          if (/(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$|\?)/i.test(`${redirect.pathname}${redirect.search}`)) return signInRequired()
+          if (/(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$|\?)/i.test(`${redirect.pathname}${redirect.search}`)) return signInRequired(redirect.pathname)
           redirectedTo = `${redirect.pathname}${redirect.search}`
           current = redirect.toString()
           continue
@@ -563,10 +614,16 @@ export interface ScreenshotValidationOptions {
   /**
    * Accept the run despite screenshot problems. Every defect becomes a text-only
    * step with the problem recorded as its reason, images that cannot be shown
-   * are removed from their guide, and the summary reports how many problems the
-   * reviewer chose to ignore. Nothing is thrown for a capture shortfall.
+   * are removed from their guide, and the summary reports how many problems
+   * remain for review. Nothing is thrown for a capture shortfall.
    */
   tolerateDefects?: boolean
+  /**
+   * Collect every defect without changing the manifest, the pages, or the
+   * images, so a targeted retake can be attempted before anything is
+   * downgraded. Implies `tolerateDefects` for collection purposes.
+   */
+  dryRun?: boolean
 }
 
 export async function validateScreenshotManifest(
@@ -574,9 +631,10 @@ export async function validateScreenshotManifest(
   plan: DocumentationPlan | undefined,
   rawIntent: unknown,
   options: ScreenshotValidationOptions = {},
-): Promise<{ summary: ScreenshotRunSummary; manifest?: ScreenshotManifest }> {
+): Promise<{ summary: ScreenshotRunSummary; manifest?: ScreenshotManifest; defects: string[] }> {
   const intent = normalizeScreenshotIntent(rawIntent)
-  const tolerate = options.tolerateDefects === true
+  const dryRun = options.dryRun === true
+  const tolerate = options.tolerateDefects === true || dryRun
   const effectivePlan = plan ?? await workspaceDocumentationPlan(workspace)
   const plannedPages = effectivePlan?.pages.filter((page) => page.visuals && page.visuals.mode !== 'none') ?? []
   // The run-level choice is authoritative. A user changing the plan from
@@ -587,12 +645,14 @@ export async function validateScreenshotManifest(
   if (intent === 'disabled' || (effectivePlan && plannedPages.length === 0 && intent !== 'enabled')) {
     return {
       summary: { intent, status: 'not-requested', planned: 0, captured: 0, textOnly: 0, guides: 0 },
+      defects: [],
     }
   }
   if (effectivePlan && plannedPages.length === 0 && intent === 'enabled') {
     if (!tolerate) throw new DoxloopError('Screenshots are required, but the approved plan has no screenshot-enabled UI guide.')
     return {
       summary: { intent, status: 'skipped', planned: 0, captured: 0, textOnly: 0, guides: 0, ignoredProblems: 1, message: 'Screenshots were required, but the approved plan has no screenshot-enabled UI guide. The run was accepted without images.' },
+      defects: ['The approved plan has no screenshot-enabled UI guide.'],
     }
   }
 
@@ -614,6 +674,7 @@ export async function validateScreenshotManifest(
           ? 'Screenshots were required, but no capture manifest was produced. The run was accepted without images.'
           : 'Screenshot candidates were planned, but no verified capture manifest was produced.',
       },
+      defects: required ? ['No capture manifest was produced.'] : [],
     }
   }
 
@@ -652,6 +713,7 @@ export async function validateScreenshotManifest(
     defects.push(message)
   }
   const downgrade = async (step: ScreenshotManifestStep, guidePage: DocumentationPlanPage | undefined, reason: string, removeImage: boolean): Promise<void> => {
+    if (dryRun) return
     const file = step.file
     if (file && effectivePlan && guidePage) {
       const pagePath = await guidePagePath(workspace, effectivePlan, guidePage)
@@ -663,7 +725,7 @@ export async function validateScreenshotManifest(
     }
     if (file && removeImage) {
       try {
-        await rm(safeWorkspacePath(workspace, file), { force: true })
+        await quarantineImage(workspace, file)
       } catch {
         // A file outside the workspace was never a capture of this run.
       }
@@ -778,8 +840,13 @@ export async function validateScreenshotManifest(
         if (tolerate) await downgrade(step, page, `This capture was recorded as ${step.status} when the run was accepted with screenshot problems ignored.`, true)
         continue
       }
-      if (!step.file || !step.alt?.trim() || !step.target?.trim()) {
-        const message = `${step.id} in "${guide.page}" needs a target, project-relative PNG file, and useful alt text.`
+      // `target` and `alt` are bookkeeping a run can fill in; only the image
+      // itself is irreplaceable. Treating a missing target as a defect once
+      // sent thirteen good planning captures to a retake and then deleted them.
+      if (step.file && !step.target?.trim()) { step.target = step.action; mutated = true }
+      if (step.file && !step.alt?.trim() && step.expectedState?.trim()) { step.alt = step.expectedState.trim(); mutated = true }
+      if (!step.file || !step.alt?.trim()) {
+        const message = `${step.id} in "${guide.page}" needs a project-relative PNG file and useful alt text.`
         defects.push(message)
         if (tolerate) await downgrade(step, page, message, true)
         continue
@@ -807,7 +874,9 @@ export async function validateScreenshotManifest(
         if (tolerate) await downgrade(step, page, message, true)
         continue
       }
-      if (parsed.width < 320 || parsed.height < 180) {
+      // Element captures of a toolbar or sidebar group are legitimately short
+      // or narrow; only an image too small to read anything in is rejected.
+      if (parsed.width < 200 || parsed.height < 100) {
         const message = `"${step.file}" is too small to be useful (${parsed.width}×${parsed.height}).`
         defects.push(message)
         if (tolerate) await downgrade(step, page, message, true)
@@ -907,16 +976,17 @@ export async function validateScreenshotManifest(
   if (required && captured === 0 && !tolerate) {
     throw new DoxloopError('Screenshots are required, but the manifest contains no verified captures.')
   }
-  if (tolerate && (mutated || droppedGuides.size > 0)) {
+  if (tolerate && !dryRun && (mutated || droppedGuides.size > 0)) {
     manifest.guides = manifest.guides.filter((_guide, index) => !droppedGuides.has(index))
     await writeFile(path, JSON.stringify(manifest, null, 2), 'utf8')
   }
   const ignored = tolerate && defects.length > 0
-    ? `${defects.length} screenshot problem${defects.length === 1 ? ' was' : 's were'} ignored when this run was accepted: ${defects.slice(0, 12).map((defect) => defect.replace(/\s+/g, ' ')).join(' ')}${defects.length > 12 ? ` …and ${defects.length - 12} more.` : ''} Review the affected guides before publishing.`
+    ? `${defects.length} screenshot problem${defects.length === 1 ? ' remains' : 's remain'} after capture; the affected steps were kept as text so the pages stay usable: ${defects.slice(0, 12).map((defect) => defect.replace(/\s+/g, ' ')).join(' ')}${defects.length > 12 ? ` …and ${defects.length - 12} more.` : ''} Review the affected guides before publishing.`
     : undefined
   const messages = [ignored, ...warnings].filter((item): item is string => Boolean(item))
   return {
     manifest,
+    defects,
     summary: {
       intent,
       status: captured > 0 ? 'verified' : 'skipped',
@@ -939,8 +1009,9 @@ function unusableManifestSummary(
   intent: ScreenshotIntent,
   expected: { guides: number; captures: number },
   problem: string,
-): { summary: ScreenshotRunSummary } {
+): { summary: ScreenshotRunSummary; defects: string[] } {
   return {
+    defects: [problem],
     summary: {
       intent,
       status: 'skipped',
@@ -1071,7 +1142,7 @@ function validateStepShape(step: ScreenshotManifestStep, page: string, index: nu
 }
 
 /** Share of sampled pixels holding the single most common color. */
-function dominantColorShare(image: PNG): number {
+export function dominantColorShare(image: PNG): number {
   const pixels = image.width * image.height
   if (pixels === 0) return 1
   const stride = Math.max(1, Math.floor(pixels / 20_000))
@@ -1098,11 +1169,45 @@ function sampledColors(image: PNG): Set<string> {
   return colors
 }
 
+/** Where a run's discarded images go; never part of a proposal, always recoverable. */
+export const QUARANTINE_DIRECTORY = '.doxloop/quarantine'
+
+/**
+ * Set an image aside instead of deleting it. A downgrade that turns out to be
+ * wrong (a validator disagreeing with bookkeeping, a duplicate that was not
+ * one) then costs a note on the run, not the picture.
+ */
+export async function quarantineImage(workspace: string, file: string): Promise<string | undefined> {
+  const source = safeWorkspacePath(workspace, file)
+  if (!(await pathExists(source))) return undefined
+  const target = join(workspace, QUARANTINE_DIRECTORY, file.replaceAll('\\', '/'))
+  await mkdir(dirname(target), { recursive: true })
+  await rename(source, target).catch(async () => {
+    await copyFile(source, target)
+    await rm(source, { force: true })
+  })
+  return relative(workspace, target).replaceAll('\\', '/')
+}
+
 function safeWorkspacePath(workspace: string, raw: string): string {
   if (!raw || isAbsolute(raw) || normalize(raw).split(/[\\/]/).includes('..')) throw new DoxloopError(`Screenshot path "${raw}" must stay inside the documentation project.`)
   const path = resolve(workspace, raw)
   if (relative(workspace, path).startsWith('..')) throw new DoxloopError(`Screenshot path "${raw}" escapes the documentation project.`)
   return path
+}
+
+
+/**
+ * A planned page path with no extension (`guides/manage-tasks`) can name a
+ * directory that holds the page's assets next to `guides/manage-tasks.mdx`;
+ * only a file is a page, and reading the directory throws EISDIR.
+ */
+async function isFilePath(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile()
+  } catch {
+    return false
+  }
 }
 
 type ImagePlacement = 'embedded' | 'not-embedded' | 'page-missing'
@@ -1121,7 +1226,7 @@ async function guideReferencesImage(
   ]
   let found = false
   for (const candidate of candidates) {
-    if (!(await pathExists(candidate))) continue
+    if (!(await isFilePath(candidate))) continue
     found = true
     const content = await readFile(candidate, 'utf8')
     const basename = image.replaceAll('\\', '/').split('/').at(-1)

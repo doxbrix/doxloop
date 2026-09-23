@@ -15,7 +15,7 @@ import {
   pageId,
   ROOT_CONTENT_IGNORED_DIRECTORIES,
 } from './project.js'
-import { doxbrixDocument, firstSitePage } from './preview.js'
+import { doxbrixDocument, firstSitePage, redirectTarget } from './preview.js'
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const DOXBRIX_CSS = resolve(PACKAGE_ROOT, 'assets', 'doxbrix-preview.css')
@@ -116,7 +116,10 @@ export async function buildDoxbrixStaticSite(
   // Write last so an unlisted index page cannot replace the navigation homepage.
   await cp(join(outputDir, ...firstId.split('/'), 'index.html'), join(outputDir, 'index.html'))
 
+  const builtPages = new Map([...ids].map((id) => [id, id]))
   for (const [from, to] of Object.entries(await readRedirects(root))) {
+    // A redirect stub is only worth writing when the page it points at exists in this build.
+    if (to !== '/' && !redirectTarget(to, site, builtPages)) continue
     const target = `${basePath}${to}`
     const output = join(outputDir, from.replace(/^\//, ''), 'index.html')
     await mkdir(dirname(output), { recursive: true })

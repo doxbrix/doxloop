@@ -183,6 +183,9 @@ export function describeDocsSite(site: DocsSiteSource): string {
  * absorbs, when the old route differs from the new one. Written to the same
  * redirect file page moves use, so the preview and the Doxbrix build honor
  * them, and exported for the old host when the new site is deployed elsewhere.
+ * The site root is never redirected: the new site always serves its own
+ * navigation homepage there, and a root redirect would only send readers to a
+ * planned path the authored pages may not use.
  */
 export function existingDocumentationRedirects(plan: Pick<DocumentationPlan, 'pages' | 'existingDocumentation'>): Record<string, string> {
   const redirects: Record<string, string> = {}
@@ -196,7 +199,7 @@ export function existingDocumentationRedirects(plan: Pick<DocumentationPlan, 'pa
       if (!target) continue
       const from = existingPageRoute(disposition)
       const to = routeOf(target.path)
-      if (!from || from === to || newRoutes.has(from) || !/^\/[a-zA-Z0-9/_-]*$/.test(from) || !/^\/[a-zA-Z0-9/_-]*$/.test(to)) continue
+      if (!from || from === '/' || from === to || newRoutes.has(from) || !/^\/[a-zA-Z0-9/_-]*$/.test(from) || !/^\/[a-zA-Z0-9/_-]*$/.test(to)) continue
       redirects[from] = to
     }
   }

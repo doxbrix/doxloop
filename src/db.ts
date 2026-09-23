@@ -125,7 +125,22 @@ const SCHEMA: readonly string[] = [
     value TEXT NOT NULL
   );
   `,
+  // 2 — agent token usage per request. Nullable: rows from before this version
+  // and agents that report no usage leave them empty.
+  `
+  ALTER TABLE requests ADD COLUMN input_tokens INTEGER;
+  ALTER TABLE requests ADD COLUMN output_tokens INTEGER;
+  ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER;
+  ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER;
+  ALTER TABLE requests ADD COLUMN cost_usd REAL;
+  ALTER TABLE requests ADD COLUMN agent_turns INTEGER;
+  ALTER TABLE requests ADD COLUMN agent_sessions INTEGER;
+  ALTER TABLE requests ADD COLUMN max_context_tokens INTEGER;
+  `,
 ]
+
+/** The schema version a freshly migrated database reports via `PRAGMA user_version`. */
+export const SCHEMA_VERSION = SCHEMA.length
 
 let sqlite: SqliteModule | null | undefined
 const connections = new Map<string, Database | null>()

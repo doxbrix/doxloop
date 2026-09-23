@@ -11,9 +11,13 @@ import {
   ClaudeStreamLogFormatter,
   GEMINI_ALLOWED_TOOLS,
   authoringTurnBudget,
+  frontmatterSummary,
   parseClaudeEffort,
   parseReasoning,
   prepareAgentPrompt,
+  sessionEffortFromEnvironment,
+  sessionEffortOptions,
+  skillReferencePrefix,
   resolveScreenshotIntent,
   runAuthor,
   sourceAccessDirectories,
@@ -245,7 +249,7 @@ describe('author prompts', () => {
     )
 
     expect(prompt).toContain(`use \`${command}\` instead of a \`doxloop\` executable from PATH`)
-    expect(prompt).toContain(`Run \`${command} test\` before finishing`)
+    expect(prompt).toContain(`Do not run \`${command} test\``)
   })
 
   test('requires an evidence map from every authoring run', () => {
@@ -446,6 +450,10 @@ describe('agent invocation', () => {
     expect(agentArguments('codex', 'p', { mode: 'review' })).toEqual([
       'exec',
       '--json',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
       '--sandbox',
       'read-only',
       '--skip-git-repo-check',
@@ -453,6 +461,7 @@ describe('agent invocation', () => {
       'p',
     ])
     expect(agentArguments('claude', 'p', { mode: 'review' })).toEqual([
+      '--strict-mcp-config',
       '--print',
       '--permission-mode',
       'default',
@@ -482,12 +491,17 @@ describe('unattended authoring', () => {
     expect(agentArguments('codex', 'P', { mode: 'update', nonInteractive: true })).toEqual([
       'exec',
       '--json',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
       '--sandbox',
       'workspace-write',
       '--skip-git-repo-check',
       'P',
     ])
     expect(agentArguments('claude', 'P', { mode: 'update', nonInteractive: true })).toEqual([
+      '--strict-mcp-config',
       '--print',
       '--permission-mode',
       'acceptEdits',
@@ -548,13 +562,14 @@ describe('unattended authoring', () => {
       nonInteractive: true,
       sourceDirectories: ['/workspace/product', '/workspace/specs'],
     })
-    expect(unattended.slice(0, 4)).toEqual([
+    expect(unattended.slice(0, 5)).toEqual([
+      '--strict-mcp-config',
       '--add-dir',
       '/workspace/product',
       '/workspace/specs',
       '--settings',
     ])
-    expect(JSON.parse(unattended[4]!)).toEqual({
+    expect(JSON.parse(unattended[5]!)).toEqual({
       permissions: {
         deny: [
           'Edit(//workspace/product/**)',
@@ -570,7 +585,7 @@ describe('unattended authoring', () => {
         },
       },
     })
-    expect(unattended.slice(5)).toEqual([
+    expect(unattended.slice(6)).toEqual([
       '--print',
       '--permission-mode',
       'acceptEdits',
@@ -606,6 +621,10 @@ describe('unattended authoring', () => {
     ).toEqual([
       'exec',
       '--json',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
       '-m',
       'gpt-5',
       '-c',
@@ -615,6 +634,35 @@ describe('unattended authoring', () => {
       '--skip-git-repo-check',
       'P',
     ])
+  })
+
+  test('runs unattended sessions with Doxloop tools only, never the user\'s own MCP servers and plugins', () => {
+    const codex = agentArguments('codex', 'P', {
+      mode: 'update',
+      nonInteractive: true,
+      userMcpServers: ['node_repl', 'computer-use', 'doxloop_capture', 'odd.name'],
+      captureProvider: { name: 'doxloop_capture', command: 'node', args: ['capture.js'] } as never,
+    })
+    expect(codex.slice(0, 10)).toEqual([
+      'exec', '--json',
+      '--disable', 'plugins', '--disable', 'apps',
+      '-c', 'mcp_servers.node_repl.enabled=false',
+      '-c', 'mcp_servers.computer-use.enabled=false',
+    ])
+    // The capture server stays; a name Codex cannot address is left alone.
+    expect(codex).not.toContain('mcp_servers.doxloop_capture.enabled=false')
+    expect(codex.join(' ')).not.toContain('odd.name')
+    expect(codex).toContain('mcp_servers.doxloop_capture.required=false')
+    const claude = agentArguments('claude', 'P', {
+      mode: 'update',
+      nonInteractive: true,
+      captureProvider: { name: 'doxloop_capture', command: 'node', args: ['capture.js'] } as never,
+    })
+    expect(claude[0]).toBe('--strict-mcp-config')
+    expect(claude).toContain('--mcp-config')
+    // Interactive consultation keeps the user's own setup.
+    expect(agentArguments('claude', 'P', { mode: 'update' })).not.toContain('--strict-mcp-config')
+    expect(agentArguments('codex', 'P', { mode: 'update' })).not.toContain('--disable')
   })
 
   test('leaves interactive authoring unchanged', () => {
@@ -990,7 +1038,7 @@ exit 1
       sources: [],
     })
     const executable = join(parent, 'codex')
-    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '<doxloop-review>{"score":88,"hardGates":"pass","summary":"The documentation is coherent and ready for its intended readers.","findings":[]}</doxloop-review>'\nexit 0\n`)
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\n' '<doxloop-review>{"score":88,"hardGates":"pass","summary":"The documentation is coherent and ready for its intended readers.","findings":[]}</doxloop-review>'\nexit 0\n`)
     await chmod(executable, 0o755)
     process.env.PATH = parent
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -1004,3 +1052,165 @@ exit 1
     expect(await readFile(join(root, 'index.mdx'), 'utf8')).toContain('doxloop:starter-page')
   })
 })
+
+describe('batched plan authoring', () => {
+  test('writes the approved plan in short sessions, repairs between them, and records nothing as failed', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-author-batches-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    const plan = {
+      schemaVersion: 2,
+      id: 'plan-batches',
+      version: 1,
+      mode: 'update',
+      status: 'approved',
+      pages: [
+        { id: 'index', title: 'Product documentation', path: 'index', type: 'landing', priority: 'must-have', action: 'update', purpose: 'Orient every reader.', rationale: '', evidence: [], evidenceDetails: [], diagram: 'none' },
+        { id: 'quickstart', title: 'Quickstart', path: 'quickstart', type: 'reference', priority: 'must-have', action: 'update', purpose: 'Get running.', rationale: '', evidence: [], evidenceDetails: [], diagram: 'none' },
+        { id: 'guides/setup', title: 'Set up the product', path: 'guides/setup', type: 'reference', priority: 'must-have', action: 'create', purpose: 'Configure the product.', rationale: '', evidence: [], evidenceDetails: [], diagram: 'none' },
+        { id: 'guides/usage', title: 'Use the product', path: 'guides/usage', type: 'reference', priority: 'must-have', action: 'create', purpose: 'Use the product daily.', rationale: '', evidence: [], evidenceDetails: [], diagram: 'none' },
+      ],
+      navigation: { top: ['Documentation'], sections: [{ id: 'guides', title: 'Guides', pageIds: ['guides/setup', 'guides/usage'] }] },
+      target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: ['docs.json'] },
+      execution: { screenshots: 'disabled' },
+    }
+    await writeFile(join(root, '.doxloop', 'documentation-plan.json'), JSON.stringify(plan))
+    const log = join(parent, 'prompts.log')
+    // The stub agent writes every page its batch names and nothing else, the
+    // way a well-behaved session would, so the run exercises the batching,
+    // the deterministic post-pass, and validation between sessions.
+    const executable = join(parent, 'codex')
+    await writeFile(executable, `#!/bin/sh
+for last; do :; done
+printf '%s\n=====\n' "$last" >> "${log}"
+printf '%s\n' "$last" | grep -E '^- [^ ]+ — ' | sed -E 's/^- ([^ ]+) —.*/\\1/' | while read -r p; do
+  [ -z "$p" ] && continue
+  mkdir -p "$(dirname "${root}/$p.mdx")"
+  {
+    printf -- '---\ntitle: Page %s\ndescription: Everything about %s.\n---\n\n## Overview\n\n' "$p" "$p"
+    i=0
+    while [ $i -lt 60 ]; do printf 'This paragraph explains how the %s area works, what the reader sees on screen, and what to do next. ' "$p"; i=$((i+1)); done
+    printf '\n'
+  } > "${root}/$p.mdx"
+done
+exit 0
+`)
+    await chmod(executable, 0o755)
+    process.env.PATH = `${parent}:${originalPath ?? ''}`
+    const previousBatch = process.env.DOXLOOP_AUTHORING_BATCH_PAGES
+    process.env.DOXLOOP_AUTHORING_BATCH_PAGES = '2'
+    const output: string[] = []
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => { output.push(String(chunk)); return true })
+    try {
+      await expect(runAuthor({ root, mode: 'update', agent: 'codex', nonInteractive: true, planBatches: true, recordHistory: false, recordOperationalState: false })).resolves.toBe(0)
+    } finally {
+      if (previousBatch === undefined) delete process.env.DOXLOOP_AUTHORING_BATCH_PAGES
+      else process.env.DOXLOOP_AUTHORING_BATCH_PAGES = previousBatch
+    }
+    const prompts = (await readFile(log, 'utf8')).split('=====\\n').filter((entry) => entry.trim())
+    expect(prompts.some((prompt) => prompt.includes('BATCH 1 OF 2'))).toBe(true)
+    expect(prompts.some((prompt) => prompt.includes('BATCH 2 OF 2'))).toBe(true)
+    // The first batch is the landing page plus one more; the second batch is told what already exists.
+    const second = prompts.find((prompt) => prompt.includes('BATCH 2 OF 2'))!
+    expect(second).toContain('already written in earlier batches')
+    expect(second).toContain('/index')
+    expect(output.join('')).toContain('Writing 4 pages in 2 batches')
+    // Every planned page exists and the new page was put into navigation by the post-pass, not the agent.
+    await expect(pathExists(join(root, 'guides', 'setup.mdx'))).resolves.toBe(true)
+    expect(await readFile(join(root, 'docs.json'), 'utf8')).toContain('guides/setup')
+    expect(output.join('')).toContain('pass validation')
+  }, 60_000)
+})
+
+test('batched sessions are told how sign-in works and not to give up at the login page', async () => {
+  const { batchCaptureText, sessionPreamble } = await import('./author.js')
+  const application = { baseUrl: 'https://try.example.test', authentication: { loginPath: '/login' } }
+  const withCredentials = batchCaptureText(application as never, 'credentials')
+  expect(withCredentials).toContain('doxloop_capture')
+  expect(withCredentials).toContain('DOXLOOP_APP_USERNAME')
+  expect(withCredentials).toContain('A start path that redirects to the sign-in page is not a blocker')
+  const withoutMaterial = batchCaptureText(application as never, 'none')
+  expect(withoutMaterial).not.toContain('not a blocker')
+  const preamble = sessionPreamble({ generator: 'doxbrix' } as never, [], 'doxloop', withCredentials)
+  expect(preamble).toContain('Sign-in handling:')
+  expect(sessionPreamble({ generator: 'doxbrix' } as never, [], 'doxloop')).not.toContain('Sign-in handling:')
+})
+
+for (const failure of ['quota', 'crash'] as const) {
+  test(`batch ${failure} recovery does not waste additional sessions`, async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), `doxloop-${failure}-`)); roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    await writeFile(join(root, '.doxloop/documentation-plan.json'), JSON.stringify({
+      id: 'plan-recovery', version: 1, pages: [{ id: 'index', path: 'index', title: 'Overview', type: 'landing', action: 'update', priority: 'must-have', evidence: [] }],
+      navigation: { sections: [] }, target: { contentDir: '', pageExtensions: ['.mdx'] }, execution: { screenshots: 'disabled' },
+    }))
+    const executable = join(parent, 'claude')
+    await writeFile(executable, `#!/bin/sh
+if [ ! -f '${parent}/first' ]; then
+  echo first > '${parent}/first'
+  echo invoked >> '${parent}/calls'
+  ${failure === 'quota' ? `echo '{"type":"result","subtype":"success","is_error":true,"result":"You have hit your usage limit"}'; exit 1` : 'kill -TERM $$'}
+fi
+echo invoked >> '${parent}/calls'
+echo '---\ntitle: Overview\ndescription: Overview of the product.\n---\n# Overview\n\n${'Read the reference to configure and use the product. '.repeat(30)}' > '${root}/index.mdx'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Done."}'
+exit 0
+`)
+    await chmod(executable, 0o755); process.env.PATH = `${parent}:${originalPath ?? ''}`
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    let detail = ''
+    const result = await runAuthor({ root, mode: 'update', agent: 'claude', nonInteractive: true, planBatches: true, recordHistory: false, recordOperationalState: false, tolerateValidationErrors: true, onFailure: (text) => { detail = text } })
+    const calls = (await readFile(join(parent, 'calls'), 'utf8')).trim().split('\n')
+    if (failure === 'quota') { expect(result).toBe(1); expect(calls).toHaveLength(1); expect(detail).toContain('account limit') }
+    else { expect(result).toBe(0); expect(calls.length).toBeGreaterThanOrEqual(2); expect(await readFile(join(root, '.doxloop/cache/written-pages.json'), 'utf8')).toContain('index') }
+  }, 30000)
+}
+
+test('resume repairs completed pages but does not consider an interrupted draft complete', async () => {
+  const { completedPlanPages } = await import('./author.js')
+  const root = await mkdtemp(join(tmpdir(), 'doxloop-operation-resume-')); roots.push(root)
+  await mkdir(join(root, '.doxloop/cache'), { recursive: true })
+  const plan = { id: 'plan-test', version: 1, pages: [{ id: 'done', path: 'done' }, { id: 'draft', path: 'draft' }] } as unknown as import('./types.js').DocumentationPlan
+  const text = '# Page\n\n' + 'Documented behavior and [broken link](/missing). '.repeat(40)
+  await writeFile(join(root, 'done.mdx'), text); await writeFile(join(root, 'draft.mdx'), text)
+  await writeFile(join(root, '.doxloop/cache/written-pages.json'), JSON.stringify({ planId: plan.id, version: 1, ids: ['done'] }))
+  expect([...await completedPlanPages(root, plan, plan.pages)]).toEqual(['done'])
+})
+
+describe('per-session effort and inlined references', () => {
+  test('maps a session effort to the agent that runs it', () => {
+    expect(sessionEffortOptions('claude', 'low', { effort: 'high' })).toEqual({ effort: 'low', reasoning: undefined })
+    expect(sessionEffortOptions('claude', 'minimal', {})).toEqual({ effort: 'low', reasoning: undefined })
+    expect(sessionEffortOptions('codex', 'low', { reasoning: 'high' })).toEqual({ reasoning: 'low', effort: undefined })
+    expect(sessionEffortOptions('codex', 'xhigh', {})).toEqual({ reasoning: 'xhigh', effort: undefined })
+    expect(sessionEffortOptions('gemini', 'low', {})).toEqual({ reasoning: undefined, effort: undefined })
+    expect(sessionEffortOptions('claude', undefined, { effort: 'high' })).toEqual({})
+    expect(sessionEffortFromEnvironment('X', { X: 'medium' })).toBe('medium')
+    expect(sessionEffortFromEnvironment('X', { X: 'turbo' })).toBeUndefined()
+    expect(sessionEffortFromEnvironment('X', {})).toBeUndefined()
+  })
+
+  test('inlines the fixed skill references once, with the evidence-map section only, and names them', async () => {
+    const prefix = await skillReferencePrefix('doxbrix', true)
+    expect(prefix.names).toEqual(['editorial-style', 'page-depth', 'project-format (Evidence map)', 'screenshots', 'doxbrix components', 'doxbrix manifest'])
+    expect(prefix.text).toContain('<reference name="page-depth">')
+    expect(prefix.text).toContain('## Evidence map')
+    expect(prefix.text).not.toContain('## Select the format')
+    const noShots = await skillReferencePrefix('mkdocs', false)
+    expect(noShots.names).toEqual(['editorial-style', 'page-depth', 'project-format (Evidence map)'])
+    expect(await skillReferencePrefix('doxbrix', true, '/nonexistent')).toEqual({ text: '', names: [] })
+  })
+
+  test('summarizes a written page\'s title and icon from its frontmatter', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-frontmatter-'))
+    roots.push(root)
+    await writeFile(join(root, 'a.mdx'), '---\ntitle: "Labels"\nicon: tag\ndescription: x\n---\n# Labels\n')
+    expect(await frontmatterSummary(root, 'a.mdx')).toEqual({ title: 'Labels', icon: 'tag' })
+    expect(await frontmatterSummary(root, 'missing.mdx')).toEqual({})
+  })
+})
+

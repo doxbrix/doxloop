@@ -81,6 +81,8 @@ export interface DocumentationPlanVisuals {
   workflow?: string
   /** One reader-useful visible state for every planned screenshot, in capture order. */
   captureSequence?: string[]
+  /** Planning capture IDs aligned with captureSequence; empty means not captured yet. */
+  captureIds?: string[]
 }
 
 export interface ScreenshotRunSummary {
@@ -286,11 +288,32 @@ export interface DocumentationPlanNavigationSection {
   id: string
   title: string
   pageIds: string[]
+  /** The top-level space (one of `navigation.top`) this section's group lives in. */
+  space?: string
 }
 
 export interface DocumentationPlanNavigation {
   top: string[]
   sections: DocumentationPlanNavigationSection[]
+}
+
+/**
+ * How much research an update request needs, decided before any research
+ * session starts. `navigation` changes only navigation, icons, branding, or
+ * page metadata and reads nothing; `pages` names existing pages and audits
+ * only the product surface behind them; `product` is a product-wide update
+ * and runs every research session, as a create run does.
+ */
+export type PlanResearchScope = 'navigation' | 'pages' | 'product'
+
+export interface DocumentationPlanResearch {
+  scope: PlanResearchScope
+  /** One sentence for the reviewer: what in the request decided the scope. */
+  reason: string
+  /** Existing documentation pages the request names (project-relative paths), for the `pages` scope. */
+  pages: string[]
+  /** `rules` for the deterministic triage, `agent` when a short session resolved an ambiguous request, `mode` for create runs. */
+  decidedBy: 'rules' | 'agent' | 'mode'
 }
 
 export interface DocumentationPlanTarget {
@@ -421,6 +444,15 @@ export interface DocumentationPlan {
   advisories?: string[]
   /** Present when a `docs-site` source is configured: one audit per existing documentation site. */
   existingDocumentation?: ExistingDocumentationAssessment[]
+  /** How much research this plan ran; absent on plans made before request triage existed. */
+  research?: DocumentationPlanResearch
+  /**
+   * A change to the workspace rather than to any page's content: navigation
+   * icons, ordering, group names, branding. Generation applies it in one
+   * short session after the pages are written, so a plan whose pages are all
+   * preserved still does the requested work.
+   */
+  workspaceInstructions?: string
 }
 
 /**
@@ -463,6 +495,8 @@ export interface DoxloopProject {
   generator: GeneratorName
   generatorPackage?: string
   defaultAgent?: AgentName
+  /** Model passed to the default agent when a run does not pick one. */
+  defaultModel?: string
   sources: SourceBinding[]
   designReferences: DesignReference[]
   application?: ApplicationConfig
@@ -598,6 +632,23 @@ export interface SyncFileChange {
   changedDuringRun?: boolean
 }
 
+/** Model token usage accumulated across the agent sessions that served one request. */
+export interface AgentUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  /** Sum of the four token counters. */
+  totalTokens: number
+  costUsd?: number
+  turns: number
+  /** Agent sessions (process launches) that contributed. */
+  sessions: number
+  /** Largest single-request context (input + cache read + cache creation) seen. */
+  maxContextTokens: number
+  durationMs: number
+}
+
 export interface SyncRunValidation {
   pages: number
   errors: number
@@ -655,6 +706,8 @@ export interface SyncRun {
   }
   validation?: SyncRunValidation
   screenshots?: ScreenshotRunSummary
+  /** Token usage across every agent session that produced this proposal. */
+  usage?: AgentUsage
   error?: string
   /** When the agent was last continued inside this run's preserved workspace. */
   resumedAt?: string
@@ -1051,6 +1104,8 @@ export interface HistoryRequest {
   validationWarnings?: number | undefined
   sourceSummary?: string | undefined
   error?: string | undefined
+  /** Token usage recorded when the request finished, when the agent reported it. */
+  usage?: AgentUsage | undefined
 }
 
 /** A page touched by one request, as shown beside that request. */

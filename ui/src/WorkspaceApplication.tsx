@@ -1,4 +1,4 @@
-import { Comments, BulkMetadata, AuditTools, Estimate, Collections } from './WorkspaceTools'
+import { Comments, BulkMetadata, AuditTools, Collections } from './WorkspaceTools'
 import { TextEditor, PageTools } from './TextEditor'
 import { PageContentEditor } from './PageContentEditor'
 import './PagesEditor.css'
@@ -14,11 +14,15 @@ import {
 import { Icon } from './icons'
 import { DocsSiteSourceFields, type DocsSiteInspection } from './DocsSiteSourceFields'
 import { settledPageEditJobs, settledPlanJobs } from './job-transitions'
+import { stripJobLineStamp } from '../../src/job-events.js'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
-import { countPlanPages, groupPlanPages, planActionLabel, planApprovalControls, planPrimaryAction, type PlanPageFilter } from './plan-review'
+import { countPlanPages, groupPlanPages, isGuidePage, planActionLabel, planApprovalControls, planPrimaryAction, planScreenshotCoverage, retryAgentChoice, type PlanPageFilter } from './plan-review'
 import { canonicalWorkspacePath, workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceParams, type WorkspaceRoute } from './routes'
 import { setLocation, useSearchParams } from './url-state'
-import { PollFailureTracker } from './polling'
+import { PollFailureTracker, jobPollDelay } from './polling'
+import { displayLogLines, stripAnsi } from './log-lines'
+import { runEstimateText, type ServerRunEstimate } from './run-estimate'
+import { PREVIEW_NOTICE_EVENT, openPreviewTab, type PreviewNotice } from './preview-window'
 import { useSeededForm } from './form-sync'
 import { batchLimitsForScope, screenshotIntentFromChoice } from './setup-plan'
 import { ProjectSwitcher } from './ProjectSwitcher'
@@ -28,8 +32,8 @@ import { AssetLibrary, AssetPicker, readFileAsBase64 } from './AssetLibrary'
 import { BrandingPanel } from './BrandingPanel'
 import { GlossaryPanel, PageMetadataForm, ReleaseTemplateFields, TermsEditor, recordFromTerms, termsFromRecord, type ReleaseTemplateForm } from './content-types'
 import { NavigationView, PlanNavigationEditor } from './NavigationView'
-import { defaultReviewChange, hunkStateKey, reviewFileGroups } from './review-presentation'
-import type { AgentState, CoverageItem, DeploymentRecord, DocumentationPlan, DocumentationPlanPage, DriftSummary, Failed, GeneratorEntry, HistoryChangedPage, HistoryPageEntry, HistoryRequest, PageSummary, Proposal, ProposalChange, Source, SourceIntelligence, SyncConfig, UiJob, UiState, Validation } from './types'
+import { defaultReviewChange, hunkStateKey, proposalDecisionCounts, reviewFileGroups, screenshotCoverageText } from './review-presentation'
+import type { AgentState, AgentUsage, CoverageItem, DeploymentRecord, DocumentationPlan, DocumentationPlanPage, DriftSummary, Failed, GeneratorEntry, HistoryChangedPage, HistoryPageEntry, HistoryRequest, PageSummary, Proposal, ProposalChange, Source, SourceIntelligence, SyncConfig, UiJob, UiState, Validation } from './types'
 
 type PlanDiscoverySummary = {
   suggestedPages: { starter: number; standard: number; comprehensive: number }
@@ -43,6 +47,8 @@ type ApplicationReadiness = {
   reachable: boolean
   status: 'not-configured' | 'ready' | 'authentication-required' | 'unreachable'
   url?: string
+  /** Where the application's sign-in page is, when it shows one first. */
+  signInPath?: string
   message: string
 }
 
@@ -140,9 +146,13 @@ export function WorkspaceApplication({
     const stoppedPlan = jobs.some((job) =>
       job.type.startsWith('plan:') && job.status !== 'running' && previouslyRunning.has(job.id),
     )
+    // Any other job that stopped (a deploy, a capture, a retry) changed what
+    // the workspace shows, so it refreshes once, here, rather than every poll.
+    const stoppedOther = jobs.some((job) => job.status !== 'running' && previouslyRunning.has(job.id)) &&
+      !stoppedPlan && settledSyncs.length + completedUpdates.length + settledPageEdits.length + settledRevisions.length === 0
     runningJobIds.current = new Set(jobs.filter((job) => job.status === 'running').map((job) => job.id))
     onJobsUpdate(jobs)
-    if (stoppedPlan && settledPlans.length === 0) void reload()
+    if ((stoppedPlan && settledPlans.length === 0) || stoppedOther) void reload()
     for (const job of settledSyncs) {
       announcedJobIds.current.add(job.id)
       setSyncNotice(syncOutcomeNotice(job))
@@ -255,20 +265,34 @@ export function WorkspaceApplication({
   // A poll that fails once is usually the server being busy with the agent.
   // Only a run of failures is worth interrupting the reader for.
   const pollFailures = useRef(new PollFailureTracker())
+  const [hidden, setHidden] = useState(() => typeof document !== 'undefined' && document.hidden)
+  const pollJobs = async () => {
+    try {
+      const jobs = await api<UiJob[]>('/api/jobs')
+      pollFailures.current.succeeded()
+      receiveJobs(jobs)
+    } catch (cause) {
+      if (pollFailures.current.failed()) onError(`The control center stopped answering: ${message(cause)}`)
+    }
+  }
+  // A hidden tab stops asking; coming back refreshes at once instead of
+  // showing whatever was on screen when the reader left.
   useEffect(() => {
-    if (!jobsRunning) return
-    const timer = window.setInterval(async () => {
-      try {
-        const jobs = await api<UiJob[]>('/api/jobs')
-        pollFailures.current.succeeded()
-        receiveJobs(jobs)
-        if (!jobs.some((job) => job.status === 'running')) void reload()
-      } catch (cause) {
-        if (pollFailures.current.failed()) onError(`The control center stopped answering: ${message(cause)}`)
-      }
-    }, 1800)
+    const onVisibility = () => {
+      setHidden(document.hidden)
+      if (!document.hidden) { void pollJobs(); void reload() }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+  // The live job stream carries every update, so polling is only a safety net
+  // unless a job is running while the stream is down.
+  useEffect(() => {
+    const delay = jobPollDelay({ running: jobsRunning, streamConnected: jobStreamConnected, hidden })
+    if (delay === null) return
+    const timer = window.setInterval(() => void pollJobs(), delay)
     return () => clearInterval(timer)
-  }, [jobsRunning])
+  }, [jobsRunning, jobStreamConnected, hidden])
 
   const navigate = (next: WorkspaceRoute, params: WorkspaceParams = {}) => {
     if (!window.dispatchEvent(new Event('doxloop:before-navigation', { cancelable: true }))) return
@@ -277,17 +301,21 @@ export function WorkspaceApplication({
     setNavOpen(false)
   }
 
-  const openPreview = async () => {
-    const previewTab = window.open('about:blank', '_blank')
-    if (previewTab) previewTab.opener = null
-    try {
-      const result = await post<{ url: string }>('/api/preview/start', { open: !previewTab })
-      previewTab?.location.replace(result.url)
-      void reload()
-    } catch (cause) {
-      previewTab?.close()
-      onError(message(cause))
+  const [previewNotice, setPreviewNotice] = useState<PreviewNotice | null>(null)
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const notice = (event as CustomEvent<PreviewNotice>).detail
+      // A preview that opened in its own tab needs no further word here.
+      setPreviewNotice(notice.state === 'ready' && !notice.blocked ? null : notice)
+      if (notice.state === 'failed') onError(`The preview could not start: ${notice.error}`)
     }
+    addEventListener(PREVIEW_NOTICE_EVENT, listener)
+    return () => removeEventListener(PREVIEW_NOTICE_EVENT, listener)
+  }, [])
+  const openPreview = async () => {
+    if (previewNotice?.state === 'starting') return
+    const url = await openPreviewTab((openServerSide) => post<{ url: string }>('/api/preview/start', { open: openServerSide }))
+    if (url) void reload()
   }
 
   const runningJobs = state.jobs.filter((job) => job.status === 'running').length
@@ -321,13 +349,13 @@ export function WorkspaceApplication({
         }}
       />
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {NAV.map(([id, label, icon]) => <button key={id} class={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}>
+        {NAV.map(([id, label, icon]) => <button key={id} type="button" class={`nav-item ${page === id ? 'active' : ''}`} aria-label={`${id === 'authoring' ? authoringNavigationLabel : label}${id === 'proposals' && pendingProposalCount > 0 ? `, ${pendingProposalCount} pending` : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}>
           <span class="nav-glyph"><Icon name={icon} size={17} /></span>
           <span class="nav-copy"><span>{id === 'authoring' ? authoringNavigationLabel : label}</span></span>
           {id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}
         </button>)}
       </nav>
-      <button type="button" class="new-project-button" onClick={onNewProject}>
+      <button type="button" class="new-project-button" aria-label="New documentation project" onClick={onNewProject}>
         <span class="nav-glyph"><Icon name="plus" size={15} /></span>
         <span><strong>New documentation project</strong><small>Start new or import existing docs</small></span>
       </button>
@@ -337,14 +365,14 @@ export function WorkspaceApplication({
       <header class="workspace-navbar">
         <button class="workspace-mobile-menu" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="menu" size={18} /></button>
         <div class="workspace-crumbs">
-          <button type="button" class="workspace-crumb" onClick={() => navigate('overview')}>{project.title}</button>
+          <button type="button" class="workspace-crumb" title={project.title} aria-label={`${project.title} overview`} onClick={() => navigate('overview')}>{project.title}</button>
           <Icon name="chevronRight" size={14} />
           <strong class="workspace-screen-title">{page === 'authoring' ? `${authoringNavigationLabel} documentation` : PAGE_TITLES[page]}</strong>
         </div>
         <span class="workspace-navbar-spacer" />
-        {runningJobs > 0 && <button type="button" class="workspace-activity-chip" title="Open running task progress" onClick={() => { const job = state.jobs.find((item) => item.status === 'running' && !item.type.includes('preview')); const id = job?.type.match(/^proposal:(?:revise|resume):(.+)$/)?.[1]; if (id) location.assign(`/review?proposal=${encodeURIComponent(id)}`); else { navigate(job?.type.startsWith('page-edit:') ? 'pages' : 'authoring'); } }}><i />{runningJobs === 1 ? '1 task running' : `${runningJobs} tasks running`}</button>}
-        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer"><Icon name="help" size={15} />Support</a>
-        <button type="button" class="workspace-preview-primary" onClick={() => void openPreview()}><Icon name="preview" size={15} /><strong>Preview docs</strong><Icon name="external" size={12} /></button>
+        {runningJobs > 0 && <button type="button" class="workspace-activity-chip" title="Open running task progress" aria-label={`${runningJobs} task${runningJobs === 1 ? '' : 's'} running. Open progress`} onClick={() => { const job = state.jobs.find((item) => item.status === 'running' && !item.type.includes('preview')); const id = job?.type.match(/^proposal:(?:revise|resume):(.+)$/)?.[1]; if (id) location.assign(`/review?proposal=${encodeURIComponent(id)}`); else { navigate(job?.type.startsWith('page-edit:') ? 'pages' : 'authoring'); } }}><i />{runningJobs === 1 ? '1 task running' : `${runningJobs} tasks running`}</button>}
+        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer" aria-label="Support (opens GitHub in a new tab)"><Icon name="help" size={15} /><span>Support</span></a>
+        <button type="button" class="workspace-preview-primary" aria-label="Preview docs in a new tab" aria-busy={previewNotice?.state === 'starting'} disabled={previewNotice?.state === 'starting'} onClick={() => void openPreview()}>{previewNotice?.state === 'starting' ? <span class="spinner" /> : <Icon name="preview" size={15} />}<strong>{previewNotice?.state === 'starting' ? 'Starting preview…' : 'Preview docs'}</strong><Icon name="external" size={12} /></button>
       </header>
       <div class="main">
         <div class="page">
@@ -355,6 +383,13 @@ export function WorkspaceApplication({
           <span class="toast-copy"><strong>{syncNotice.title}</strong><small>{syncNotice.detail}</small></span>
           {syncNotice.proposalId && <Button size="sm" onClick={() => { setSyncNotice(null); navigate('proposals', { proposal: syncNotice.proposalId! }) }}>Review</Button>}
           <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setSyncNotice(null)}><Icon name="close" size={14} /></button>
+        </div>}
+        {previewNotice && previewNotice.state !== 'failed' && <div class={`page-updated-toast preview-notice-toast ${previewNotice.state === 'ready' ? 'warn' : 'info'}`} role="status">
+          <span class="toast-icon"><Icon name={previewNotice.state === 'ready' ? 'external' : 'refresh'} size={15} /></span>
+          <span class="toast-copy">{previewNotice.state === 'starting'
+            ? <><strong>Starting the documentation preview…</strong><small>It opens in a new tab when it is ready.</small></>
+            : <><strong>The preview is ready</strong><small>Your browser did not open a new tab. <a href={previewNotice.url} target="_blank" rel="noreferrer">Open the preview at {previewNotice.url}</a></small></>}</span>
+          <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setPreviewNotice(null)}><Icon name="close" size={14} /></button>
         </div>}
         {page === 'overview' && <Overview state={state} act={act} navigate={navigate} openPreview={openPreview} />}
         {page === 'sources' && <SourcesReference state={state} act={act} navigate={navigate} />}
@@ -527,16 +562,9 @@ function repositoryProviderIcon(repository: string): string {
   return provider === 'git' ? 'sources' : provider
 }
 
-async function openProposalPreview(runId: string, onError: (error: string) => void): Promise<void> {
-  const previewTab = window.open('about:blank', '_blank')
-  if (previewTab) previewTab.opener = null
-  try {
-    const result = await post<{ url: string }>(`/api/proposals/${runId}/preview/start`, { open: !previewTab })
-    previewTab?.location.replace(result.url)
-  } catch (cause) {
-    previewTab?.close()
-    onError(message(cause))
-  }
+/** Errors reach the reader through the shell's preview notice, which also reports them as a banner. */
+async function openProposalPreview(runId: string, _onError?: (error: string) => void): Promise<void> {
+  await openPreviewTab((openServerSide) => post<{ url: string }>(`/api/proposals/${runId}/preview/start`, { open: openServerSide }))
 }
 
 function RepositoryConnectButton({ connected, busy, disabled, onClick }: { connected: boolean; busy: boolean; disabled: boolean; onClick: () => void }) {
@@ -942,7 +970,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   const mode = hasCompletedRun ? 'update' : 'create'
   const pendingSources = state.receipt?.pendingSources ?? []
   const defaultAgent = state.project?.defaultAgent ?? ''
-  const defaultModel = defaultModelForAgent(defaultAgent)
+  const defaultModel = state.project?.defaultModel || defaultModelForAgent(defaultAgent)
   const defaultReasoning = preferredReasoningLevel(defaultAgent, defaultModel)
   // A configured application means the reviewer set it up to be captured;
   // default to screenshots rather than making them opt in on every plan.
@@ -1070,7 +1098,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
     </div>}
 
     {visiblePlan
-      ? <DocumentationPlanReview plan={visiblePlan} act={act} busy={runBusy} onStartAnother={() => setShowNewPlan(true)} />
+      ? <DocumentationPlanReview plan={visiblePlan} act={act} busy={runBusy} agents={state.agents ?? []} defaultAgent={defaultAgent} onStartAnother={() => setShowNewPlan(true)} />
       : <div class="authoring-workbench">
         <Panel class="authoring-request">
           <fieldset class="authoring-fields" disabled={runBusy}>
@@ -1126,7 +1154,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
               <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? (form.limits.maxScreenshots || batchLimitsForScope(form.scope as 'starter' | 'standard' | 'comprehensive' | 'custom', 'auto').maxScreenshots) : 0 } })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
               {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}{captureReadiness.configured && captureReadiness.status !== 'ready' && <> <button type="button" disabled={checkingCapture} onClick={() => void refreshCaptureReadiness()}>{checkingCapture ? 'Checking…' : 'Check again'}</button></>}</small>}
             </section>
-            <details class="batch-limits-control"><summary>Run limits: {form.limits.maxPages} pages · {form.limits.maxScreenshots} screenshots · {form.limits.maxMinutes} minutes</summary><div class="batch-limits-fields"><label>Batch page limit<input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label><Button onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button>{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}</div><Estimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /></details>
+            <details class="batch-limits-control"><summary>Run limits: {form.limits.maxPages} pages · {form.limits.maxScreenshots} screenshots · {form.limits.maxMinutes} minutes</summary><div class="batch-limits-fields"><label>Batch page limit<input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label><Button onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button>{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}</div><RunEstimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /></details>
             <footer><Button disabled={runBusy} busy={submitting || checkingCapture} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Screenshots are required for this run. Planning checks the application again when you start; start or configure it first.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
           </section>
         </Panel>
@@ -1148,7 +1176,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   </div>
 }
 
-function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: DocumentationPlan; act: Action; busy: boolean; onStartAnother: () => void }) {
+function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStartAnother }: { plan: DocumentationPlan; act: Action; busy: boolean; agents: AgentState[]; defaultAgent: string; onStartAnother: () => void }) {
   const [draft, setDraft] = useState(plan)
   const [revision, setRevision] = useState('')
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
@@ -1167,6 +1195,8 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   const [captureReadiness, setCaptureReadiness] = useState<ApplicationReadiness>()
   const [captureCheck, setCaptureCheck] = useState<'idle' | 'checking' | 'done' | 'failed'>('idle')
   const [captureCheckNonce, setCaptureCheckNonce] = useState(0)
+  const [retryAgent, setRetryAgent] = useState('')
+  const [coverageDismissed, setCoverageDismissed] = useState('')
   // A background refresh (a job finishing, a poll) delivers a newer plan. If
   // the reviewer has unsaved edits, hold the new version behind a prompt
   // instead of discarding what they typed.
@@ -1228,6 +1258,18 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
               : captureRequired && captureReadiness?.reachable !== true
                 ? `Screenshots are required, but the application is not reachable. ${captureReadiness?.message ?? ''}`.trim()
                 : undefined
+  // A plan that failed before proposing pages is a dead end unless the reader
+  // can see why and pick an assistant that can actually run.
+  const planningFailed = primaryAction === 'retry-planning'
+  const planningFailedEmpty = planningFailed && draft.pages.length === 0
+  const installedAgents = agents.filter((agent) => agent.executable)
+  const retryOptions = installedAgents.map((agent) => ({ name: agent.name, status: agentAuthStatus(agent.authentication.status) }))
+  const planAgentName = plan.execution.agent || defaultAgent
+  const planAgentSignedOut = retryOptions.some((agent) => agent.name === planAgentName && agent.status === 'unauthenticated')
+  const chosenRetryAgent = retryAgent || retryAgentChoice(retryOptions, planAgentName || undefined, defaultAgent || undefined)
+  const chosenRetrySignedOut = retryOptions.some((agent) => agent.name === chosenRetryAgent && agent.status === 'unauthenticated')
+  const coverageKey = `${plan.id}:${plan.version}`
+  const screenshotCoverage = planningFailed ? undefined : planScreenshotCoverage(pages, screenshotIntent, captureReadiness)
   const approvalControls = planApprovalControls({
     changed,
     busy,
@@ -1332,7 +1374,7 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
   const retryPlanning = async () => {
     setRetryingPlanning(true)
     try {
-      await act(() => post<UiJob>(`/api/plans/${plan.id}/retry`), 'Planning restarted')
+      await act(() => post<UiJob>(`/api/plans/${plan.id}/retry`, chosenRetryAgent ? { agent: chosenRetryAgent } : {}), 'Planning restarted')
     } finally {
       setRetryingPlanning(false)
     }
@@ -1370,7 +1412,7 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         <span class="plan-review-summary-icon"><Icon name="map" size={18} /></span>
         <div class="plan-review-heading-copy">
           <small>Documentation plan · Version {plan.version}</small>
-          <h2>Review documentation structure</h2>
+          <h2>{planningFailedEmpty ? 'No pages proposed yet' : 'Review documentation structure'}</h2>
           <div class="plan-review-change-summary" aria-label="Documentation changes">
             {counts.create > 0 && <span class="create"><i />{counts.create} new</span>}
             {counts.update > 0 && <span class="update"><i />{counts.update} updated</span>}
@@ -1387,11 +1429,25 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
       <span><strong>A newer version of this plan arrived while you were editing.</strong> Keep your unsaved edits, or load the new version and lose them.</span>
       <span class="plan-pending-actions"><Button size="sm" onClick={() => setPendingPlan(null)}>Keep my edits</Button><Button size="sm" tone="primary" onClick={() => loadPlan(pendingPlan)}>Load new version</Button></span>
     </div>}
-    <Estimate pages={pages.length} agent={draft.execution.agent} model={draft.execution.model} />
     {stale && <Panel class="plan-stale-panel" title="Sources changed since this plan was proposed" description="The plan itself is unchanged and can be approved as it is; generation reads the current sources when it writes each page. Ask the agent to revise only if the change should alter which pages are written.">
       <footer class="plan-stale-actions"><Button size="sm" icon="refresh" busy={resuming} disabled={busy} onClick={() => void resume()}>Clear this notice</Button><Button size="sm" icon="wand" disabled={busy} onClick={() => revisionInput.current?.focus()}>Ask the agent to revise</Button></footer>
     </Panel>}
-    {plan.error && !stale && <Note tone="bad">{plan.error}</Note>}
+    {planningFailed && <Panel class="plan-failed-panel">
+      <div class="plan-failed-head">
+        <span class="plan-failed-icon"><Icon name="alert" size={20} /></span>
+        <div><h2>Planning did not finish</h2><p>{planAgentSignedOut
+          ? `${agentLabel(planAgentName)} is signed out on this computer, so it could not research your sources. Retry with a signed-in assistant, or sign ${agentLabel(planAgentName)} in again first.`
+          : 'The planning agent stopped before it proposed any pages. Nothing in your project changed.'}</p></div>
+      </div>
+      {plan.error && <pre class="plan-failed-error">{stripAnsi(plan.error)}</pre>}
+      {installedAgents.length > 0 && <div class="plan-retry-row">
+        <Field label="Retry with"><Select aria-label="Assistant to retry planning with" value={chosenRetryAgent} disabled={busy} onChange={(event) => setRetryAgent(event.currentTarget.value)}>{installedAgents.map((agent) => <option key={agent.name} value={agent.name}>{`${agentLabel(agent.name)} · ${retryStatusLabel(agent.authentication.status)}`}</option>)}</Select></Field>
+        <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
+      </div>}
+      {installedAgents.length === 0 && <footer class="plan-retry-row"><Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button></footer>}
+      {chosenRetrySignedOut && <Note tone="warn">{agentLabel(chosenRetryAgent)} is signed out. {agentSignInHint(chosenRetryAgent)}</Note>}
+    </Panel>}
+    {plan.error && !stale && !planningFailed && <Note tone="bad">{plan.error}</Note>}
     {plan.status === 'failed' && plan.failure && (plan.failure.resumable || plan.failure.ignorable) && <Panel class="plan-recovery-panel" title="Continue without starting over" description={plan.failure.stage === 'generate'
       ? 'The pages and screenshots the agent already produced are preserved in this run\u2019s workspace. Continue from there instead of paying for another full run.'
       : 'The planner proposed a plan but could not meet every planning gate. You can review and edit that plan yourself instead of running the planner again.'}>
@@ -1437,11 +1493,11 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         </div>
         <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
       </Panel>}
-      <Panel title="Batch limits" description="Approval and proposal validation enforce these maxima. Mark extra pages Later to keep them out of this run."><div class="form-grid">{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 })[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }), [key]: Number(event.currentTarget.value) } } })} /></Field>)}</div></Panel>
+      {!planningFailedEmpty && <Panel title="Batch limits" description="Approval and proposal validation enforce these maxima. Mark extra pages Later to keep them out of this run."><div class="form-grid">{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 })[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }), [key]: Number(event.currentTarget.value) } } })} /></Field>)}</div></Panel>}
       {plan.existingDocumentation && plan.existingDocumentation.length > 0 && <Panel class="plan-existing-docs-panel" title="Existing documentation audit" description="What the agent found in the documentation being rewritten, and where every existing page lands in this plan.">
         <ExistingDocumentationAudit assessments={plan.existingDocumentation} pages={draft.pages} />
       </Panel>}
-      <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
+      {!planningFailedEmpty && <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
         <div class="plan-screenshot-summary">
           <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
           <div><strong>{plannedCaptures > 0 ? `${plannedCaptures} meaningful screenshot candidate${plannedCaptures === 1 ? '' : 's'} across ${visualPages.length} guide${visualPages.length === 1 ? '' : 's'}` : 'No application screenshots planned'}</strong><small>{plannedCaptures > 0 ? 'Doxloop supplies the capture browser. Automatic mode captures the useful states it can verify; required mode enforces every approved image.' : 'API, CLI, reference, and conceptual pages remain text-first.'}</small></div>
@@ -1459,10 +1515,10 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         </div>}
         {visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span class="plan-screenshot-page-icon"><Icon name="camera" size={14} /></span><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? <code>{page.visuals.startPath}</code> : <em>Starting route needed</em>}{page.visuals?.rationale && <> · {page.visuals.rationale}</>}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : (page.visuals?.estimatedCaptures ?? 0) === 1 ? 'candidate' : 'candidates'}</b></li>)}</ul>}
         {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
-        {plan.advisories?.map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
+        {plan.advisories?.filter((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))).map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
         {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
-      </Panel>
-      <Panel class="plan-navigation-panel" title="Navigation" description="Sections and page order for the sidebar. Drag pages between sections or add a section.">
+      </Panel>}
+      {!planningFailedEmpty && <><Panel class="plan-navigation-panel" title="Navigation" description="Sections and page order for the sidebar. Drag pages between sections or add a section.">
         <PlanNavigationEditor plan={draft} editable={editable} onChange={(navigation) => setDraft({ ...draft, scope: 'custom', navigation })} />
       </Panel>
       <Panel class="plan-pages-panel" title="Documentation structure" description={`${pages.length} pages · ${counts.activeChanges} changed`} actions={editable && <Button size="sm" icon="plus" onClick={addPage}>Add page</Button>}>
@@ -1490,12 +1546,28 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
         <Textarea ref={revisionInput} disabled={busy} rows={3} maxlength={1500} value={revision} placeholder="For example: Combine the two example pages, focus the quickstart on beginners, and add a migration guide." onInput={(event) => setRevision(event.currentTarget.value)} />
         <div class="plan-revision-actions">{changed && <small>Save your direct edits before asking the agent to revise the plan.</small>}<Button disabled={!revision.trim() || busy || changed} busy={revising} icon="wand" onClick={() => void revise()}>Update plan</Button></div>
       </Panel>
+      {screenshotCoverage && coverageDismissed !== coverageKey && <section class="plan-coverage-warning" role="status" aria-label="Screenshot coverage">
+        <span class="plan-coverage-warning-icon"><Icon name="camera" size={18} /></span>
+        <div>
+          <strong>{screenshotCoverage.withScreenshots === 0 ? `None of the ${screenshotCoverage.guides} guides will have screenshots.` : `Only ${screenshotCoverage.withScreenshots} of ${screenshotCoverage.guides} guides will have screenshots.`}</strong>
+          <p>{screenshotCoverage.reason === 'sign-in'
+            ? 'Doxloop could not get past the sign-in page of your app. Sign in under Settings → Visual evidence, then ask the agent to update the plan.'
+            : screenshotCoverage.reason === 'unreachable'
+              ? 'Doxloop could not reach your app while planning. Start it and check Settings → Visual evidence, then ask the agent to update the plan.'
+              : 'Most guides will be text-only. Check Settings → Visual evidence, or open a guide and choose “Capture when ready”.'}</p>
+        </div>
+        <div class="plan-coverage-warning-actions">
+          <Button tone="primary" icon={screenshotCoverage.reason === 'sign-in' ? 'key' : 'settings'} onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>{screenshotCoverage.reason === 'sign-in' ? 'Sign in to your app' : 'Open Visual evidence'}</Button>
+          <Button tone="ghost" onClick={() => setCoverageDismissed(coverageKey)}>Continue without</Button>
+        </div>
+      </section>}
+      <RunEstimate pages={counts.pagesToWrite || pages.length} agent={draft.execution.agent} model={draft.execution.model} />
       <footer class="plan-approval-bar">
         <span><Icon name={approvalBlocker ? 'help' : 'lock'} size={16} /><small>{approvalBlocker ?? (unresolvedCapabilities > 0 ? `${unresolvedCapabilities} coverage ${unresolvedCapabilities === 1 ? 'item needs' : 'items need'} a decision; you can save and continue if intentionally deferred.` : 'Nothing will be written until you approve this exact plan.')}</small></span>
         <div>{approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}{primaryAction === 'retry-planning'
           ? <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
           : <Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : primaryAction === 'generate' ? `Generate ${generationTarget}` : primaryAction === 'retry-generating' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button>}</div>
-      </footer>
+      </footer></>}
       {selectedPage && <div class="plan-page-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelectedPageId(undefined) }}>
         <aside class="plan-page-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-page-drawer-title">
           <header><div><small>Page {selectedIndex + 1} of {pages.length}</small><h2 id="plan-page-drawer-title">Page details</h2></div><button type="button" aria-label="Close page details" onClick={() => setSelectedPageId(undefined)}><Icon name="close" size={18} /></button></header>
@@ -1520,14 +1592,14 @@ function DocumentationPlanReview({ plan, act, busy, onStartAnother }: { plan: Do
                     estimatedCaptures,
                     ...(mode !== 'none' && selectedPage.visuals?.startPath ? { startPath: selectedPage.visuals.startPath } : {}),
                     ...(mode !== 'none' && selectedPage.visuals?.workflow ? { workflow: selectedPage.visuals.workflow } : {}),
-                    ...(mode !== 'none' && selectedPage.visuals?.captureSequence ? { captureSequence: selectedPage.visuals.captureSequence } : {}),
+                    ...(mode !== 'none' && selectedPage.visuals?.captureSequence ? { captureSequence: selectedPage.visuals.captureSequence, captureIds: selectedPage.visuals.captureIds } : {}),
                   } })
                 }}><option value="none">Text only</option><option value="recommended">Capture when ready</option><option value="required">Require screenshots</option></Select></Field>
                 <Field label={selectedPage.visuals?.mode === 'required' || screenshotIntent === 'enabled' ? 'Required captures' : 'Planned captures'}><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} type="number" min={minimumUiPlannedCaptures(selectedPage.type, selectedPage.visuals?.mode ?? 'recommended')} max="20" value={selectedPage.visuals?.estimatedCaptures ?? 0} onInput={(event) => { const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), Math.min(20, Number(event.currentTarget.value) || 1)) } }) }} /></Field>
               </div>
-              <Field label="Starting route" hint="Relative to the configured application URL"><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} value={selectedPage.visuals?.startPath ?? ''} placeholder="/settings/team" onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), startPath: event.currentTarget.value } })} /></Field>
-              <Field label="Capture workflow" hint="Include the safe test state and ordered actions"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={4} value={selectedPage.visuals?.workflow ?? ''} placeholder="Use the demo workspace. Open Team settings, invite a synthetic member, and verify the invitation state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), workflow: event.currentTarget.value } })} /></Field>
-              <Field label="Capture sequence" hint="One screenshot per line: action — visible state — why it helps"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={Math.max(4, Math.min(8, selectedPage.visuals?.estimatedCaptures ?? 4))} value={(selectedPage.visuals?.captureSequence ?? []).join('\n')} placeholder={'Open Team settings — Team settings heading and navigation are visible — orients the reader\nSelect Invite member — the empty invitation form is open — confirms where data is entered\nSubmit the demo invitation — success confirmation is visible — proves completion'} onInput={(event) => { const captureSequence = event.currentTarget.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean); const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), captureSequence.length), captureSequence } }) }} /></Field>
+              <Field label="Starting route" hint="Relative to the configured application URL"><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} value={selectedPage.visuals?.startPath ?? ''} placeholder="/settings/team" onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), startPath: event.currentTarget.value, captureIds: [] } })} /></Field>
+              <Field label="Capture workflow" hint="Include the safe test state and ordered actions"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={4} value={selectedPage.visuals?.workflow ?? ''} placeholder="Use the demo workspace. Open Team settings, invite a synthetic member, and verify the invitation state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), workflow: event.currentTarget.value, captureIds: [] } })} /></Field>
+              <Field label="Capture sequence" hint="One screenshot per line: action — visible state — why it helps"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={Math.max(4, Math.min(8, selectedPage.visuals?.estimatedCaptures ?? 4))} value={(selectedPage.visuals?.captureSequence ?? []).join('\n')} placeholder={'Open Team settings — Team settings heading and navigation are visible — orients the reader\nSelect Invite member — the empty invitation form is open — confirms where data is entered\nSubmit the demo invitation — success confirmation is visible — proves completion'} onInput={(event) => { const captureSequence = event.currentTarget.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean); const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), captureSequence.length), captureSequence, captureIds: captureSequence.map((item) => { const index = selectedPage.visuals?.captureSequence?.indexOf(item) ?? -1; return index >= 0 ? selectedPage.visuals?.captureIds?.[index] ?? '' : '' }) } }) }} /></Field>
               <Field label="Why images help"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={3} value={selectedPage.visuals?.rationale ?? ''} placeholder="Show the complete invitation journey so readers can verify each meaningful state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), rationale: event.currentTarget.value } })} /></Field>
             </section>
             <section class="plan-page-reason"><h3>Why the agent recommends this page</h3><p>{selectedPage.rationale || 'No rationale was provided for this page.'}</p>{selectedPage.evidenceDetails.length > 0 ? <details><summary>View {selectedPage.evidenceDetails.length} supporting source{selectedPage.evidenceDetails.length === 1 ? '' : 's'}</summary><div class="plan-evidence-list">{selectedPage.evidenceDetails.map((item, index) => <article key={`${item.source}-${item.path}-${index}`}><span>{item.source}</span><div><code>{item.path}{item.line ? `:${item.line}` : ''}</code>{(item.label || item.kind) && <small>{item.label ?? item.kind}</small>}</div></article>)}</div></details> : selectedPage.evidence.length > 0 && <details><summary>View {selectedPage.evidence.length} supporting source{selectedPage.evidence.length === 1 ? '' : 's'}</summary><ul>{selectedPage.evidence.map((item) => <li key={item}><code>{item}</code></li>)}</ul></details>}</section>
@@ -1576,16 +1648,9 @@ function normalizeUiScreenshotIntent(value: DocumentationPlan['execution']['scre
   return 'auto'
 }
 
-function minimumUiPlannedCaptures(type: string, mode: 'none' | 'recommended' | 'required'): number {
+function minimumUiPlannedCaptures(_type: string, mode: 'none' | 'recommended' | 'required'): number {
   if (mode === 'none') return 0
-  const recommended = mode === 'recommended'
-  switch (type.trim().toLowerCase()) {
-    case 'tutorial': return recommended ? 4 : 5
-    case 'getting-started': return recommended ? 3 : 4
-    case 'how-to': return recommended ? 3 : 4
-    case 'troubleshooting': return recommended ? 2 : 3
-    default: return recommended ? 2 : 3
-  }
+  return 1
 }
 
 function planEditableJson(plan: DocumentationPlan): string {
@@ -1668,9 +1733,27 @@ function workflowActivityIcon(type: string): string {
 /** The line a failed CLI job printed as its reason, without the command prefix. */
 export function jobFailureReason(job: Pick<UiJob, 'lines' | 'status'>): string | undefined {
   if (job.status !== 'failed') return undefined
-  const reported = [...job.lines].reverse().find((line) => line.startsWith('doxloop: '))
-  const line = reported ?? [...job.lines].reverse().find((candidate) => candidate.trim() && !candidate.startsWith('DOXLOOP_EVENT '))
+  const lines = job.lines.map((line) => stripAnsi(stripJobLineStamp(line))).reverse()
+  const reported = lines.find((line) => line.startsWith('doxloop: '))
+  const line = reported ?? lines.find((candidate) => candidate.trim() && !candidate.startsWith('DOXLOOP_EVENT '))
   return line?.replace(/^doxloop: /, '').trim() || undefined
+}
+
+/**
+ * A plain time and token figure for a run of this size: observed history when
+ * there is enough of it, a typical-run rate otherwise.
+ */
+function RunEstimate({ pages, agent, model }: { pages: number; agent?: string | undefined; model?: string | undefined }) {
+  const [observed, setObserved] = useState<ServerRunEstimate>()
+  useEffect(() => {
+    let current = true
+    setObserved(undefined)
+    void api<ServerRunEstimate>(`/api/authoring-estimate?pages=${pages}&agent=${encodeURIComponent(agent ?? '')}&model=${encodeURIComponent(model ?? '')}`)
+      .then((value) => { if (current && typeof value?.samples === 'number') setObserved(value) })
+      .catch(() => undefined)
+    return () => { current = false }
+  }, [pages, agent, model])
+  return <p class="run-estimate"><Icon name="clock" size={14} /><span>{runEstimateText(pages, observed)}</span></p>
 }
 
 interface RunCapture {
@@ -1765,7 +1848,7 @@ function AuthoringLiveLog({ job, act, stopLabel = 'Stop update' }: { job: UiJob;
     </div>
     <div class="live-log-tabs"><Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} /></div>
     {tab === 'log'
-      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? job.lines.filter((line) => !line.startsWith('DOXLOOP_EVENT ')).join('\n') : `Starting ${agent}…`}</pre>
+      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? displayLogLines(job.lines).join('\n') : `Starting ${agent}…`}</pre>
       : <CaptureGallery live={job.status === 'running'} />}
   </div>
 }
@@ -1819,7 +1902,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const [allowRelated, setAllowRelated] = useState(false)
   const [screenshots, setScreenshots] = useState(false)
   const defaultAgent = state.project?.defaultAgent ?? ''
-  const initialModel = defaultModelForAgent(defaultAgent)
+  const initialModel = state.project?.defaultModel || defaultModelForAgent(defaultAgent)
   const initialReasoning = preferredReasoningLevel(defaultAgent, initialModel)
   const [agent, setAgent] = useState(defaultAgent)
   const [model, setModel] = useState(initialModel)
@@ -2583,6 +2666,7 @@ function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: str
         </td>
         <td class="muted-cell">
           {timeText(entry.createdAt)}
+          {entry.usage && <small class="history-duration" title={`${entry.usage.totalTokens.toLocaleString()} tokens · ${entry.usage.turns} turns · largest context ${entry.usage.maxContextTokens.toLocaleString()} tokens`}>{usageText(entry.usage)}</small>}
         </td>
       </tr>
     })}
@@ -2629,6 +2713,20 @@ function DeploymentHistory({ entries, available, loading }: HistoryFeed<Deployme
       </td>
     </tr>)}
   </Table>
+}
+
+/** Mirrors `formatAgentUsage` in src/agent-log.ts: `1.2M tokens · 98% cached · $1.42 · 3 sessions`. */
+function usageText(usage: AgentUsage): string {
+  const count = (value: number): string => {
+    const scaled = (n: number, suffix: string) => { const text = n.toFixed(1); return `${text.endsWith('.0') ? text.slice(0, -2) : text}${suffix}` }
+    return value >= 1_000_000 ? scaled(value / 1_000_000, 'M') : value >= 1_000 ? scaled(value / 1_000, 'k') : String(Math.round(value))
+  }
+  const parts = [`${count(usage.totalTokens)} tokens`]
+  const context = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+  if (context > 0 && (usage.cacheReadTokens > 0 || usage.cacheCreationTokens > 0)) parts.push(`${Math.round((usage.cacheReadTokens / context) * 100)}% cached`)
+  if (usage.costUsd !== undefined) parts.push(usage.costUsd > 0 && usage.costUsd < 0.01 ? '<$0.01' : `$${usage.costUsd.toFixed(2)}`)
+  if (usage.sessions !== 1) parts.push(`${usage.sessions} sessions`)
+  return parts.join(' · ')
 }
 
 function durationText(milliseconds: number): string {
@@ -2697,7 +2795,7 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
             <Field label="Ignored paths"><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
             <Field label="Maximum agent minutes"><Input type="number" min="1" value={sync.budget?.maxMinutes ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxMinutes', event.currentTarget.value) })} /></Field>
             <Field label="Maximum runs per day"><Input type="number" min="1" value={sync.budget?.maxRunsPerDay ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxRunsPerDay', event.currentTarget.value) })} /></Field>
-            <Field label="Maximum Claude spend (USD)" hint="Stops a Claude Code run at this cost and names the cap in the run log. Codex and Gemini have no spending flag, so this is ignored for them. 10 is a sensible starting point."><Input type="number" min="0.5" step="0.5" placeholder="10" value={sync.budget?.maxUsd ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxUsd', event.currentTarget.value) })} /></Field>
+            <Field label="Maximum Claude spend (USD)" hint="Stops a Claude Code run at this cost and names the cap in the run log. Codex and Gemini have no spending flag, so this is ignored for them. Leave it empty for no cap."><Input type="number" min="0.5" step="0.5" placeholder="No cap" value={sync.budget?.maxUsd ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxUsd', event.currentTarget.value) })} /></Field>
             <Field label="Re-verify after (days)" hint="Checks evidence age even when source content is unchanged."><Input type="number" min="1" max="3650" value={sync.maxVerificationAgeDays ?? ''} onInput={(event) => set('maxVerificationAgeDays', event.currentTarget.value ? clampNumber(event.currentTarget.value, 1, 3650) : undefined)} /></Field>
             <Field label="Expired verification"><Select value={sync.maxVerificationAgeSeverity ?? 'warn'} onChange={(event) => set('maxVerificationAgeSeverity', event.currentTarget.value as 'warn' | 'fail')}><option value="warn">Warn</option><option value="fail">Fail validation</option></Select></Field>
           </div>}
@@ -2810,10 +2908,27 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
   const runningRevision = selectedJobs.find((job) => job.status === 'running')
   const failedRevision = runningRevision ? undefined : selectedJobs.find((job) => job.status === 'failed' && !dismissedJobIds.includes(job.id))
   const counts = selected ? proposalChangeCounts(selected.changes) : { added: 0, modified: 0, deleted: 0 }
+  const decisions = selected ? proposalDecisionCounts(selected.changes, selected.status === 'applied') : { accepted: 0, rejected: 0, remaining: 0 }
+  // Screenshot coverage is measured against the guides the plan asked for.
+  const linkedPlan = selected && state.documentationPlan && (state.documentationPlan.proposalId === selected.id || state.documentationPlan.id === selected.planId) ? state.documentationPlan : undefined
+  const planGuides = linkedPlan ? linkedPlan.pages.filter((page) => page.priority !== 'later' && page.action !== 'remove' && page.action !== 'preserve' && isGuidePage(page)).length : undefined
+  const [accepting, setAccepting] = useState(false)
   const acceptAll = async (proposal: Proposal) => {
-    const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all', ...(overwriteConfirmed ? { confirmChangedDuringRun: true } : {}) }))
-    setConfirmingAcceptance(null)
-    if (result?.status === 'applied') setAppliedProposal(result)
+    if (accepting) return
+    setAccepting(true)
+    try {
+      // Apply first and close the dialog on the answer; refreshing the
+      // workspace afterwards can take a while on a large proposal and must not
+      // hold the confirmation open.
+      const result = await act(() => post<Proposal>(`/api/proposals/${proposal.id}/accept`, { scope: 'all', ...(overwriteConfirmed ? { confirmChangedDuringRun: true } : {}) }), 'Documentation changes applied', false)
+      setConfirmingAcceptance(null)
+      if (result) {
+        setAppliedProposal(result)
+        void act(async () => true)
+      }
+    } finally {
+      setAccepting(false)
+    }
   }
   const requestRevision = async (proposal: Proposal) => {
     if (!revision?.instruction.trim()) return
@@ -2839,7 +2954,7 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
     {revision && selected && <ProposalRevisionDialog proposal={selected} current={change} draft={revision} onChange={setRevision} onClose={() => setRevision(null)} onSubmit={() => void requestRevision(selected)} />}
     {confirmingAcceptance && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-accept-title">
-        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setConfirmingAcceptance(null)}><Icon name="close" size={16} /></button>
+        <button class="proposal-ready-close" type="button" aria-label="Close" disabled={accepting} onClick={() => setConfirmingAcceptance(null)}><Icon name="close" size={16} /></button>
         <span class="proposal-ready-icon"><Icon name="proposals" size={24} /></span>
         <div><h2 id="proposal-accept-title">Apply these documentation changes?</h2><p>This replaces the current versions of the reviewed files with the proposed versions.</p></div>
         <div class="proposal-ready-summary"><strong>{proposalSummaryText(confirmingAcceptance.changes)}</strong><span>Only the files listed in this proposal will be applied.</span></div>
@@ -2849,16 +2964,16 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
           <ul>{concurrentChanges.map((item) => <li key={item.id}><code>{item.path}</code></li>)}</ul>
           <Toggle checked={overwriteConfirmed} onChange={setOverwriteConfirmed} label="Replace my edits to these files" />
         </div>}
-        <footer><Button onClick={() => setConfirmingAcceptance(null)}>Cancel</Button><Button tone="primary" icon="check" disabled={concurrentChanges.length > 0 && !overwriteConfirmed} onClick={() => void acceptAll(confirmingAcceptance)}>Apply changes</Button></footer>
+        <footer><Button disabled={accepting} onClick={() => setConfirmingAcceptance(null)}>Cancel</Button><Button tone="primary" icon="check" busy={accepting} disabled={concurrentChanges.length > 0 && !overwriteConfirmed} onClick={() => void acceptAll(confirmingAcceptance)}>Apply changes</Button></footer>
       </section>
     </div>}
     {appliedProposal && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog proposal-applied-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-applied-title">
         <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setAppliedProposal(null)}><Icon name="close" size={16} /></button>
         <span class="proposal-ready-icon applied"><Icon name="check" size={24} /></span>
-        <div><h2 id="proposal-applied-title">Documentation changes applied</h2><p>The proposal was accepted and the current documentation now includes these changes.</p></div>
-        <div class="proposal-ready-summary"><strong>{proposalSummaryText(appliedProposal.changes)}</strong><span>Use Preview in the navbar to open the updated documentation.</span></div>
-        <footer><Button tone="primary" onClick={() => setAppliedProposal(null)}>Done</Button></footer>
+        <div><h2 id="proposal-applied-title">{appliedProposal.status === 'applied' ? 'Documentation changes applied' : 'Some changes were applied'}</h2><p>{appliedPageText(appliedProposal)} Preview the result, then deploy when it looks right.</p></div>
+        <div class="proposal-ready-summary"><strong>{proposalSummaryText(appliedProposal.changes)}</strong><span>{appliedProposal.status === 'applied' ? 'Undo stays available from this proposal until newer edits replace these files.' : 'The remaining changes are still waiting for a decision in this proposal.'}</span></div>
+        <footer><Button onClick={() => setAppliedProposal(null)}>Done</Button><Button icon="preview" onClick={() => void openPreviewTab((openServerSide) => post<{ url: string }>('/api/preview/start', { open: openServerSide }))}>Preview docs</Button><Button tone="primary" icon="deploy" onClick={() => { setAppliedProposal(null); setLocation('publish', {}, 'push') }}>Deploy</Button></footer>
       </section>
     </div>}
     {selected
@@ -2909,7 +3024,7 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
                   </div>
                 </div>
                 <strong class="source-count">{selected.sourceSummary}</strong>
-                <small>{selected.changes.flatMap((item) => item.hunks).filter((hunk) => hunk.acceptedAt).length} accepted · {selected.changes.flatMap((item) => item.hunks).filter((hunk) => hunk.rejectedAt).length} rejected · {selected.changes.flatMap((item) => item.hunks).filter((hunk) => !hunk.acceptedAt && !hunk.rejectedAt).length} remaining</small>
+                <small>{decisions.accepted} accepted · {decisions.rejected} rejected · {decisions.remaining} remaining</small>
               </div>
               <div class="proposal-summary-side">
                 <div class="proposal-actions">
@@ -2942,13 +3057,19 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
               <header><Icon name="bot" size={15} /><strong>{workflowActivityLabel(runningRevision.type)}</strong><small>The proposal updates when the agent finishes.</small></header>
               <AuthoringLiveLog job={runningRevision} act={act} stopLabel="Stop" />
             </section>}
+            {selected.status === 'awaiting-review' && !selected.archivedAt && (selected.validation?.errors ?? 0) > 0 && <div class="proposal-lifecycle-notice failed">
+              <Icon name="alert" size={15} />
+              <span class="proposal-failed-copy"><strong>{selected.validation!.errors} validation error{selected.validation!.errors === 1 ? '' : 's'} keep this proposal from being applied.</strong><small>Repair lets Doxloop fix navigation placement and unresolvable links deterministically, without starting an agent.</small></span>
+              <span class="proposal-failed-actions"><Button size="sm" tone="primary" icon="check" onClick={() => void act(() => post<Proposal>(`/api/proposals/${selected.id}/repair`), 'Proposal repaired and validated again')}>Repair proposal</Button></span>
+            </div>}
             {selected.advisories?.map((advisory) => <div key={advisory} class="proposal-lifecycle-notice advisory"><Icon name="info" size={15} /><span>{advisory}</span></div>)}
             {(selected.status === 'stale' || selected.status === 'superseded' || selected.archivedAt) && <div class={`proposal-lifecycle-notice ${selected.status}`}>
               <Icon name="info" size={15} />
               <span>{selected.status === 'stale' ? selected.error : selected.status === 'superseded' ? `A newer revision${selected.supersededBy ? ` (${selected.supersededBy})` : ''} replaced this proposal.` : 'This proposal is archived.'}</span>
             </div>}
 
-            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <div class={`proposal-screenshot-result ${selected.screenshots.ignoredProblems ? 'ignored' : selected.screenshots.status}`}><span class="screenshot-camera"><Icon name="camera" size={17} /></span><span><strong>{selected.screenshots.ignoredProblems ? `${selected.screenshots.captured} application screenshot${selected.screenshots.captured === 1 ? '' : 's'} verified · ${selected.screenshots.ignoredProblems} problem${selected.screenshots.ignoredProblems === 1 ? '' : 's'} ignored` : selected.screenshots.status === 'verified' ? `${selected.screenshots.captured} application screenshot${selected.screenshots.captured === 1 ? '' : 's'} verified` : selected.screenshots.status === 'skipped' ? 'Application screenshots skipped' : 'Application screenshot capture needs attention'}</strong><small>{selected.screenshots.message ?? `${selected.screenshots.guides} guide${selected.screenshots.guides === 1 ? '' : 's'} · ${selected.screenshots.textOnly} text-only step${selected.screenshots.textOnly === 1 ? '' : 's'}`}</small></span>{selected.screenshots.status === 'verified' && <Button size="sm" onClick={() => void openProposalPreview(selected.id, onError)}>Review in preview</Button>}</div>}
+            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <div class={`proposal-screenshot-result ${selected.screenshots.ignoredProblems ? 'ignored' : selected.screenshots.status === 'verified' && planGuides !== undefined && selected.screenshots.guides * 2 < planGuides ? 'thin' : selected.screenshots.status}`}><span class="screenshot-camera"><Icon name="camera" size={17} /></span><span><strong>{selected.screenshots.status === 'skipped' ? 'Application screenshots skipped' : selected.screenshots.status === 'failed' ? 'Application screenshot capture needs attention' : screenshotCoverageText(selected.screenshots, planGuides)}</strong><small>{selected.screenshots.ignoredProblems ? `${selected.screenshots.ignoredProblems} screenshot problem${selected.screenshots.ignoredProblems === 1 ? '' : 's'} to review. ` : ''}{selected.screenshots.message ?? (selected.screenshots.textOnly > 0 ? `${selected.screenshots.textOnly} step${selected.screenshots.textOnly === 1 ? '' : 's'} could not be captured and are described in text.` : planGuides !== undefined && selected.screenshots.guides < planGuides ? `The other ${planGuides - selected.screenshots.guides} guide${planGuides - selected.screenshots.guides === 1 ? ' is' : 's are'} text-only.` : '')}</small></span>{selected.screenshots.status === 'verified' && <Button size="sm" onClick={() => void openProposalPreview(selected.id, onError)}>Review in preview</Button>}</div>}
+            {selected.usage && <div class="proposal-usage"><Icon name="bot" size={15} /><span>Agent usage: {usageText(selected.usage)}</span></div>}
 
             <div class="review-workspace">
               <section class="review-diff-panel">
@@ -3203,6 +3324,11 @@ function proposalChangeCounts(changes: ProposalChange[]): { added: number; modif
   }, { added: 0, modified: 0, deleted: 0 })
 }
 
+function appliedPageText(proposal: Proposal): string {
+  const pages = proposal.changes.filter((change) => change.category === 'page' && change.kind !== 'deleted' && (proposal.status === 'applied' || change.hunks.some((hunk) => hunk.acceptedAt))).length
+  return pages > 0 ? `${pages} page${pages === 1 ? '' : 's'} applied.` : 'The accepted files were applied.'
+}
+
 function proposalSummaryText(changes: ProposalChange[]): string {
   const counts = proposalChangeCounts(changes)
   return `${changes.length} file change${changes.length === 1 ? '' : 's'} · ${counts.added} added · ${counts.modified} modified · ${counts.deleted} deleted`
@@ -3213,8 +3339,8 @@ function proposalSummaryText(changes: ProposalChange[]): string {
  * or `✗ label` for the step that failed). Nothing is printed while a step runs,
  * so the labels below name the steps up front and the log fills in the details.
  */
-const DEPLOY_STEP_LINE = /^\s*([✓✗])\s+(.+)$/
-const ANSI = /\x1b\[[0-9;]*m/g
+/** A deploy step line, with or without the arrival-time stamp the control center adds. */
+const DEPLOY_STEP_LINE = /^\s*(?:\d{2}:\d{2}:\d{2}\s+)?([✓✗])\s+(.+)$/
 
 function deployStepLabels(generator: string | undefined, dryRun: boolean, exporting = false): string[] {
   if (exporting) return ['Validating documentation', 'Building static site', 'Writing folder and zip']
@@ -3237,7 +3363,7 @@ interface DeployStep {
 function deploySteps(job: UiJob, labels: string[]): { steps: DeployStep[]; percent: number } {
   const reported: Array<{ text: string; ok: boolean }> = []
   for (const raw of job.lines) {
-    const match = DEPLOY_STEP_LINE.exec(raw.replace(ANSI, ''))
+    const match = DEPLOY_STEP_LINE.exec(stripAnsi(raw))
     if (match) reported.push({ text: (match[2] ?? '').trim(), ok: match[1] === '✓' })
   }
   const running = job.status === 'running'
@@ -3317,7 +3443,7 @@ function DeployProgress({ job, generator, act, streamConnected, onDismiss }: {
           <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
         </span>
       </div>
-      {logOpen && <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? job.lines.filter((line) => !line.startsWith('DOXLOOP_EVENT ')).join('\n') : 'Starting deployment…'}</pre>}
+      {logOpen && <pre ref={log} class="terminal live-terminal">{job.lines.length > 0 ? displayLogLines(job.lines).join('\n') : 'Starting deployment…'}</pre>}
     </div>
   </section>
 }
@@ -3590,7 +3716,7 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
   const setSection = (next: SettingsSection) => setLocation('settings', { section: next })
   // Forms reseed from the project after a save or a reload; unsaved edits are
   // kept and flagged instead of being replaced underneath the reader.
-  const [identity, setIdentity, identitySync] = useSeededForm(() => ({ title: project.title, defaultAgent: project.defaultAgent ?? '' }), JSON.stringify([project.title, project.defaultAgent]))
+  const [identity, setIdentity, identitySync] = useSeededForm(() => ({ title: project.title, defaultAgent: project.defaultAgent ?? '', defaultModel: project.defaultModel ?? '' }), JSON.stringify([project.title, project.defaultAgent, project.defaultModel]))
   const [docs, setDocs, docsSync] = useSeededForm(() => ({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), terms: termsFromRecord(project.documentation.terminology) }), JSON.stringify(project.documentation))
   const [application, setApplication, applicationSync] = useSeededForm(() => ({
     baseUrl: project.application?.baseUrl ?? '',
@@ -3624,11 +3750,12 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
         </button>)}
       </nav>
       <div class="stack">
-        {section === 'general' && <Panel title="Project identity" description="The name and default documentation tool used across this workspace.">
+        {section === 'general' && <Panel title="Project identity" description="The name, default documentation tool, and model used across this workspace.">
           {identitySync.stale && <StaleFormNotice onResync={identitySync.resync} />}
           <div class="form-grid">
             <Field label="Site title"><Input value={identity.title} onInput={(event) => setIdentity({ ...identity, title: event.currentTarget.value })} /></Field>
-            <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => setIdentity({ ...identity, defaultAgent: event.currentTarget.value })}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+            <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => { const agent = event.currentTarget.value; setIdentity({ ...identity, defaultAgent: agent, defaultModel: agent === identity.defaultAgent ? identity.defaultModel : defaultModelForAgent(agent) }) }}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+            <Field label="Default model" hint={identity.defaultAgent ? `Used by ${agentLabel(identity.defaultAgent)} runs unless a run picks another model. Search suggested models or enter another model ID.` : 'Choose a default agent to set its model.'}><Combo value={identity.defaultModel} options={agentModels(identity.defaultAgent).map((model) => [model.id, model.label] as const)} disabled={!identity.defaultAgent} placeholder="Agent default" onValueChange={(value) => setIdentity({ ...identity, defaultModel: value })} /></Field>
           </div>
           <KeyValues items={[['Content directory', <code class="mono">{project.contentDir || 'Project root'}</code>], ['Generator', generatorLabel(state.generators, project.generator)], ['Workspace', <code class="mono">{state.root ?? state.cwd}</code>]]} />
           <details class="agent-capabilities-details" open={identity.defaultAgent === 'gemini'}>
@@ -3869,6 +3996,24 @@ export function driftState(value: DriftSummary | Failed | undefined): { ok: true
 export function preferredAgent(agents: AgentState[] | undefined, defaultAgent: string | undefined): AgentState | undefined {
   if (!agents?.length) return undefined
   return agents.find((agent) => agent.name === defaultAgent && agent.executable) ?? agents.find((agent) => agent.preferred && agent.executable) ?? agents.find((agent) => agent.executable)
+}
+
+function agentAuthStatus(status: string): 'authenticated' | 'unauthenticated' | 'unknown' {
+  if (status === 'authenticated') return 'authenticated'
+  if (status === 'unauthenticated' || status === 'missing') return 'unauthenticated'
+  return 'unknown'
+}
+
+function retryStatusLabel(status: string): string {
+  const normalized = agentAuthStatus(status)
+  return normalized === 'authenticated' ? 'signed in' : normalized === 'unauthenticated' ? 'signed out' : 'sign-in not checked'
+}
+
+function agentSignInHint(agent: string): string {
+  if (agent === 'claude') return 'Run `claude auth login` in a terminal, or choose another assistant.'
+  if (agent === 'codex') return 'Run `codex login` in a terminal, or choose another assistant.'
+  if (agent === 'gemini') return 'Run `gemini` in a terminal and sign in, or choose another assistant.'
+  return 'Sign it in from a terminal, or choose another assistant.'
 }
 
 function agentSignInLabel(status: string): string {

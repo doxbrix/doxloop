@@ -127,8 +127,6 @@ async function startDoxbrixPreview(
         return
       }
 
-      const redirect = (await readRedirects(options.root))[url.pathname.replace(/\/$/, '') || '/']
-      if (redirect) { response.writeHead(302, { Location: redirect }); response.end(); return }
       const staticPath = safeStaticPath(contentRoot, url.pathname, ignoredDirectories)
       if (staticPath && STATIC_TYPES[extname(staticPath).toLowerCase()]) {
         try {
@@ -151,6 +149,8 @@ async function startDoxbrixPreview(
         loadQualityConfig(options.root).then((config) => config.readerVerification?.enabled ? reverifyClaims(options.root, project, false).then((result) => result.metadata) : undefined),
       ])
       const pagesById = new Map(pages.map((path) => [pageId(contentRoot, path), path]))
+      const redirect = redirectTarget((await readRedirects(options.root))[url.pathname.replace(/\/$/, '') || '/'], site, pagesById)
+      if (redirect) { response.writeHead(302, { Location: redirect }); response.end(); return }
       if (url.pathname === '/__doxloop/search-index') {
         const entries = await Promise.all(
           [...pagesById].map(async ([id, path]) => {
@@ -240,6 +240,22 @@ async function startDoxbrixPreview(
   }
   process.once('SIGINT', () => void stop())
   process.once('SIGTERM', () => void stop())
+}
+
+/**
+ * A stored redirect is followed only when its target is a page the site can
+ * serve. Redirects are written when a plan is approved, before the pages are
+ * authored, so a target may name a planned path the author never used; falling
+ * through to the normal page lookup beats sending readers to "Page not found".
+ */
+export function redirectTarget(
+  redirect: string | undefined,
+  site: DoxbrixSiteConfig,
+  pages: Map<string, string>,
+): string | undefined {
+  if (!redirect) return undefined
+  const target = requestedPage(redirect, site, pages)
+  return target !== undefined && pages.has(target) ? redirect : undefined
 }
 
 function requestedPage(
@@ -991,6 +1007,8 @@ function navTree(nodes: DoxbrixNavNode[], current: string, depth = 0): string {
         return `<a class="dp-nav-item${depthClass(depth)}" href="${escapeAttr(apiSpecHref(node.spec))}" target="_blank" rel="noreferrer">${navIcon(node.icon)}<span class="dp-nav-item-label">${escapeHtml(node.title)}</span></a>`
       }
       if (node.type === 'group') {
+        // An empty header is nothing to click into; hide it rather than render a bare label.
+        if (!hasVisibleNavigation(node.items)) return ''
         const children = navTree(node.items, current, depth + 1)
         const activeBranch = containsPage(node.items, current) ? ' active-branch' : ''
         const groupIcon = navIcon(node.icon)

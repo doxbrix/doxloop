@@ -7,6 +7,7 @@ import {
   loadProject,
   parseDesignReference,
   parseSpec,
+  projectDefaultModel,
   saveProjectSettings,
   validateProjectSourceBoundaries,
 } from './project.js'
@@ -108,7 +109,7 @@ export function formatProjectSettings(root: string, project: DoxloopProject): st
           )
           .join('\n  ')
   const deployment = effectiveDeployment(project)
-  return `Project\n  Root: ${root}\n  Title: ${project.title}\n  Generator: ${generator}\n  Agent: ${project.defaultAgent ?? 'Choose at authoring time'}\n\nEvidence\n  ${evidence}\n\nDocumentation\n  Audience: ${project.documentation.primaryAudience ?? 'Agent will determine'}\n  Locale: ${project.documentation.locale}\n  Tone: ${project.documentation.tone.join(', ')}\n\nApplication screenshots\n  ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} at ${project.application.baseUrl}` : 'Not configured'}\n\nDeployment\n  Target: ${deployment.target}\n  Name: ${deployment.name}\n  Slug: ${deployment.slug}\n  Visibility: ${deployment.visibility}\n  Destination: ${deployment.apiUrl}`
+  return `Project\n  Root: ${root}\n  Title: ${project.title}\n  Generator: ${generator}\n  Agent: ${project.defaultAgent ?? 'Choose at authoring time'}\n  Model: ${project.defaultModel ?? 'Agent default'}\n\nEvidence\n  ${evidence}\n\nDocumentation\n  Audience: ${project.documentation.primaryAudience ?? 'Agent will determine'}\n  Locale: ${project.documentation.locale}\n  Tone: ${project.documentation.tone.join(', ')}\n\nApplication screenshots\n  ${project.application ? `${project.application.screenshots?.policy ?? 'requested'} at ${project.application.baseUrl}` : 'Not configured'}\n\nDeployment\n  Target: ${deployment.target}\n  Name: ${deployment.name}\n  Slug: ${deployment.slug}\n  Visibility: ${deployment.visibility}\n  Destination: ${deployment.apiUrl}`
 }
 
 export function effectiveDeployment(
@@ -290,8 +291,15 @@ async function editAgent(root: string, io: PromptIo): Promise<void> {
     })),
     io,
   })
-  await saveProjectSettings(root, { defaultAgent: agent })
-  note(io, `✓ Default agent changed to ${labels[agent]}.`)
+  const project = await loadProject(root)
+  const model = (await promptText({
+    message: `Default ${labels[agent]} model (leave blank for the agent default)`,
+    initial: projectDefaultModel(project, agent) ?? '',
+    allowEmpty: true,
+    io,
+  })).trim()
+  await saveProjectSettings(root, { defaultAgent: agent, defaultModel: model || undefined })
+  note(io, `✓ Default agent changed to ${labels[agent]}${model ? ` using ${model}` : ''}.`)
 }
 
 async function editDocumentation(

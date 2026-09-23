@@ -694,3 +694,14 @@
 .mintlify-import-panel { overflow-wrap: anywhere; }
 .mintlify-conversion-warnings { display: grid; gap: 12px; max-height: 320px; overflow: auto; }
 .mintlify-import-panel details summary { cursor: pointer; margin-bottom: 12px; }
+
+/* The success toast sits at the top so it can never cover the wizard footer. */
+.reference-setup .source-added-success { top: 16px; right: auto; bottom: auto; left: 50%; transform: translateX(-50%); }
+/* The depth badge is a corner tag, so it never squeezes the option title. */
+.setup-scope-options > button { position: relative; }
+.setup-scope-options em { position: absolute; top: -8px; right: 10px; border: 1px solid var(--brand-tint); background: var(--brand-soft); }
+.setup-agent-readiness.signed-out { border-color: #f0c36d; background: #fffaf0; }
+.setup-agent-readiness-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.setup-signin-detected { grid-column: 1 / -1; }
+.setup-signin-or { margin: 4px 0 -2px; color: #66788a; font-size: 11px; font-weight: 600; }
+.setup-draft-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid #dfe3eb; border-radius: 8px; color: #485565; background: #f8fafc; font-size: 12px; }

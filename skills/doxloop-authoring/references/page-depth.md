@@ -88,11 +88,10 @@ Required sections:
    recovery, or documented limits. Omit only when the evidence has none.
 6. **Next steps**: the next likely job.
 
-For a screenshot-enabled guide, every step that changes what is on screen
-carries its own captured image inside that step: the entry screen, each opened
-dialog, drawer, tab, or expanded section, the filled form, and the result. A
-guide whose steps open four screens embeds four images. Keep every instruction
-and value in text so the page is complete without the images.
+For a screenshot-enabled guide, choose saved captures that clarify a difficult
+choice or prove a result, and place each beside the relevant step. Follow the
+approved capture requirements and explicit user requests; do not add an image
+for every routine screen change. Keep the instructions complete in text.
 
 When the same job can be done in the UI and the CLI, document the primary path
 in full and provide the alternative in a tab or a short section with the exact
@@ -111,8 +110,8 @@ needs them. Apply the how-to contract, then also:
 - end with a working result the reader can inspect and a recap of what they
   learned.
 
-Minimum: 5 steps, 500 words of prose, one image per screen-changing step when
-screenshots are enabled.
+Minimum: 5 steps, 500 words of prose. Use the approved saved captures where
+they help the reader.
 
 ## Concept and architecture
 

@@ -18,6 +18,8 @@ describe('jobFailureReason', () => {
   it('prefers the CLI error line and drops event lines', () => {
     expect(jobFailureReason(job({ status: 'failed', lines: ['Starting codex', 'DOXLOOP_EVENT {"schemaVersion":1}', 'doxloop: The revision stayed out of scope.'] }))).toBe('The revision stayed out of scope.')
     expect(jobFailureReason(job({ status: 'failed', lines: ['codex exited with status 1', 'DOXLOOP_EVENT {"schemaVersion":1}'] }))).toBe('codex exited with status 1')
+    expect(jobFailureReason(job({ status: 'failed', lines: ['15:29:41 Starting codex', '15:31:02 doxloop: The revision stayed out of scope.'] }))).toBe('The revision stayed out of scope.')
+    expect(jobFailureReason(job({ status: 'failed', lines: ['15:29:41 codex exited with status 1'] }))).toBe('codex exited with status 1')
     expect(jobFailureReason(job({ status: 'failed', lines: [] }))).toBeUndefined()
     expect(jobFailureReason(job({ status: 'succeeded', lines: ['doxloop: ignored'] }))).toBeUndefined()
   })

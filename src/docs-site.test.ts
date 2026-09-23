@@ -104,7 +104,7 @@ describe('docs-site snapshots', () => {
     await expect(validateProjectSourceBoundaries(root, [{ name: 'legacy', path: '../nowhere', kind: 'docs-site' }])).rejects.toThrow('snapshot for source "legacy" is missing')
   })
 
-  test('derives redirects from page dispositions, skipping drops, identical routes, and routes that are new pages', () => {
+  test('derives redirects from page dispositions, skipping drops, identical routes, the site root, and routes that are new pages', () => {
     const redirects = existingDocumentationRedirects({
       pages: [
         { id: 'install', title: 'Install', path: 'getting-started/install', type: 'how-to', priority: 'must-have', action: 'create', purpose: '', rationale: '', evidence: [], evidenceDetails: [] },
@@ -120,6 +120,7 @@ describe('docs-site snapshots', () => {
           { path: 'pages/old.md', url: 'https://docs.example.com/old', disposition: 'drop', into: [], reason: 'obsolete' },
           { path: 'pages/legacy.md', disposition: 'merge', into: ['gone', 'home'], reason: '' },
           { path: 'pages/orphan.md', disposition: 'merge', into: ['unknown-id'], reason: '' },
+          { path: 'pages/index.md', url: 'https://docs.example.com/', disposition: 'merge', into: ['install'], reason: 'the root always serves the new homepage' },
         ],
       }],
     })

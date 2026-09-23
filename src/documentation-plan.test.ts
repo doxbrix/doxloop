@@ -11,7 +11,12 @@ import {
   createDocumentationPlan,
   editDocumentationPlan,
   agentReplyFromStream,
+  applyPlanPatch,
+  planRevisionPatchInstructions,
+  withoutAnsweredQuestions,
   extractPlanOutput,
+  fillExistingPageDetails,
+  readPlanOutput,
   ignoreDocumentationPlanError,
   latestDocumentationPlan,
   listDocumentationPlanVersions,
@@ -20,6 +25,8 @@ import {
   requiredScreenshotPlanIssue,
   shallowCaptureAdvisory,
   retryDocumentationPlan,
+  updateDocumentationPlanExecution,
+  researchBlockedError,
   screenshotCoverageAdvisory,
   screenshotPlanningInstructions,
   documentationPlanClarificationFeedback,
@@ -36,7 +43,9 @@ import {
   planningTimeoutMinutes,
   proposeDocumentationPlan,
   planWritingRequirements,
-} from './documentation-plan.js'
+  existingDocumentationPlanShape,
+  dropUnknownCaptureIds, assignSectionSpaces } from './documentation-plan.js'
+import { readPlanPatchOutput } from './agent-reply.js'
 import { loadProject, saveProjectSettings, scaffoldProject } from './project.js'
 
 const roots: string[] = []
@@ -140,6 +149,52 @@ describe('documentation plan workflow', () => {
     expect(() => extractPlanOutput('The application looks fine to me.', 'codex')).toThrow(/did not return a valid/)
   })
 
+  test('closes a reply that stops short of its final brackets and reports the repair', () => {
+    // End on a completed object, as the real reply did (its last entry was an
+    // existing-documentation disposition), with the closing `]}` missing.
+    const full = { ...proposal, questions: [{ id: 'q1', question: 'Which auth flow first?', whyItMatters: 'ordering', recommendation: 'tokens' }] }
+    const complete = JSON.stringify(full)
+    expect(complete.endsWith('}]}')).toBe(true)
+    expect(readPlanOutput(complete, 'codex').repairs).toEqual([])
+
+    // A 60k-character Codex plan came back `]}` short twice in a row; the
+    // reply is complete apart from its closers, so nothing is lost by adding them.
+    const short = complete.slice(0, -2)
+    const closed = readPlanOutput(`Here is the plan.\n<doxloop-plan>\n${short}\n</doxloop-plan>`, 'codex')
+    expect(closed.plan).toEqual(full)
+    expect(closed.repairs).toEqual([expect.stringMatching(/2 closing brackets short .* appended "\]\}"/)])
+
+    // The first failed attempt also finished with a stray closing tag.
+    const tagged = readPlanOutput(`<doxloop-plan>\n${short}</existingDocumentation>\n</doxloop-plan>`, 'codex')
+    expect(tagged.plan).toEqual(full)
+    expect(tagged.repairs).toHaveLength(1)
+
+    // Codex streams the reply as an agent message; the same repair applies there.
+    const stream = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `<doxloop-plan>${short}</doxloop-plan>` } })
+    expect(readPlanOutput(stream, 'codex').plan).toEqual(full)
+  })
+
+  test('never closes a reply that was cut off inside a value', () => {
+    const complete = JSON.stringify(proposal)
+    // Cut inside the last string: closing it would fabricate a value.
+    const insideString = complete.slice(0, complete.lastIndexOf('"') - 3)
+    expect(() => extractPlanOutput(`<doxloop-plan>${insideString}</doxloop-plan>`, 'codex')).toThrow(/malformed documentation-plan .*never closed and looks cut off/)
+    // Cut after a comma: the next page never arrived, so the plan is incomplete.
+    const afterComma = '{"productProfile":"x","summary":"y","capabilities":[],"pages":[{"id":"a","visuals":{"mode":"none"}},'
+    expect(() => extractPlanOutput(afterComma, 'codex')).toThrow(/never closed and looks cut off/)
+    // Cut partway through a page object: its remaining fields are missing.
+    const insidePage = '{"productProfile":"x","summary":"y","capabilities":[],"pages":[{"id":"a"},{"id":"b","title":"B"'
+    expect(() => extractPlanOutput(insidePage, 'codex')).toThrow(/never closed and looks cut off/)
+    // A wrong closer at the very end is a swapped tail and is rewritten with
+    // a note; a wrong closer with more content after it is malformed.
+    const swapped = '{"productProfile":"x","summary":"y","capabilities":[],"pages":[{"id":"a"}}'
+    const rewritten = readPlanOutput(swapped, 'codex')
+    expect(rewritten.plan).toEqual({ productProfile: 'x', summary: 'y', capabilities: [], pages: [{ id: 'a' }] })
+    expect(rewritten.repairs).toEqual([expect.stringMatching(/planner's reply ended with the wrong closing brackets \("\}" where "\]\}" closes the JSON object\)/)])
+    const mismatched = '{"productProfile":"x","summary":"y","capabilities":[],"pages":[{"id":"a"}},"questions":[]}'
+    expect(() => extractPlanOutput(mismatched, 'codex')).toThrow(/malformed documentation-plan/)
+  })
+
   test('reports thin screenshot coverage for review without failing the plan', () => {
     const guide = {
       mode: 'required',
@@ -228,7 +283,7 @@ describe('documentation plan workflow', () => {
       execution: { screenshots: 'enabled' },
     })
     expect(created.status).toBe('planning')
-    expect(created.execution.limits).toEqual({ maxPages: 40, maxScreenshots: 120, maxMinutes: 120 })
+    expect(created.execution.limits).toEqual({ maxPages: 500, maxScreenshots: 300, maxMinutes: 120 })
     expect((await readDocumentationPlan(root, created.id)).execution.limits).toEqual(created.execution.limits)
   })
 
@@ -272,7 +327,7 @@ describe('documentation plan workflow', () => {
     await expect(approveDocumentationPlan(root, required.id)).rejects.toThrow('screenshot-enabled visible UI guide')
   })
 
-  test('requires a reachable application and complete capture directions before approval', async () => {
+  test('requires complete capture directions but only warns about application readiness at approval', async () => {
     const { root } = await fixture()
     const created = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', execution: { screenshots: 'enabled' } })
     const ready = await applyDocumentationPlanProposal(root, created.id, {
@@ -294,19 +349,38 @@ describe('documentation plan workflow', () => {
         ],
       } }],
     })
-    await expect(approveDocumentationPlan(root, detailed.id)).rejects.toThrow('Configure a safe local or test application')
+    const unconfigured = await approveDocumentationPlan(root, detailed.id)
+    expect(unconfigured.status).toBe('approved')
+    expect(unconfigured.advisories?.join('\n')).toContain('Screenshot warning: Configure a safe local or test application')
 
-    const server = createServer((request, response) => { response.statusCode = request.url === '/missing' ? 404 : 200; response.end('ready') })
+    const server = createServer((request, response) => { response.statusCode = request.url === '/missing' || request.url === '/settings' ? 404 : 200; response.end('ready') })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address()
     try {
       if (!address || typeof address === 'string') throw new Error('Missing test server address')
       await saveProjectSettings(root, { application: { baseUrl: `http://127.0.0.1:${address.port}` } })
-      await expect(approveDocumentationPlan(root, detailed.id)).rejects.toThrow('starting route')
+      await editDocumentationPlan(root, detailed.id, {})
+      const missingRoute = await approveDocumentationPlan(root, detailed.id)
+      expect(missingRoute.status).toBe('approved')
+      const warnings = (missingRoute.advisories ?? []).filter((item) => item.startsWith('Screenshot warning:'))
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('/missing')
+      expect(warnings[0]).toContain('HTTP 404')
       const corrected = await editDocumentationPlan(root, detailed.id, {
         pages: [{ ...detailed.pages[0], visuals: { ...detailed.pages[0]!.visuals, startPath: '/requests/new' } }],
       })
-      await expect(approveDocumentationPlan(root, corrected.id)).resolves.toMatchObject({ status: 'approved' })
+      const clean = await approveDocumentationPlan(root, corrected.id)
+      expect(clean.status).toBe('approved')
+      expect((clean.advisories ?? []).some((item) => item.startsWith('Screenshot warning:'))).toBe(false)
+
+      // A hash-routed base URL keeps the route in the fragment, so /settings
+      // is probed as the application document rather than a server path.
+      await saveProjectSettings(root, { application: { baseUrl: `http://127.0.0.1:${address.port}/_/#` } })
+      const hashRouted = await editDocumentationPlan(root, detailed.id, {
+        pages: [{ ...detailed.pages[0], visuals: { ...detailed.pages[0]!.visuals, startPath: '/settings' } }],
+      })
+      const hashApproved = await approveDocumentationPlan(root, hashRouted.id)
+      expect((hashApproved.advisories ?? []).some((item) => item.startsWith('Screenshot warning:'))).toBe(false)
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
     }
@@ -334,7 +408,7 @@ describe('documentation plan workflow', () => {
     })
   })
 
-  test('expands token screenshot estimates into a complete visual story', async () => {
+  test('keeps a single requested capture and still requires its state description', async () => {
     const { root } = await fixture()
     const created = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', execution: { screenshots: 'enabled' } })
     const ready = await applyDocumentationPlanProposal(root, created.id, {
@@ -348,7 +422,7 @@ describe('documentation plan workflow', () => {
       } }],
     })
 
-    expect(ready.pages[0]?.visuals?.estimatedCaptures).toBe(4)
+    expect(ready.pages[0]?.visuals?.estimatedCaptures).toBe(1)
     await expect(approveDocumentationPlan(root, ready.id)).rejects.toThrow('capture-sequence item per planned image')
   })
 
@@ -492,14 +566,14 @@ describe('documentation plan workflow', () => {
     })).rejects.toThrow('The reviewer asked for at least 9 pages to write.')
   })
 
-  test('flags procedural guides that plan fewer captures than their steps open', () => {
+  test('accepts one meaningful image without manufacturing extra capture states', () => {
     const page = (captures: number, workflow: string) => ({
       ...proposal.pages[0],
       id: 'guide', title: 'Manage sources', path: 'guides/manage-sources', type: 'how-to', action: 'create',
       visuals: { mode: 'required', rationale: 'Dense configuration.', estimatedCaptures: captures, startPath: '/sources', workflow, captureSequence: Array.from({ length: captures }, (_, index) => `Step ${index + 1} — state — why`) },
     })
     const shallow = { pages: [page(1, 'Open Sources, open Monitoring, expand Advanced, and inspect budgets.')] as never }
-    expect(shallowCaptureAdvisory(shallow, { screenshots: 'enabled' })).toContain('"Manage sources" plans 1 capture')
+    expect(shallowCaptureAdvisory(shallow, { screenshots: 'enabled' })).toBeUndefined()
     expect(shallowCaptureAdvisory(shallow, { screenshots: 'disabled' })).toBeUndefined()
     const single = { pages: [page(1, 'Open Sources; the guide is a single screen with no further reachable state.')] as never }
     expect(shallowCaptureAdvisory(single, { screenshots: 'enabled' })).toBeUndefined()
@@ -688,6 +762,22 @@ describe('documentation plan workflow', () => {
     })).rejects.toThrow('safe relative path')
   })
 
+  test('re-points a plan at another assistant and keeps a valid approval', async () => {
+    const { root } = await fixture()
+    const created = await createDocumentationPlan(root, { mode: 'create', scope: 'standard', execution: { agent: 'claude', model: 'claude-sonnet-5', effort: 'high', screenshots: false } })
+    const proposed = await applyDocumentationPlanProposal(root, created.id, proposal)
+    const approved = await approveDocumentationPlan(root, proposed.id)
+    const switched = await updateDocumentationPlanExecution(root, approved.id, { agent: 'codex', model: undefined })
+    expect(switched.execution).toMatchObject({ agent: 'codex', effort: 'high' })
+    expect(switched.execution.model).toBeUndefined()
+    expect(switched.status).toBe('approved')
+    expect(switched.approvedHash).not.toBe(approved.approvedHash)
+    // The re-stamped approval still passes the generation check.
+    const reread = await readDocumentationPlan(root, approved.id)
+    expect(reread.approvedHash).toBe(switched.approvedHash)
+    await expect(updateDocumentationPlanExecution(root, approved.id, { agent: 'codex' })).resolves.toMatchObject({ updatedAt: switched.updatedAt })
+  })
+
   test('restores an interrupted plan only to its last safe durable stage', async () => {
     const { root } = await fixture()
     const created = await createDocumentationPlan(root, { mode: 'create', scope: 'starter', execution: { screenshots: false } })
@@ -697,6 +787,16 @@ describe('documentation plan workflow', () => {
     expect(restored.status).toBe('planning')
     expect(restored.error).toBeUndefined()
     await expect(retryDocumentationPlan(root, created.id, 'generate')).rejects.toThrow('approved snapshot')
+  })
+})
+
+describe('research sessions blocked by the assistant', () => {
+  test('names the sign-in problem instead of asking for a retry of the missing briefs', async () => {
+    const { AgentSessionError } = await import('./agent-failure.js')
+    const blocker = new AgentSessionError('claude', 'research "application"', 1, 'Failed to authenticate: OAuth session expired and could not be refreshed')
+    const error = researchBlockedError(new Error('2 research sessions did not finish ("application": x; "product": y). The briefs that finished are saved; retry the plan to run only the missing ones.'), blocker)
+    expect(error.message).toBe('2 research sessions did not finish: Claude Code could not sign in (OAuth session expired and could not be refreshed). Run `claude auth login` or switch assistant, then retry.')
+    expect(error.message).not.toContain('missing ones')
   })
 })
 
@@ -764,6 +864,10 @@ describe('clarification defaults', () => {
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('decide open questions by their safe default instead of asking')
     expect(prompts[0]).not.toContain('Use at most three questions')
+    // Prompt-side JSON is compact; only files on disk are pretty-printed.
+    expect(prompts[0]).toContain('Project configuration (compact JSON):\n{"')
+    expect(prompts[0]).not.toContain('Project configuration:\n{\n')
+    expect(prompts[0]).not.toContain('plan UI guides around the strings those catalogs display')
 
     // A reviewer who wants to answer in the review screen keeps the question rule.
     const asked = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', clarificationMode: 'review', execution: { agent: 'codex', screenshots: false } })
@@ -772,6 +876,111 @@ describe('clarification defaults', () => {
     expect(second).toHaveLength(2)
     expect(second[1]).toContain('Use at most three questions')
   }, 30_000)
+})
+
+describe('staged planning', () => {
+  test('research sessions run first and the plan is written from their briefs', async () => {
+    if (process.platform === 'win32') return
+    const { root } = await fixture(true)
+    const parent = join(root, '..')
+    const executable = join(parent, 'codex')
+    const promptLog = join(parent, 'prompts.log')
+    const brief = { productProfile: 'Plan API', audiences: ['developers'], capabilities: [{ id: 'requests', title: 'Send requests', kind: 'api', summary: 'POST /requests', evidence: [] }], unknowns: [] }
+    const briefReply = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `<doxloop-brief>${JSON.stringify(brief)}</doxloop-brief>` } })
+    const planReply = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `<doxloop-plan>${JSON.stringify({ ...proposal, pages: proposal.pages.map((page) => ({ ...page, evidence: [], evidenceDetails: [] })) })}</doxloop-plan>` } })
+    // Answers a research prompt with a brief and anything else with the plan.
+    await writeFile(executable, `#!/bin/sh\nfor last; do :; done\nprintf '%s\\n---\\n' "$last" >> "${promptLog}"\ncase "$last" in\n  *'Research task "product"'*) /bin/cat <<'EOF_BRIEF'\n${briefReply}\nEOF_BRIEF\n;;\n  *) /bin/cat <<'EOF_PLAN'\n${planReply}\nEOF_PLAN\n;;\nesac\n`)
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const created = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', execution: { agent: 'codex', screenshots: 'disabled' } })
+    const planned = await proposeDocumentationPlan(root, created.id)
+    expect(planned.status).toBe('ready-for-review')
+    const prompts = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]).toContain('Research task "product": Auditing the product surface')
+    expect(prompts[0]).toContain('<doxloop-brief>')
+    expect(prompts[1]).toContain('Research sessions have already read the configured sources')
+    expect(prompts[1]).toContain('### Brief "product": Auditing the product surface')
+    expect(prompts[1]).toContain('"title":"Send requests"')
+    expect(prompts[1]).toContain('Do not read the skill files')
+    expect(prompts[1]).not.toContain('Research task "product"')
+    // The brief is saved under the plan for retries.
+    const saved = JSON.parse(await readFile(join(root, '.doxloop', 'plans', created.id, 'research', 'product.json'), 'utf8')) as { content: unknown }
+    expect(saved.content).toEqual(brief)
+
+    // The single-session planner is one environment switch away.
+    process.env.DOXLOOP_PLANNING_STAGED = '0'
+    try {
+      const single = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', execution: { agent: 'codex', screenshots: 'disabled' } })
+      await proposeDocumentationPlan(root, single.id)
+    } finally {
+      delete process.env.DOXLOOP_PLANNING_STAGED
+    }
+    const all = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(all).toHaveLength(3)
+    expect(all[2]).toContain('Research the configured product evidence and existing documentation')
+    expect(all[2]).not.toContain('Research briefs')
+  }, 30_000)
+})
+
+describe('update request triage', () => {
+  test('a navigation request plans from the current navigation with no research; an ambiguous one is triaged first', async () => {
+    if (process.platform === 'win32') return
+    const { root } = await fixture(true)
+    const parent = join(root, '..')
+    const executable = join(parent, 'codex')
+    const promptLog = join(parent, 'prompts.log')
+    const message = (text: string): string => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } })
+    const preserved = proposal.pages.map((page) => ({ ...page, action: 'preserve', evidence: [], evidenceDetails: [] }))
+    const navigationPlan = message(`<doxloop-plan>${JSON.stringify({ ...proposal, capabilities: [], pages: preserved, workspaceInstructions: 'Set icon "rocket" on Quickstart and "book" on the Guides group.' })}</doxloop-plan>`)
+    const brief = message(`<doxloop-brief>${JSON.stringify({ productProfile: 'Plan API', capabilities: [{ id: 'requests', title: 'Send requests', kind: 'api', summary: 'POST /requests', evidence: [] }], unknowns: [] })}</doxloop-brief>`)
+    const fullPlan = message(`<doxloop-plan>${JSON.stringify({ ...proposal, pages: proposal.pages.map((page) => ({ ...page, evidence: [], evidenceDetails: [] })) })}</doxloop-plan>`)
+    const triage = message('<doxloop-triage>{"scope":"product","pages":[],"reason":"The request adds a page whose subject is not on the list."}</doxloop-triage>')
+    await writeFile(executable, `#!/bin/sh\nfor last; do :; done\nprintf '%s\\n---\\n' "$last" >> "${promptLog}"\ncase "$last" in\n  *'triage step'*) /bin/cat <<'EOF_T'\n${triage}\nEOF_T\n;;\n  *'Research task "product"'*) /bin/cat <<'EOF_B'\n${brief}\nEOF_B\n;;\n  *'changes only navigation'*) /bin/cat <<'EOF_N'\n${navigationPlan}\nEOF_N\n;;\n  *) /bin/cat <<'EOF_P'\n${fullPlan}\nEOF_P\n;;\nesac\n`)
+    await chmod(executable, 0o755)
+    process.env.PATH = parent
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    // The 17 Sept 2026 request: icons for the sidebar. One session, no research.
+    const icons = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', request: 'for all the pages icons are missing in the left nav items... can you please add relevant icons to left nav items', execution: { agent: 'codex', screenshots: 'disabled' } })
+    const planned = await proposeDocumentationPlan(root, icons.id)
+    expect(planned.status).toBe('ready-for-review')
+    expect(planned.research).toMatchObject({ scope: 'navigation', decidedBy: 'rules' })
+    expect(planned.workspaceInstructions).toBe('Set icon "rocket" on Quickstart and "book" on the Guides group.')
+    expect(planned.advisories?.[0]).toMatch(/^Research scope: no research: navigation, icons, branding, or metadata only \(decided from the request\)/)
+    const prompts = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('This update changes only navigation, icons, ordering, group names, branding, or page metadata')
+    expect(prompts[0]).toContain('Current navigation (Doxloop read it from the workspace')
+    expect(prompts[0]).toContain('Icon names it can draw: book, file, home')
+    expect(prompts[0]).toContain('Propose a navigation-only plan')
+    expect(prompts[0]).not.toContain('Research task')
+    expect(prompts[0]).not.toContain('Research briefs')
+
+    // An ambiguous request is triaged by one short session that reads nothing, then researched as decided.
+    const ambiguous = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', request: 'Document the new export feature', execution: { agent: 'codex', screenshots: 'disabled' } })
+    const researched = await proposeDocumentationPlan(root, ambiguous.id)
+    expect(researched.research).toEqual({ scope: 'product', pages: [], reason: 'The request adds a page whose subject is not on the list.', decidedBy: 'agent' })
+    const all = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(all).toHaveLength(4)
+    expect(all[1]).toContain('You are the triage step')
+    expect(all[1]).toContain('Update request:\nDocument the new export feature')
+    expect(all[2]).toContain('Research task "product": Auditing the product surface')
+    expect(all[3]).toContain('Research sessions have already read the configured sources')
+
+    // A second update on unchanged sources borrows that product brief instead of auditing again.
+    const later = await createDocumentationPlan(root, { mode: 'update', scope: 'custom', request: 'Refresh everything', execution: { agent: 'codex', screenshots: 'disabled' } })
+    await proposeDocumentationPlan(root, later.id)
+    const reused = (await readFile(promptLog, 'utf8')).split('\n---\n').filter((text) => text.trim())
+    expect(reused).toHaveLength(5)
+    expect(reused[4]).toContain('### Brief "product"')
+    const copied = JSON.parse(await readFile(join(root, '.doxloop', 'plans', later.id, 'research', 'product.json'), 'utf8')) as { task: string }
+    expect(copied.task).toBe('product')
+  }, 60_000)
 })
 
 describe('diagram requirements', () => {
@@ -803,6 +1012,11 @@ describe('proposal checkpoints', () => {
     expect(await readProposalCheckpoint(root, created.id, key)).toBeUndefined()
     await writeProposalCheckpoint(root, created.id, { key, pass: 'proposal', raw: { pages: [] } })
     expect(await readProposalCheckpoint(root, created.id, key)).toMatchObject({ key, pass: 'proposal', raw: { pages: [] } })
+    expect(await readProposalCheckpoint(root, created.id, key)).not.toHaveProperty('repairs')
+    // What Doxloop fixed to read the reply travels with it, so a continued
+    // run still reports the repair on the review.
+    await writeProposalCheckpoint(root, created.id, { key, pass: 'proposal', raw: { pages: [] }, repairs: ['closed 2 brackets'] })
+    expect(await readProposalCheckpoint(root, created.id, key)).toMatchObject({ repairs: ['closed 2 brackets'] })
     // A changed source snapshot, brief, or feedback is a different question.
     expect(await readProposalCheckpoint(root, created.id, proposalCheckpointKey(created, 'snapshot-b'))).toBeUndefined()
     expect(proposalCheckpointKey(created, 'snapshot-a', 'add a glossary')).not.toBe(key)
@@ -874,6 +1088,55 @@ test('the corrective planning pass fixes the named findings without re-exploring
   expect(exploring).not.toContain('do not sign in or explore it again')
 })
 
+test('a corrective pass returns a patch that is merged into the first proposal by page id', () => {
+  const first = {
+    productProfile: 'x', summary: 'y', capabilities: [{ id: 'c1' }], navigation: { top: ['Guides'], sections: [] },
+    pages: [{ id: 'a', title: 'A', visuals: { mode: 'required', estimatedCaptures: 1 } }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }],
+  }
+  // Only page a changed, page c is dropped, page d is new; capabilities are resent, navigation is not.
+  const patch = { pages: [{ id: 'a', title: 'A', visuals: { mode: 'required', estimatedCaptures: 4, workflow: 'open, fill, submit' } }, { id: 'd', title: 'D' }], removePageIds: ['c'], capabilities: [{ id: 'c1' }, { id: 'c2' }] }
+  const merged = applyPlanPatch(first, patch) as typeof first & { pages: Array<{ id: string }> }
+  expect(merged.pages.map((page) => page.id)).toEqual(['a', 'b', 'd'])
+  expect(merged.pages[0]).toEqual(patch.pages[0])
+  expect(merged.pages[1]).toEqual(first.pages[1])
+  expect(merged.capabilities).toEqual(patch.capabilities)
+  expect(merged.navigation).toEqual(first.navigation)
+  expect(merged.summary).toBe('y')
+  // The instructions ask for a patch and explain the merge; the exploring case still names the browser.
+  const scoped = gateRevisionInstructions('"A": missing ordered workflow.', first)
+  expect(scoped).toContain('<doxloop-plan-patch>')
+  expect(scoped).toContain('merges the patch into the first proposal by page id')
+  const briefed = gateRevisionInstructions('the proposal planned no application screenshots.', first, { briefed: true })
+  expect(briefed).toContain('application research brief')
+  expect(briefed).not.toContain('doxloop_capture')
+
+  // The patch reader accepts the agreed block and repairs a lost closer; a whole plan is not mistaken for a patch.
+  const reply = readPlanPatchOutput(`Fixed.\n<doxloop-plan-patch>\n${JSON.stringify(patch).slice(0, -1)}\n</doxloop-plan-patch>`, 'codex')
+  expect(reply?.value).toEqual(patch)
+  expect(reply?.repairs).toEqual([expect.stringMatching(/corrective reply stopped 1 closing bracket short/)])
+  expect(readPlanPatchOutput('No patch here.', 'codex')).toBeUndefined()
+})
+
+test('existing-page titles and URLs are filled from the snapshot so the planner lists paths only', () => {
+  const details = new Map([['legacy', new Map([
+    ['pages/install.md', { title: 'Install', url: 'https://docs.example.com/install' }],
+    ['pages/faq.md', { title: 'FAQ', url: 'https://docs.example.com/faq' }],
+  ])]])
+  const raw = { pages: [], existingDocumentation: [{ source: 'legacy', pages: [
+    { path: 'pages/install.md', disposition: 'rewrite', into: ['install'] },
+    { path: '/pages/faq.md', title: 'Questions', disposition: 'drop', into: [] },
+    { path: 'pages/unknown.md', disposition: 'drop', into: [] },
+  ] }, { source: 'other', pages: [{ path: 'pages/install.md' }] }] }
+  const filled = fillExistingPageDetails(raw, details) as { existingDocumentation: Array<{ pages: Array<Record<string, unknown>> }> }
+  expect(filled.existingDocumentation[0]!.pages[0]).toMatchObject({ title: 'Install', url: 'https://docs.example.com/install' })
+  // A title the planner did give is kept; the URL is still added.
+  expect(filled.existingDocumentation[0]!.pages[1]).toMatchObject({ title: 'Questions', url: 'https://docs.example.com/faq' })
+  expect(filled.existingDocumentation[0]!.pages[2]).toEqual({ path: 'pages/unknown.md', disposition: 'drop', into: [] })
+  expect(filled.existingDocumentation[1]!.pages[0]).toEqual({ path: 'pages/install.md' })
+  expect(fillExistingPageDetails('not a plan', details)).toBe('not a plan')
+  expect(existingDocumentationPlanShape([{ name: 'legacy', path: '../snap', kind: 'docs-site' }])).not.toContain('"url"')
+})
+
 test('a "recommended" label in required screenshot mode is repaired without a second planning pass', () => {
   const raw = { pages: [
     { id: 'a', visuals: { mode: 'recommended', estimatedCaptures: 2 } },
@@ -884,4 +1147,42 @@ test('a "recommended" label in required screenshot mode is repaired without a se
   expect(repaired.pages.map((page) => page.visuals.mode)).toEqual(['required', 'required', 'none'])
   // Automatic mode keeps best-effort visuals as the planner wrote them.
   expect((repairMechanicalPlanIssues(raw, { screenshots: 'auto' }) as typeof raw).pages[0]!.visuals.mode).toBe('recommended')
+})
+
+test('blanks capture references the application research never saved', () => {
+  const raw = { pages: [
+    { id: 'a', visuals: { captureIds: ['login', 'ghost', ''] } },
+    { id: 'b', visuals: { captureIds: [42, 'home'] } },
+    { id: 'c' },
+  ] }
+  expect(dropUnknownCaptureIds(raw, new Set(['login', 'home']))).toBe(1)
+  expect(raw.pages[0]!.visuals!.captureIds).toEqual(['login', '', ''])
+  expect(raw.pages[1]!.visuals!.captureIds).toEqual(['', 'home'])
+  expect(dropUnknownCaptureIds('nope', new Set())).toBe(0)
+})
+
+describe('plan revisions are patches', () => {
+  test('a revision is asked for a patch and the answered questions leave the plan', () => {
+    expect(planRevisionPatchInstructions()).toContain('<doxloop-plan-patch>')
+    const raw = { pages: [{ id: 'a' }], questions: [{ id: 'q1', question: 'A?' }, { id: 'q2', question: 'B?' }] }
+    expect(withoutAnsweredQuestions(raw, { q1: 'yes' })).toEqual({ pages: [{ id: 'a' }], questions: [{ id: 'q2', question: 'B?' }] })
+    expect(withoutAnsweredQuestions(raw, { q1: '  ' })).toBe(raw)
+    expect(withoutAnsweredQuestions({ pages: [] }, { q1: 'yes' })).toEqual({ pages: [] })
+    const merged = applyPlanPatch({ pages: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }], questions: [{ id: 'q1' }] }, { pages: [{ id: 'b', title: 'B2' }], questions: [] })
+    expect(merged).toEqual({ pages: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B2' }], questions: [] })
+  })
+})
+
+describe('assignSectionSpaces', () => {
+  test('keeps a named space, matches a section to a space by name, and leaves the rest to path-based placement', () => {
+    const top = ['Memos', 'Administration', 'API & integrations']
+    const sections = assignSectionSpaces(top, [
+      { id: 'a', title: 'Configure the instance', pageIds: ['x'], space: 'administration' },
+      { id: 'b', title: 'APIs', pageIds: ['y'] },
+      { id: 'c', title: 'Integrations', pageIds: ['z'] },
+      { id: 'd', title: 'Create and organize', pageIds: ['w'] },
+      { id: 'e', title: 'Deploy', pageIds: ['v'], space: 'Nowhere' },
+    ])
+    expect(sections.map((section) => section.space)).toEqual(['Administration', 'API & integrations', 'API & integrations', undefined, undefined])
+  })
 })

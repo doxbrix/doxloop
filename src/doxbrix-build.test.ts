@@ -35,6 +35,23 @@ describe('Doxbrix static build', () => {
     expect(html).toContain('aria-label="Documentation version: v2"')
   })
 
+  test('writes redirect stubs only for served pages and never over the homepage', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-build-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [] })
+    await writeFile(join(root, '.doxloop', 'redirects.json'), JSON.stringify({
+      '/': '/getting-started/product-overview',
+      '/old-quickstart': '/quickstart',
+      '/old-overview': '/getting-started/product-overview',
+      '/legacy-home': '/',
+    }))
+    await buildDoxbrixStaticSite({ root })
+    expect(await readFile(join(root, 'build', 'index.html'), 'utf8')).not.toContain('http-equiv="refresh"')
+    expect(await readFile(join(root, 'build', 'old-quickstart', 'index.html'), 'utf8')).toContain('url=/quickstart"')
+    expect(await readFile(join(root, 'build', 'legacy-home', 'index.html'), 'utf8')).toContain('url=/"')
+    expect(await pathExists(join(root, 'build', 'old-overview'))).toBe(false)
+  })
+
   test('writes pages, assets, search, sitemap, robots, and project-site URLs', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-build-'))
     roots.push(parent)

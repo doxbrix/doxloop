@@ -225,6 +225,23 @@ export class AuthoringProgressTracker {
     return this.pages.size
   }
 
+  /**
+   * Pages a resumed run found finished and keeps. They count as done from
+   * the start, so the reviewer sees "35 of 35" instead of a run that seems
+   * to begin from nothing and then only ever reaches the pages it repaired.
+   */
+  retain(paths: readonly string[]): void {
+    if (this.finished) return
+    let added = false
+    for (const raw of paths) {
+      const path = portableWorkspacePath(raw)
+      if (!path || this.pages.has(path)) continue
+      this.pages.add(path)
+      added = true
+    }
+    if (added) this.start(AUTHORING_STAGE.authoring, true)
+  }
+
   private start(id: string, reemit = false): void {
     const stage = this.stages.find((candidate) => candidate.id === id)
     if (!stage) return
@@ -237,7 +254,10 @@ export class AuthoringProgressTracker {
   private progressFor(id: string): WorkflowStageProgress | undefined {
     if (id !== AUTHORING_STAGE.authoring) return undefined
     if (this.pages.size === 0 && this.plannedPages === undefined) return undefined
-    return { done: this.pages.size, ...(this.plannedPages !== undefined ? { total: this.plannedPages } : {}) }
+    // Starter pages the run replaces and pages a fix session rewrites are
+    // files too; the count never reads "36 of 32".
+    const done = this.plannedPages !== undefined ? Math.min(this.pages.size, this.plannedPages) : this.pages.size
+    return { done, ...(this.plannedPages !== undefined ? { total: this.plannedPages } : {}) }
   }
 }
 

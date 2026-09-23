@@ -33,7 +33,9 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
   useEffect(() => {
     if (!open) return
     const close = (event: MouseEvent) => { if (menu.current && !menu.current.contains(event.target as Node)) setOpen(false) }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { setOpen(false); toggle.current?.focus() } }
+    // Keyboard users land inside the panel they just opened.
+    menu.current?.querySelector<HTMLButtonElement>('.project-switcher-menu button:not(:disabled)')?.focus()
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', escape)
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape) }
@@ -83,8 +85,9 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
     <button
       type="button"
       class="workspace-identity project-switcher-toggle"
-      aria-haspopup="menu"
+      aria-haspopup="dialog"
       aria-expanded={open}
+      aria-controls={open ? 'project-switcher-menu' : undefined}
       aria-label={`Current workspace: ${project.title}. Switch project`}
       ref={toggle}
       onClick={() => {
@@ -97,12 +100,12 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
       <span class="workspace-identity-copy"><strong>{project.title}</strong><small>{state.root ? projectFolderName(state.root) : 'Local workspace'}</small></span>
       <Icon name="chevronUpDown" size={14} />
     </button>
-    {open && <div class="project-switcher-menu" role="menu" aria-label="Projects" style={{ top: `${anchor.top}px`, left: `${anchor.left}px` }}>
+    {open && <div id="project-switcher-menu" class="project-switcher-menu" role="dialog" aria-label="Switch project" style={{ top: `${anchor.top}px`, left: `${anchor.left}px` }}>
       <div class="project-switcher-current"><small>Open now</small><strong>{project.title}</strong><span title={state.root}>{state.root}</span></div>
-      <div class="project-switcher-section"><small>Recent</small>
+      <div class="project-switcher-section" role="group" aria-label="Recent projects"><small aria-hidden="true">Recent</small>
         {choices.length === 0 && <p class="project-switcher-empty">No other projects opened yet.</p>}
         {choices.map((item) => <div key={item.path} class={`project-recent-row ${item.missing ? 'missing' : ''}`}>
-          <button type="button" role="menuitem" disabled={Boolean(busy) || item.missing} title={item.path} onClick={() => void openProject(item.path)}>
+          <button type="button" disabled={Boolean(busy) || item.missing} title={item.path} onClick={() => void openProject(item.path)}>
             <span class="project-recent-mark">{item.title.slice(0, 1).toUpperCase()}</span>
             <span class="project-recent-copy"><strong>{item.title}</strong><small>{item.missing ? 'Folder no longer has a Doxloop project' : `${item.generator} · ${projectFolderName(item.path)}`}</small></span>
             {busy === item.path && <span class="spinner" />}
@@ -110,10 +113,10 @@ export function ProjectSwitcher({ state, onSwitched, onNewProject, onError }: {
           <button type="button" class="project-recent-forget" aria-label={`Remove ${item.title} from recent projects`} title="Remove from recent" onClick={() => void forget(item.path)}><Icon name="close" size={13} /></button>
         </div>)}
       </div>
-      <div class="project-switcher-actions">
-        <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => void openFolder()}><Icon name="folder" size={16} /><span><strong>Open folder…</strong><small>A Doxloop project, or existing docs to import</small></span>{busy === 'browse' && <span class="spinner" />}</button>
-        <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpen(false); setImporting({ path: '' }) }}><Icon name="publish" size={16} /><span><strong>Import existing documentation…</strong><small>Keep your generator, or convert Mintlify to Doxbrix</small></span></button>
-        <button type="button" role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpen(false); onNewProject() }}><Icon name="plus" size={16} /><span><strong>New documentation project</strong><small>Open the setup wizard</small></span></button>
+      <div class="project-switcher-actions" role="group" aria-label="Other projects">
+        <button type="button" disabled={Boolean(busy)} onClick={() => void openFolder()}><Icon name="folder" size={16} /><span><strong>Open folder…</strong><small>A Doxloop project, or existing docs to import</small></span>{busy === 'browse' && <span class="spinner" />}</button>
+        <button type="button" disabled={Boolean(busy)} onClick={() => { setOpen(false); setImporting({ path: '' }) }}><Icon name="publish" size={16} /><span><strong>Import existing documentation…</strong><small>Keep your generator, or convert Mintlify to Doxbrix</small></span></button>
+        <button type="button" disabled={Boolean(busy)} onClick={() => { setOpen(false); onNewProject() }}><Icon name="plus" size={16} /><span><strong>New documentation project</strong><small>Open the setup wizard</small></span></button>
       </div>
     </div>}
     {importing && <div class="proposal-ready-scrim project-dialog-scrim" role="presentation">

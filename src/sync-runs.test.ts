@@ -6,6 +6,7 @@ import { isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import { computeDrift } from './drift.js'
+import { pendingProposalPaths, resolvedByPendingChanges } from './sync-runs.js'
 import { writeEvidenceMap } from './evidence.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { loadProject, scaffoldProject } from './project.js'
@@ -829,8 +830,8 @@ describe('sync review runs', () => {
     expect(replaced.status).toBe('awaiting-review')
     expect(replaced.changes.filter((change) => change.category === 'page').map((change) => `${change.kind}:${change.path}`)).toContain('modified:index.mdx')
 
-    // Touching a real page the plan never mentioned is still outside the batch, and the failure says which page.
-    const failed = await createSyncRun(await options(async (workspace) => {
+    // A real page the plan never mentioned is kept and flagged for review; it no longer discards the run.
+    const flagged = await createSyncRun(await options(async (workspace) => {
       await replaceLanding(workspace)
       await mkdir(join(workspace, 'concepts'), { recursive: true })
       await writeFile(
@@ -840,10 +841,12 @@ describe('sync review runs', () => {
       const navigationPath = join(workspace, 'docs.json')
       await writeFile(navigationPath, (await readFile(navigationPath, 'utf8')).replace('"file": "getting-started/quickstart"', '"file": "getting-started/quickstart", "title": "Quickstart", "icon": "bolt" }, { "type": "page", "file": "concepts/limits"'))
     }))
-    expect(failed.status).toBe('failed')
-    expect(failed.error).toContain('exceeded the approved page batch')
-    expect(failed.error).toContain('concepts/limits.mdx (added, not in the plan)')
-    expect(failed.error).not.toContain('quickstart.mdx')
+    expect(flagged.error).toBeUndefined()
+    expect(flagged.status).toBe('awaiting-review')
+    const outside = (flagged.advisories ?? []).find((line) => line.startsWith('Outside the approved plan'))
+    expect(outside).toContain('concepts/limits.mdx (added, not in the plan)')
+    expect(outside).not.toContain('quickstart.mdx')
+    expect(flagged.changes.map((change) => change.path)).toContain('concepts/limits.mdx')
   }, 30_000)
 
   test('resumes a failed run in its preserved workspace with a brief of what already exists', async () => {
@@ -900,7 +903,7 @@ describe('sync review runs', () => {
     await expect(resumeSyncRun(root, failed.id)).rejects.toThrow('Only a failed or interrupted proposal can be resumed')
   }, 30_000)
 
-  test('recovers a failed run with screenshot problems ignored', async () => {
+  test('keeps a run whose screenshots fell short reviewable, recording every problem', async () => {
     const { root } = await fixture()
     const loaded = await loadProject(root)
     const project = { ...loaded, sync: { ...loaded.sync, mode: 'propose' as const } }
@@ -923,7 +926,7 @@ describe('sync review runs', () => {
       target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: [] },
       execution: { screenshots: 'enabled' },
     } as never
-    const failed = await createSyncRun({
+    const reviewed = await createSyncRun({
       root,
       project,
       plan,
@@ -942,14 +945,37 @@ describe('sync review runs', () => {
         return 0
       },
     })
-    expect(failed.status).toBe('failed')
-    expect(failed.error).toContain('was never captured')
-
-    await expect(recoverSyncRun(root, failed.id)).rejects.toThrow('was never captured')
-    const recovered = await recoverSyncRun(root, failed.id, { ignoreScreenshotProblems: true })
-    expect(recovered.status).toBe('awaiting-review')
-    expect(recovered.screenshots).toMatchObject({ intent: 'enabled', status: 'skipped', captured: 0, textOnly: 1, ignoredProblems: 1 })
-    expect(recovered.screenshots?.message).toContain('ignored')
-    expect(recovered.changes.map((change) => change.path)).toContain('quickstart.mdx')
+    // A capture shortfall no longer discards finished pages: the run goes to
+    // review with the problem recorded and the step kept as text.
+    expect(reviewed.status).toBe('awaiting-review')
+    expect(reviewed.error).toBeUndefined()
+    expect(reviewed.screenshots).toMatchObject({ intent: 'enabled', status: 'skipped', captured: 0, textOnly: 1, ignoredProblems: 1 })
+    expect(reviewed.screenshots?.message).toContain('was never captured')
+    expect(reviewed.screenshots?.message).toContain('remains after capture')
+    expect(reviewed.changes.map((change) => change.path)).toContain('quickstart.mdx')
   }, 30_000)
+})
+
+describe('accepting one file of a proposal at a time', () => {
+  const changes = [
+    { path: 'docs.json', hunks: [{ id: 'n1' }] },
+    { path: 'index.mdx', hunks: [{ id: 'i1' }] },
+    { path: 'guides/a.mdx', hunks: [{ id: 'a1', acceptedAt: 'now' }] },
+    { path: 'guides/b.mdx', hunks: [{ id: 'b1', rejectedAt: 'now' }] },
+  ]
+
+  test('lists the paths the proposal still holds', () => {
+    expect([...pendingProposalPaths(changes)]).toEqual(['docs.json', 'index.mdx'])
+  })
+
+  test('does not block on errors the rest of the proposal resolves', () => {
+    const pending = pendingProposalPaths(changes)
+    expect(resolvedByPendingChanges({ code: 'starter-content', file: 'index.mdx' }, pending)).toBe(true)
+    expect(resolvedByPendingChanges({ code: 'unnavigated-page', file: 'guides/a.mdx' }, pending)).toBe(true)
+    expect(resolvedByPendingChanges({ code: 'broken-link', file: 'guides/a.mdx', message: 'Local link target does not exist: /guides/c' }, pending)).toBe(false)
+    expect(resolvedByPendingChanges({ code: 'broken-link', file: 'guides/a.mdx', message: 'Local link target does not exist: /index' }, pending)).toBe(true)
+    expect(resolvedByPendingChanges({ code: 'broken-link', file: 'guides/a.mdx', message: 'Local link target does not exist: /guides/b#section' }, pendingProposalPaths([{ path: 'guides/b.mdx', hunks: [{ id: 'x' }] }]))).toBe(true)
+    expect(resolvedByPendingChanges({ code: 'unnavigated-page', file: 'guides/a.mdx' }, pendingProposalPaths([changes[1]!]))).toBe(false)
+    expect(resolvedByPendingChanges({ code: 'starter-content', file: 'index.mdx' }, new Set())).toBe(false)
+  })
 })

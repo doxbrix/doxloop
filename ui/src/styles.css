@@ -629,6 +629,7 @@ button.stat:hover { box-shadow: 0 0 0 1px var(--strong-border); }
 .history-loading { padding: 26px 18px; color: var(--muted); font-size: 13.5px; text-align: center; }
 .history-table td { vertical-align: top; }
 .history-table tr.history-row:hover td { background: var(--hover); }
+.history-table .muted-cell .history-duration { display: block; margin-top: 2px; font-size: 11.5px; white-space: nowrap; }
 .history-action strong { color: var(--heading); font-size: 13.5px; font-weight: 650; }
 .history-request { display: grid; gap: 3px; max-width: 560px; }
 .history-request strong {

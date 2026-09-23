@@ -20,3 +20,21 @@ export class PollFailureTracker {
     this.consecutive = 0
   }
 }
+
+/** How often the jobs list is asked for while the server is working and the live stream is up. */
+export const RUNNING_POLL_MS = 2_000
+/** A safety net while the live stream delivers updates, or when nothing is running. */
+export const IDLE_POLL_MS = 60_000
+export const STREAMED_POLL_MS = 15_000
+
+/**
+ * The delay before the next background jobs poll, or `null` for no poll. A
+ * hidden tab never polls (it refreshes as soon as it is shown again); a live
+ * job stream makes polling a slow safety net; only a running job without the
+ * stream is worth asking about every couple of seconds.
+ */
+export function jobPollDelay({ running, streamConnected, hidden }: { running: boolean; streamConnected: boolean; hidden: boolean }): number | null {
+  if (hidden) return null
+  if (!running) return IDLE_POLL_MS
+  return streamConnected ? STREAMED_POLL_MS : RUNNING_POLL_MS
+}

@@ -1,4 +1,4 @@
-import { defaultBatchLimits, type BatchLimits, type BatchScope } from '../../src/batch-limits.js'
+import { defaultBatchLimits, hasPageLimit, type BatchLimits, type BatchScope } from '../../src/batch-limits.js'
 
 export interface SetupPlanForm {
   scope: 'starter' | 'standard' | 'comprehensive'
@@ -11,6 +11,8 @@ export interface SetupPlanForm {
   screenshots: 'auto' | 'enabled' | 'disabled'
   applicationBaseUrl?: string
   applicationStartPath?: string
+  /** True when the user chose to continue although the app needs sign-in. */
+  applicationSignInSkipped?: boolean
 }
 
 export const DEFAULT_READER_OUTCOME = 'Understand the product, get started, and complete the primary supported workflows.'
@@ -23,7 +25,7 @@ export function batchLimitsForScope(scope: BatchScope, screenshots: 'auto' | 'en
 }
 
 export function describeBatchLimits(limits: SetupBatchLimits): string {
-  return `${limits.maxPages} pages · ${limits.maxScreenshots} screenshots · ${limits.maxMinutes} minutes per attempt`
+  return `${hasPageLimit(limits) ? `${limits.maxPages} pages` : 'No page limit'} · ${limits.maxScreenshots} screenshots · ${limits.maxMinutes} minutes per attempt`
 }
 
 export function screenshotIntentFromChoice(choice: 'yes' | 'no'): 'enabled' | 'disabled' {
@@ -81,6 +83,11 @@ export interface SetupStepInput {
   agent: string
   agentInstalled: boolean
   agentLabel: string
+  /** The installed agent's sign-in state, from `UiState.agents[].authentication`. */
+  agentAuthentication?: { status: string; detail: string }
+  /** The chosen reasoning or effort level, checked against `reasoningLevels`. */
+  reasoning?: string
+  reasoningLevels?: readonly string[]
   screenshots: SetupPlanForm['screenshots']
   applicationBaseUrl: string
   applicationStartPath: string
@@ -107,16 +114,73 @@ export function setupStepIssue(step: number, input: SetupStepInput): string | un
   }
   if (step === 3) {
     if (input.agent && !input.agentInstalled) return `${input.agentLabel} is not installed. Install it, or choose a different coding assistant.`
+    if (input.agent && input.agentAuthentication?.status === 'unauthenticated') return `${input.agentLabel} is signed out on this computer. ${signInInstruction(input.agent)}, or choose a different coding assistant.`
+    const reasoning = input.reasoning?.trim() ?? ''
+    if (reasoning && input.reasoningLevels?.length && !input.reasoningLevels.includes(reasoning)) return `"${reasoning}" is not a reasoning level for this model. Choose one of: ${input.reasoningLevels.join(', ')}.`
     if (input.screenshots !== 'disabled') return setupCaptureProfileIssue(input)
     return undefined
   }
   return undefined
 }
 
+/** The terminal step that signs an agent CLI in, in words a first-time user can follow. */
+export function signInInstruction(agent: string): string {
+  if (agent === 'claude') return 'Open Terminal, run `claude auth login`, then choose Check again'
+  if (agent === 'codex') return 'Open Terminal, run `codex login`, then choose Check again'
+  return 'Sign in to Gemini (run `gemini` once in Terminal, or set GEMINI_API_KEY), then choose Check again'
+}
+
+export interface SetupAgentOption {
+  name: string
+  executable?: string
+  authentication?: { status: string; detail: string }
+}
+
+const AGENT_PREFERENCE = ['codex', 'claude', 'gemini']
+
+/**
+ * The assistant a new workspace starts with: an installed one that is signed
+ * in, so the first plan does not fail on authentication. Falls back to any
+ * installed assistant, then to Codex.
+ */
+export function preferredSetupAgent(agents: readonly SetupAgentOption[] | undefined): string {
+  const installed = [...(agents ?? [])]
+    .filter((agent) => agent.executable)
+    .sort((left, right) => AGENT_PREFERENCE.indexOf(left.name) - AGENT_PREFERENCE.indexOf(right.name))
+  return installed.find((agent) => agent.authentication?.status === 'authenticated')?.name
+    ?? installed.find((agent) => agent.authentication?.status !== 'unauthenticated')?.name
+    ?? installed[0]?.name
+    ?? 'codex'
+}
+
+const SECRET_FORM_KEYS = ['applicationPassword', 'gitSecret'] as const
+
+/**
+ * What the wizard keeps as a browser draft so leaving setup, reloading, or a
+ * crash does not lose the answers. Passwords and tokens are never stored.
+ */
+export function setupDraftSnapshot<F extends Record<string, unknown>, S extends Record<string, unknown>>(
+  form: F,
+  sources: readonly S[],
+  step: number,
+): { form: F; sources: S[]; step: number } {
+  const safeForm = { ...form }
+  for (const key of SECRET_FORM_KEYS) if (key in safeForm) (safeForm as Record<string, unknown>)[key] = ''
+  return {
+    form: safeForm,
+    sources: sources.map((source) => ({ ...source, ...('gitSecret' in source ? { gitSecret: '' } : {}) })),
+    step,
+  }
+}
+
+export function setupDraftKey(cwd: string): string {
+  return `doxloop.setup-draft:${cwd}`
+}
+
 export function setupDocumentationPlanRequest(form: SetupPlanForm) {
   const readerOutcome = form.readerOutcome.trim() || DEFAULT_READER_OUTCOME
   const captureContext = form.screenshots !== 'disabled' && form.applicationBaseUrl?.trim()
-    ? `\nApplication screenshot capture: use ${setupApplicationCaptureTarget(form.applicationBaseUrl, form.applicationStartPath ?? '/')} as the initial safe capture surface. Infer only evidence-supported, non-destructive visible workflows and propose the meaningful states before capture.`
+    ? `\nApplication screenshot capture: use ${setupApplicationCaptureTarget(form.applicationBaseUrl, form.applicationStartPath ?? '/')} as the initial safe capture surface. Infer only evidence-supported, non-destructive visible workflows and propose the meaningful states before capture.${form.applicationSignInSkipped ? ' The application needs sign-in and the user chose to continue without it: keep signed-in workflows text-only and do not ask for credentials or a test account.' : ''}`
     : ''
   return {
     mode: 'create' as const,
