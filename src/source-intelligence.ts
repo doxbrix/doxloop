@@ -8,7 +8,7 @@ import { matchesGlob } from './globs.js'
 import { computeDrift } from './drift.js'
 import { loadPages, relativePath, loadProject } from './project.js'
 import { sourceHealth } from './source-connectors.js'
-import { discoverDocumentationSources, type DiscoveryEvidence } from './source-discovery.js'
+import { KEYWORD_SIGNAL_KINDS, discoverDocumentationSources, signalModule, type DiscoveryEvidence } from './source-discovery.js'
 import type {
   CoverageGroup,
   CoverageItem,
@@ -182,6 +182,10 @@ function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefi
 }
 
 function evidenceMatches(signal: DiscoveryEvidence, identifier: string): boolean {
+  // Keyword signals stand for a folder: a page citing any file in it covers it.
+  if (KEYWORD_SIGNAL_KINDS.has(signal.kind)) {
+    if (signalModule(identifier) === signal.path || identifier === signal.path || identifier.startsWith(`${signal.path}/`)) return true
+  }
   return identifier === signal.label || identifier === signal.path || matchesGlob(signal.path, identifier) || (signal.kind === 'export' && identifier === `schema:${signal.label.replace(/^Schema /, '')}`)
 }
 

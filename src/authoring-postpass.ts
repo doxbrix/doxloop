@@ -383,7 +383,58 @@ async function repairDoxbrixNavigation(
     const bySection = spaceNamed(sectionTitle)
     if (bySection) return bySection
     const first = entry.id.includes('/') ? entry.id.split('/')[0] : undefined
-    return spaceNamed(first) ?? site.spaces[0]!
+    // "api/webhooks" belongs in an "API & integrations" space the plan lists.
+    const prefixed = first ? site.spaces.find((candidate) => {
+      const slug = key(candidate.slug ?? candidate.name)
+      return slug.startsWith(`${key(first)}-`) && (plan.navigation?.top ?? []).some((name) => key(name) === slug)
+    }) : undefined
+    return spaceNamed(first) ?? prefixed ?? site.spaces[0]!
+  }
+
+  promotePlannedAreas()
+
+  /**
+   * Batches write pages without seeing the whole plan, and the first batch
+   * usually lays the plan's top-level areas out as groups inside the one
+   * starter space. A multi-area plan is meant to open as spaces (the switcher
+   * above the sidebar), so while the site still has a single space, each area
+   * group becomes its own space in the plan's order. A site that already has
+   * several spaces was arranged on purpose and is left alone.
+   */
+  function promotePlannedAreas(): void {
+    const areas = (plan.navigation?.top ?? []).filter((name) => key(name))
+    if (areas.length < 2 || site.spaces.length !== 1) return
+    const original = site.spaces[0]!
+    if (original.version || original.locale) return
+    const areaGroups = areas
+      .map((name) => ({ name, index: original.nav.findIndex((node) => node.type === 'group' && key(node.label) === key(name)) }))
+      .filter((entry) => entry.index >= 0)
+    if (areaGroups.length < 2) return
+    const byArea = new Map<string, DoxbrixSpace>()
+    for (const { name } of areaGroups) {
+      const index = original.nav.findIndex((node) => node.type === 'group' && key(node.label) === key(name))
+      if (index < 0) continue
+      const [group] = original.nav.splice(index, 1) as [DoxbrixGroup]
+      byArea.set(key(name), { name, slug: key(name), ...(group.icon ? { icon: group.icon } : {}), nav: group.items ?? [] })
+    }
+    // What the writer left outside an area group (the landing page, starter
+    // groups) opens the first area that has no group of its own, else joins
+    // the first area, so no stray "Documentation" space stays beside them.
+    const leftovers = original.nav
+    let placed = leftovers.length === 0
+    const promoted: DoxbrixSpace[] = []
+    for (const name of areas) {
+      const space = byArea.get(key(name))
+      if (space) promoted.push(space)
+      else if (!placed && promoted.length === 0) {
+        promoted.push({ name, slug: key(name), ...(original.icon ? { icon: original.icon } : {}), nav: leftovers })
+        placed = true
+      }
+    }
+    if (!placed) promoted[0]!.nav.unshift(...leftovers)
+    site.spaces.splice(0, 1, ...promoted)
+    report.repairs.push(`${configFile}: split the navigation into ${promoted.length} spaces from the plan (${promoted.map((space) => space.name).join(', ')}).`)
+    changed = true
   }
 
   const referenced = new Set<string>()
@@ -406,6 +457,27 @@ async function repairDoxbrixNavigation(
       if (section.space && !sectionSpaces.has(pageIdentifier)) sectionSpaces.set(pageIdentifier, section.space)
     }
   }
+  // A space the plan does not name (the starter "Documentation" space) that
+  // still holds planned pages at the end of the run: release those pages so
+  // the placement below files each into its planned space and section group.
+  // The emptied starter groups and space are then pruned.
+  if (pruneEmptySpaces && (plan.navigation?.top ?? []).filter((name) => key(name)).length >= 2) {
+    const plannedKeys = new Set((plan.navigation?.top ?? []).map(key))
+    for (const candidate of site.spaces) {
+      if (candidate.version || candidate.locale) continue
+      if (plannedKeys.has(key(candidate.name)) || plannedKeys.has(key(candidate.slug ?? ''))) continue
+      for (const entry of existing) {
+        if (!referenced.has(entry.id) || !sectionSpaces.has(entry.page.id)) continue
+        const result = dropPageNodes(candidate.nav, entry.id)
+        if (result.removed === 0) continue
+        candidate.nav = result.nodes
+        referenced.delete(entry.id)
+        changed = true
+        report.repairs.push(`${configFile}: moved "${entry.id}" out of space "${candidate.name}", which the plan does not name, to its planned space.`)
+      }
+    }
+  }
+
   /**
    * The space the plan assigned a page's section to, created in the plan's
    * `top` order when the writer has not made it yet. Batches write pages
@@ -519,7 +591,12 @@ async function repairDoxbrixNavigation(
         parent.items.push(group)
         report.repairs.push(`${configFile}: created navigation group "${groupLabel}" under "${parent.label}" in space "${space.name}".`)
       } else {
-        space.nav.push(group)
+        // Keep the plan's section order: a section planned before existing groups goes before them.
+        const order = (plan.navigation?.sections ?? []).map((section) => key(section.title))
+        const rank = order.indexOf(key(groupLabel))
+        const before = rank < 0 ? -1 : space.nav.findIndex((node) => node.type === 'group' && order.indexOf(key(node.label)) > rank)
+        if (before === -1) space.nav.push(group)
+        else space.nav.splice(before, 0, group)
         report.repairs.push(`${configFile}: created navigation group "${groupLabel}" in space "${space.name}".`)
       }
     } else if (!group) {
@@ -623,6 +700,24 @@ async function repairDoxbrixNavigation(
         changed = true
         report.repairs.push(`${configFile}: merged navigation group "${copy.group.label}" (${copy.pages} page${copy.pages === 1 ? '' : 's'}) from space "${copy.space.name}" into the one in space "${keep.space.name}".`)
       }
+    }
+  }
+
+  // Batches finish out of order, so section groups land in whatever order the
+  // writers reached them. At the end of the run, each space lists the plan's
+  // sections in the plan's order; anything the plan does not name keeps its place.
+  if (pruneEmptySpaces) {
+    const order = (plan.navigation?.sections ?? []).map((section) => key(section.title))
+    for (const space of site.spaces) {
+      const ranked = space.nav.map((node, index) => ({ node, index, rank: node.type === 'group' ? order.indexOf(key(node.label)) : -1 }))
+      const slots = ranked.filter((entry) => entry.rank >= 0)
+      const sorted = [...slots].sort((left, right) => left.rank - right.rank)
+      if (sorted.every((entry, position) => entry === slots[position])) continue
+      const nav = [...space.nav]
+      slots.forEach((slot, position) => { nav[slot.index] = sorted[position]!.node })
+      space.nav = nav
+      changed = true
+      report.repairs.push(`${configFile}: ordered the sections in space "${space.name}" as the plan lists them.`)
     }
   }
 

@@ -12,6 +12,8 @@ import {
   editDocumentationPlan,
   agentReplyFromStream,
   applyPlanPatch,
+  contentSafePath,
+  uniquePageFileNames,
   planRevisionPatchInstructions,
   withoutAnsweredQuestions,
   extractPlanOutput,
@@ -1162,6 +1164,29 @@ test('blanks capture references the application research never saved', () => {
 })
 
 describe('plan revisions are patches', () => {
+  test('two planned pages never share a file name, which Doxbrix would publish as one', () => {
+    const pages = [{ path: 'guides/troubleshooting' }, { path: 'embed/troubleshooting' }, { path: 'guides/index' }, { path: 'embed/index' }]
+    uniquePageFileNames(pages)
+    expect(pages.map((page) => page.path)).toEqual(['guides/troubleshooting', 'embed/embed-troubleshooting', 'guides/index', 'embed/index'])
+  })
+
+  test('pages are never planned inside a site build output folder', () => {
+    expect(contentSafePath('build/contributing')).toBe('develop/contributing')
+    expect(contentSafePath('site/index')).toBe('website/index')
+    expect(contentSafePath('guides/build/intro')).toBe('guides/build/intro')
+  })
+
+  test('a revision that re-places two crawled pages keeps every other existing-page disposition', () => {
+    const base = { pages: [{ id: 'a' }], existingDocumentation: [{ source: 'docs', summary: 'old', pages: [
+      { path: 'p1.md', disposition: 'rewrite', into: ['a'] },
+      { path: 'p2.md', disposition: 'drop' },
+      { path: 'p3.md', disposition: 'merge', into: ['a'] },
+    ] }] }
+    const merged = applyPlanPatch(base, { existingDocumentation: [{ source: 'docs', summary: 'new', pages: [{ path: 'p2.md', disposition: 'merge', into: ['a'] }] }] }) as typeof base
+    expect(merged.existingDocumentation[0]!.summary).toBe('new')
+    expect(merged.existingDocumentation[0]!.pages.map((page) => [page.path, page.disposition])).toEqual([['p1.md', 'rewrite'], ['p2.md', 'merge'], ['p3.md', 'merge']])
+  })
+
   test('a revision is asked for a patch and the answered questions leave the plan', () => {
     expect(planRevisionPatchInstructions()).toContain('<doxloop-plan-patch>')
     const raw = { pages: [{ id: 'a' }], questions: [{ id: 'q1', question: 'A?' }, { id: 'q2', question: 'B?' }] }

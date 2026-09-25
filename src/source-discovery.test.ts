@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { scaffoldProject } from './project.js'
-import { MAXIMUM_SUGGESTED_PAGES, discoverDocumentationSources, formatDiscoveryInventory, suggestedPageCounts } from './source-discovery.js'
+import { MAXIMUM_SUGGESTED_PAGES, classifySourceFile, discoverDocumentationSources, formatDiscoveryInventory, suggestedPageCounts } from './source-discovery.js'
 
 const roots: string[] = []
 
@@ -38,7 +38,7 @@ describe('deterministic source discovery', () => {
       expect.objectContaining({ kind: 'authentication' }),
       expect.objectContaining({ kind: 'authorization' }),
       expect.objectContaining({ kind: 'error', label: 'AuthenticationError' }),
-      expect.objectContaining({ kind: 'event', label: 'job.completed' }),
+      expect.objectContaining({ kind: 'event', label: expect.stringContaining('job.completed') }),
       expect.objectContaining({ kind: 'integration' }),
       expect.objectContaining({ kind: 'configuration', label: 'API_TOKEN' }),
       expect.objectContaining({ kind: 'configuration', label: 'PUBLIC_API_URL', path: '.env.example' }),
@@ -76,6 +76,55 @@ describe('deterministic source discovery', () => {
 })
 
 describe('public-surface noise filtering', () => {
+  test('finds Go router registrations as HTTP routes', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-go-routes-'))
+    const source = join(parent, 'product')
+    await mkdir(join(source, 'apis'), { recursive: true })
+    await writeFile(join(source, 'go.mod'), 'module example.com/app\n')
+    await writeFile(join(source, 'apis', 'records.go'), 'package apis\nfunc bind(rg *Router) {\n\trg.GET("/records", list)\n\trg.POST("/records/{id}", create)\n}\n')
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), title: 'Go', sources: [{ name: 'product', path: '../product', kind: 'directory' }], generator: 'doxbrix' })
+    const { inventory } = await discoverDocumentationSources(root)
+    const routes = inventory.sources[0]!.evidence.filter((item) => item.kind === 'route').map((item) => item.label)
+    expect(routes).toEqual(expect.arrayContaining(['GET /records', 'POST /records/{id}']))
+    await rm(parent, { recursive: true, force: true })
+  })
+
+  test('groups keyword signals by module and ignores toolchain variables', async () => {
+    const { signalModule, TOOLCHAIN_ENV } = await import('./source-discovery.js')
+    expect(signalModule('packages/hoppscotch-backend/src/auth/guards/jwt.ts')).toBe('packages/hoppscotch-backend/src/auth')
+    expect(signalModule('apis/record_auth.go')).toBe('apis')
+    expect(signalModule('main.go')).toBe('.')
+    expect(TOOLCHAIN_ENV.test('NODE_ENV')).toBe(true)
+    expect(TOOLCHAIN_ENV.test('TAURI_DEV_HOST')).toBe(true)
+    expect(TOOLCHAIN_ENV.test('VITE_BASE_URL')).toBe(false)
+  })
+
+  test('counts exports only from packages that are published', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-private-pkg-'))
+    const source = join(parent, 'product')
+    await mkdir(join(source, 'packages', 'app', 'src'), { recursive: true })
+    await mkdir(join(source, 'packages', 'sdk', 'src'), { recursive: true })
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'mono', private: true }))
+    await writeFile(join(source, 'packages', 'app', 'package.json'), JSON.stringify({ name: 'app', private: true, main: 'src/index.ts' }))
+    await writeFile(join(source, 'packages', 'app', 'src', 'index.ts'), 'export function internalHelper() {}\n')
+    await writeFile(join(source, 'packages', 'sdk', 'package.json'), JSON.stringify({ name: '@acme/sdk', main: 'src/index.ts' }))
+    await writeFile(join(source, 'packages', 'sdk', 'src', 'index.ts'), 'export function createClient() {}\n')
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), title: 'Mono', sources: [{ name: 'product', path: '../product', kind: 'directory' }], generator: 'doxbrix' })
+    const { inventory } = await discoverDocumentationSources(root)
+    const exported = inventory.sources[0]!.evidence.filter((item) => item.kind === 'export').map((item) => item.label)
+    expect(exported).toContain('createClient')
+    expect(exported).not.toContain('internalHelper')
+    await rm(parent, { recursive: true, force: true })
+  })
+
+  test('classifies each ecosystem test-file convention as a test', () => {
+    expect(classifySourceFile('apis/record_auth_test.go')).toBe('test')
+    expect(classifySourceFile('pkg/test_models.py')).toBe('test')
+    expect(classifySourceFile('spec/models/user_spec.rb')).toBe('test')
+    expect(classifySourceFile('src/main/java/AppTest.java')).toBe('test')
+    expect(classifySourceFile('apis/record_auth.go')).toBe('code')
+  })
+
   test('counts keyword signals only from product code and exports only from entry points', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-discovery-noise-'))
     roots.push(parent)
@@ -99,13 +148,14 @@ describe('public-surface noise filtering', () => {
     expect(fixtures.every((item) => item.kind === 'test')).toBe(true)
     expect(evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'export', label: 'run', path: 'src/cli.ts' }),
-      expect.objectContaining({ kind: 'authentication', path: 'src/cli.ts' }),
-      expect.objectContaining({ kind: 'authorization', path: 'src/cli.ts' }),
-      expect.objectContaining({ kind: 'integration', path: 'src/cli.ts' }),
-      expect.objectContaining({ kind: 'authorization', path: 'src/internal/helper.ts' }),
+      // Keyword signals count once per folder, labelled with what was found.
+      expect.objectContaining({ kind: 'authentication', path: 'src', label: 'Authentication in src (login)' }),
+      expect.objectContaining({ kind: 'authorization', path: 'src' }),
+      expect.objectContaining({ kind: 'integration', path: 'src' }),
+      expect.objectContaining({ kind: 'authorization', path: 'src/internal' }),
     ]))
     expect(evidence.some((item) => item.kind === 'export' && item.label === 'helper')).toBe(false)
-    expect(evidence.filter((item) => item.kind === 'authentication' && item.path === 'src/cli.ts')).toHaveLength(1)
+    expect(evidence.filter((item) => item.kind === 'authentication' && item.path === 'src')).toHaveLength(1)
   })
 
   test('scales the comprehensive estimate with the public surface instead of capping it at thirty', () => {
@@ -164,7 +214,8 @@ describe('product code is inventoried before supporting files', () => {
     const { inventory } = await discoverDocumentationSources(root)
     const result = inventory.sources[0]!
     expect(result.evidence.filter((item) => item.kind === 'authentication')).toEqual([])
-    expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'event', label: 'addAPIKey' })]))
+    // A component's own UI events are front-end plumbing, not an integration surface.
+    expect(result.evidence.filter((item) => item.kind === 'event')).toEqual([])
     expect(result.uiLabelCatalogs).toEqual(['src/lang/en.json'])
   })
 })

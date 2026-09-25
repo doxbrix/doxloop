@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jobFailureReason, recentSettledJob, syncOutcomeNotice, workflowActivityLabel } from './WorkspaceApplication'
+import { jobActivityText, jobFailureReason, loginFailureText, recentSettledJob, syncOutcomeNotice, workflowActivityLabel } from './WorkspaceApplication'
 import type { UiJob } from './types'
 
 function job(overrides: Partial<UiJob>): UiJob {
@@ -45,10 +45,12 @@ describe('recentSettledJob', () => {
 describe('syncOutcomeNotice', () => {
   it('answers the source check from its reported outcome', () => {
     const sync = (overrides: Partial<UiJob>) => job({ type: 'sync', ...overrides })
-    expect(syncOutcomeNotice(sync({ outcome: { kind: 'sync', status: 'current', message: 'No reader-visible source changes since the last check.', pages: 0 } }))).toEqual({ tone: 'good', title: 'No change', detail: 'No reader-visible source changes since the last check.' })
+    expect(syncOutcomeNotice(sync({ outcome: { kind: 'sync', status: 'current', message: 'No reader-visible source changes since the last check.', pages: 0 } }))).toEqual({ tone: 'good', title: 'Sources checked · docs are current', detail: 'No reader-visible source changes since the last check.' })
     expect(syncOutcomeNotice(sync({ status: 'failed', exitCode: 1, outcome: { kind: 'sync', status: 'stale', message: '2 stale pages · monitoring is in check mode, so no proposal was drafted.', pages: 2 } }))).toMatchObject({ tone: 'warn', title: '2 pages stale' })
     expect(syncOutcomeNotice(sync({ outcome: { kind: 'sync', status: 'proposal', message: '1 stale page · proposal run-1 is ready for review with 3 changed files.', pages: 1, proposalId: 'run-1' } }))).toMatchObject({ tone: 'good', title: 'Proposal ready for review', proposalId: 'run-1' })
     expect(syncOutcomeNotice(sync({ status: 'failed', outcome: { kind: 'sync', status: 'skipped', message: '1 stale page · the update was skipped because the budget is spent.', pages: 1 } }))).toMatchObject({ tone: 'warn', title: '1 page stale · update skipped' })
+    expect(syncOutcomeNotice(sync({ status: 'failed', outcome: { kind: 'sync', status: 'skipped', message: 'Another authoring operation is running for this project.' } }))).toMatchObject({ tone: 'info', title: 'Source check postponed' })
+    expect(syncOutcomeNotice(sync({ status: 'failed', outcome: { kind: 'sync', status: 'skipped', message: 'Budget spent.', pages: 0 } }))).toMatchObject({ tone: 'good', title: 'Sources checked · docs are current' })
     expect(syncOutcomeNotice(sync({ status: 'failed', outcome: { kind: 'sync', status: 'failed', message: 'The documentation proposal failed: agent exited.', proposalId: 'run-2' } }))).toMatchObject({ tone: 'bad', title: 'Proposal failed', proposalId: 'run-2' })
     expect(syncOutcomeNotice(sync({ status: 'failed', outcome: { kind: 'sync', status: 'unknown', message: 'No evidence map yet.' } }))).toMatchObject({ tone: 'info', title: 'Freshness unknown' })
   })
@@ -57,5 +59,20 @@ describe('syncOutcomeNotice', () => {
     expect(syncOutcomeNotice(job({ type: 'sync', status: 'failed', lines: ['doxloop: The configured path does not exist.'] }))).toEqual({ tone: 'bad', title: 'Source check failed', detail: 'The configured path does not exist.' })
     expect(syncOutcomeNotice(job({ type: 'sync', status: 'cancelled' }))).toMatchObject({ tone: 'info', title: 'Source check stopped' })
     expect(syncOutcomeNotice(job({ type: 'sync' }))).toMatchObject({ tone: 'good', title: 'Source check finished' })
+  })
+})
+
+describe('jobActivityText', () => {
+  it('calls a lock-skipped source check postponed, not failed', () => {
+    expect(jobActivityText(job({ type: 'sync', status: 'failed', lines: [], outcome: { kind: 'sync', status: 'skipped', message: 'Another authoring operation is running for this project.' } }))).toBe(' was postponed because another task was running')
+  })
+  it('names the sign-in fix for a rejected Doxbrix token', () => {
+    expect(jobActivityText(job({ type: 'deploy', status: 'failed', lines: ['21:05:56 Doxbrix API error: GET /api/v1/projects/x returned 401 Unauthorized [unauthorized]', '21:05:56 Request ID: 3879'] }))).toBe(' needs attention: Doxbrix did not accept the saved sign-in. Sign in again from Publish.')
+  })
+})
+
+describe('loginFailureText', () => {
+  it('turns an expired device code into the button to press', () => {
+    expect(loginFailureText(job({ type: 'login', status: 'failed', lines: ['21:17:35 doxloop: Doxbrix authorization expired. Run `doxloop login` again.'] }))).toBe('The sign-in code expired before it was approved. Choose Sign in with browser to get a new code.')
   })
 })

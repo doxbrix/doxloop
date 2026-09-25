@@ -760,4 +760,19 @@ describe('API endpoint response bodies', () => {
     const responseIssues = result.issues.filter((issue) => issue.code === 'api-endpoint-response')
     expect(responseIssues.map((issue) => issue.file)).toEqual(['api/empty.mdx'])
   })
+
+  test('two pages with the same file name are an error, because Doxbrix would publish only one', async () => {
+    const root = await fixture()
+    for (const dir of ['guides', 'embed']) {
+      await mkdir(join(root, dir), { recursive: true })
+      await writeFile(join(root, dir, 'troubleshooting.mdx'), `---\ntitle: ${dir} help\n---\n\n# Help\n\nFixes.\n`)
+    }
+    const config = JSON.parse(await readFile(join(root, 'docs.json'), 'utf8'))
+    config.spaces[0].nav.push({ type: 'page', file: 'guides/troubleshooting' }, { type: 'page', file: 'embed/troubleshooting' })
+    await writeFile(join(root, 'docs.json'), JSON.stringify(config))
+    const result = await validateProject(root)
+    const duplicate = result.issues.find((issue) => issue.code === 'duplicate-page-name')
+    expect(duplicate?.severity).toBe('error')
+    expect(duplicate?.message).toContain('embed/embed-troubleshooting')
+  })
 })

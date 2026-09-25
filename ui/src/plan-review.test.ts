@@ -105,8 +105,8 @@ describe('screenshot coverage before approval', () => {
   })
   it('warns when most guides are text-only and blames the sign-in wall', () => {
     const pages = [guide('/auth/signin'), guide('/auth/signup'), ...Array.from({ length: 39 }, () => guide()), { type: 'reference', priority: 'must-have' as const }]
-    expect(planScreenshotCoverage(pages, 'auto')).toEqual({ guides: 41, withScreenshots: 2, reason: 'sign-in' })
-    expect(planScreenshotCoverage(pages, 'auto', { status: 'unreachable', reachable: false })).toEqual({ guides: 41, withScreenshots: 2, reason: 'sign-in' })
+    expect(planScreenshotCoverage(pages, 'auto')).toEqual({ guides: 41, withScreenshots: 2, reason: 'sign-in', explained: 0 })
+    expect(planScreenshotCoverage(pages, 'auto', { status: 'unreachable', reachable: false })).toEqual({ guides: 41, withScreenshots: 2, reason: 'sign-in', explained: 0 })
     expect(planScreenshotCoverage([guide('/home'), guide(), guide(), guide()], 'auto', { status: 'unreachable', reachable: false })?.reason).toBe('unreachable')
     expect(planScreenshotCoverage([guide(), guide(), guide()], 'auto', { status: 'authentication-required', reachable: true })?.reason).toBe('sign-in')
   })

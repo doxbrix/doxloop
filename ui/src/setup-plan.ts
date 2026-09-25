@@ -33,8 +33,18 @@ export function screenshotIntentFromChoice(choice: 'yes' | 'no'): 'enabled' | 'd
 }
 
 export function setupApplicationCaptureTarget(baseUrl: string, startPath: string): string {
-  const base = baseUrl.trim().replace(/\/+$/, '')
   const path = startPath.trim() || '/'
+  // Hash-routed apps (`https://host/_/#`) keep their document and take the
+  // route in the fragment, the same way the capture server resolves them.
+  try {
+    const parsed = new URL(baseUrl.trim())
+    if (parsed.href.includes('#') && (parsed.hash === '' || parsed.hash.startsWith('#/')) && !/^[a-z][a-z0-9+.-]*:/i.test(path)) {
+      const routed = path.startsWith('#') ? path.slice(1) : path
+      parsed.hash = routed.startsWith('/') ? routed : `/${routed}`
+      return parsed.toString()
+    }
+  } catch { /* Fall through to plain path joining. */ }
+  const base = baseUrl.trim().replace(/\/+$/, '')
   try {
     return new URL(path, `${base}/`).toString()
   } catch {
@@ -195,4 +205,22 @@ export function setupDocumentationPlanRequest(form: SetupPlanForm) {
     // Setup has no limit overrides. Let the running server choose its defaults
     // so a cached wizard cannot send limits that its server does not support.
   }
+}
+
+/**
+ * The probe reports where the sign-in page is as an absolute path ("/_/#/login"),
+ * but routes are relative to the application address ("https://host/_/#"):
+ * strip the address's own path and hash prefix so the route reads "/login".
+ */
+export function relativeSignInRoute(baseUrl: string, signInPath: string): string {
+  try {
+    const base = new URL(baseUrl)
+    // From the raw text: an empty "#" (a hash router's root) is dropped by URL parsing.
+    const prefix = baseUrl.trim().slice(base.origin.length).replace(/\/+$/, '')
+    if (prefix && prefix !== '/' && signInPath.startsWith(prefix)) {
+      const rest = signInPath.slice(prefix.length)
+      return rest.startsWith('/') ? rest : `/${rest}`
+    }
+  } catch { /* an unparseable address leaves the path as it is */ }
+  return signInPath
 }

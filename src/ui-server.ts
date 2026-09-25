@@ -17,7 +17,7 @@ import { hashRouted } from './application-url.js'
 import { AGENT_CATALOG, installAgent, installSkill, parseAgent, skillStatus, detectAgents, agentAuthenticationStatus, chooseAgent } from './agents.js'
 import { agentDisplayName, agentSignedOutMessage } from './agent-failure.js'
 import { applySyncConfig, computeConfiguredDrift, disableSync, formatSyncStatus, parseSyncMode, parseTriggerList } from './autosync.js'
-import { authenticatedRequest, authenticatedRequestOptional, loadUserConfig, logout } from './auth.js'
+import { authenticatedRequest, authenticatedRequestOptional, loadUserConfig, logout, signedInServers } from './auth.js'
 import { parseClaudeEffort, parseReasoning } from './author.js'
 import { historyAvailable } from './db.js'
 import {
@@ -77,6 +77,7 @@ import { checkScreenCaptureBrowser, startCaptureSignIn, type CaptureSignInSessio
 import {
   captureAuthContext,
   captureAuthStatus,
+  loadCaptureCredentials,
   loadCaptureSession,
   removeCaptureCredentials,
   removeCaptureSession,
@@ -118,6 +119,7 @@ import {
   createRunId,
   editSyncRunChange,
   listSyncRuns,
+  markInterruptedSyncRuns,
   pruneSyncRuns,
   readSyncRun,
   recoverSyncRun,
@@ -851,7 +853,7 @@ async function handleApi(
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/proposals') {
-    sendJson(response, 200, await listSyncRuns(requireProject(runtime)))
+    sendJson(response, 200, (await listSyncRuns(requireProject(runtime))).map(uiProposal))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/plans/discovery') {
@@ -938,6 +940,11 @@ async function handleApi(
     const root = requireProject(runtime)
     await cancelCaptureSignIn(runtime)
     sendJson(response, 200, await captureAuthState(runtime, root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/application/saved-sign-ins') {
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, { matches: await reusableSignIns(optionalString(body.baseUrl) ?? '') })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/setup/application/auth') {
@@ -1265,15 +1272,17 @@ async function handleApi(
   // reviewers can watch them appear during a run, before anything is applied.
   if (request.method === 'GET' && url.pathname === '/api/captures') {
     const root = requireProject(runtime)
-    sendJson(response, 200, { captures: await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
+    const plan = url.searchParams.get('plan')
+    sendJson(response, 200, { captures: plan ? await listPlanCaptures(root, plan) : await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/captures/file') {
     const root = requireProject(runtime)
     const runId = url.searchParams.get('run')
+    const planId = url.searchParams.get('plan')
     const file = url.searchParams.get('path')
-    if (!runId || !file) throw new DoxloopError('A capture request needs a run and a project-relative path.')
-    const workspace = runWorkspace(root, runId)
+    if ((!runId && !planId) || !file) throw new DoxloopError('A capture request needs a run and a project-relative path.')
+    const workspace = planId ? planCaptureDirectory(root, planId) : runWorkspace(root, runId!)
     const image = assertInside(workspace, resolve(workspace, file))
     if (extname(image).toLowerCase() !== '.png' || !(await pathExists(image))) {
       sendJson(response, 404, { error: 'That capture no longer exists.' })
@@ -1528,7 +1537,7 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     latestDeployment: deployments.find((entry) => entry.status === 'succeeded' && entry.target === effectiveDeployment(project).target && (!effectiveDeployment(project).slug || entry.slug === effectiveDeployment(project).slug)),
     validation,
     doctor,
-    runs,
+    runs: Array.isArray(runs) ? runs.map(uiProposal) : runs,
     syncStatus,
     drift,
     agents,
@@ -1573,9 +1582,12 @@ async function accountState(project: DoxloopProject): Promise<Record<string, unk
     return { signedIn: true, apiUrl: destination, user }
   } catch (error) {
     const config = await safe(() => loadUserConfig())
+    const destination = isFailure(config) ? 'https://app.doxbrix.com' : (project.deployment?.target ?? 'doxbrix') === 'doxbrix' ? project.deployment?.apiUrl ?? config.apiUrl : config.apiUrl
+    const elsewhere = isFailure(config) ? [] : signedInServers(config).filter((url) => url !== destination)
     return {
       signedIn: false,
-      apiUrl: isFailure(config) ? 'https://app.doxbrix.com' : config.apiUrl,
+      apiUrl: destination,
+      ...(elsewhere.length ? { signedInElsewhere: elsewhere } : {}),
       detail: error instanceof Error ? error.message : String(error),
     }
   }
@@ -1667,6 +1679,9 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
   )
   await saveProjectSettings(root, {
     ...(agent ? { defaultAgent: agent } : {}),
+    // The model chosen in the wizard is the project's default from then on,
+    // so later updates and page edits use the same model as the first run.
+    ...(agent && optionalString(body.model) ? { defaultModel: optionalString(body.model) } : {}),
     documentation,
     ...(application ? { application } : {}),
   })
@@ -1678,9 +1693,47 @@ async function createProjectFromUi(runtime: UiRuntime, raw: unknown): Promise<vo
     const password = credentials && typeof credentials.password === 'string' ? credentials.password : ''
     if (username && password) await saveCaptureCredentials(root, { username, password })
     if (runtime.pendingCaptureSession) await saveCaptureSession(root, runtime.pendingCaptureSession.origin, runtime.pendingCaptureSession.state)
+    // Reusing another project's sign-in copies it server side: the secret
+    // never travels through the browser. Only a recent project whose
+    // application URL matches can be the source.
+    const reuseFrom = optionalString(body.applicationSignInFrom)
+    if (reuseFrom && !(username && password) && !runtime.pendingCaptureSession) {
+      const match = (await reusableSignIns(application.baseUrl)).find((candidate) => candidate.path === resolve(reuseFrom))
+      if (!match) throw new DoxloopError('That saved sign-in is not available for this application URL.')
+      const [savedCredentials, savedSession] = await Promise.all([loadCaptureCredentials(match.path), loadCaptureSession(match.path)])
+      if (savedCredentials) await saveCaptureCredentials(root, { username: savedCredentials.username, password: savedCredentials.password })
+      if (savedSession) await saveCaptureSession(root, savedSession.origin, savedSession.state)
+    }
   }
   runtime.pendingCaptureSession = undefined
   await switchProject(runtime, root)
+}
+
+/** Recent projects that already hold a sign-in for the same application. */
+async function reusableSignIns(baseUrl: string): Promise<Array<{ path: string; title: string; username?: string; session: boolean; loginPath?: string }>> {
+  const target = comparableApplicationUrl(baseUrl)
+  if (!target) return []
+  const matches: Array<{ path: string; title: string; username?: string; session: boolean; loginPath?: string }> = []
+  for (const entry of await listRecentProjects()) {
+    if (entry.missing) continue
+    try {
+      const project = await loadProject(entry.path)
+      if (comparableApplicationUrl(project.application?.baseUrl ?? '') !== target) continue
+      const status = await captureAuthStatus(entry.path)
+      if (!status.credentials && !status.session) continue
+      const loginPath = project.application?.authentication?.loginPath
+      matches.push({ path: resolve(entry.path), title: project.title || entry.title, ...(status.credentials ? { username: status.credentials.username } : {}), session: Boolean(status.session), ...(loginPath ? { loginPath } : {}) })
+    } catch { /* An unreadable project is simply not offered. */ }
+  }
+  return matches
+}
+
+function comparableApplicationUrl(value: string): string {
+  try {
+    const parsed = new URL(value.trim())
+    const hash = parsed.hash.replace(/^#\/?/, '').replace(/\/+$/, '')
+    return `${parsed.origin.toLowerCase()}${parsed.pathname.replace(/\/+$/, '')}${hash ? `#/${hash}` : ''}`
+  } catch { return '' }
 }
 
 async function captureAuthState(runtime: UiRuntime, root: string): Promise<Record<string, unknown>> {
@@ -1822,6 +1875,8 @@ async function loadRuntimeJobs(root: string): Promise<{ jobs: Map<string, UiJob>
   // process killed from a terminal) may also have left its plan mid-stage.
   for (const job of jobs.values()) {
     if (job.status === 'failed') await reconcileInterruptedPlan(root, job, 'The run stopped before it reported a result. Retry the stage to run it again.')
+    // A server shutdown cancels its jobs; their runs must not stay "generating".
+    if (job.status === 'cancelled') await reconcileInterruptedRuns(root, job, 'The run was stopped before it finished. Resume it from Review to continue in its preserved workspace.')
   }
   return { jobs, recovered }
 }
@@ -2525,7 +2580,20 @@ function planStageForJob(type: string): DocumentationPlanFailure['stage'] | unde
  * on the plan so the review offers a retry; a plan that already recorded its
  * own outcome is left as it is.
  */
+/** Jobs that write a proposal run, whose run must not stay "generating" once the job is gone. */
+const RUN_WRITING_JOB = /^(?:sync$|page-edit:|proposal:(?:resume|revise):|plan:(?:generate|continue)$)/
+
+async function reconcileInterruptedRuns(root: string | undefined, job: UiJob, message: string): Promise<void> {
+  if (!root || !RUN_WRITING_JOB.test(job.type)) return
+  try {
+    await markInterruptedSyncRuns(root, job.startedAt, message)
+  } catch {
+    // The job log already records the interruption.
+  }
+}
+
 async function reconcileInterruptedPlan(root: string | undefined, job: UiJob, message: string): Promise<void> {
+  await reconcileInterruptedRuns(root, job, message.replace('Retry the stage to run it again.', 'Resume it from Review to continue in its preserved workspace.'))
   const stage = planStageForJob(job.type)
   if (!root || !job.planId || !stage) return
   try {
@@ -2622,7 +2690,10 @@ function startCliJob(
     flush('stdout')
     flush('stderr')
     settleDisplay()
-    if (job.status === 'cancelled') return
+    if (job.status === 'cancelled') {
+      void reconcileInterruptedRuns(runtime.root, job, 'The run was stopped before it finished. Resume it from Review to continue in its preserved workspace.')
+      return
+    }
     job.exitCode = code ?? 1
     job.status = code === 0 && !signal ? 'succeeded' : 'failed'
     finishWorkflowStages(job.stages, job.status === 'succeeded' ? 'completed' : 'failed')
@@ -3241,6 +3312,26 @@ interface RunCapture {
 }
 
 /**
+ * The browser only needs a hunk's review state; the diff text is fetched per
+ * file from the diff endpoint. Sending every hunk body made /api/state about
+ * 1 MB for a 50-page proposal, which the UI re-reads after every action.
+ */
+function uiProposal<T extends { changes: Array<{ hunks: Array<{ id: string; acceptedAt?: string; rejectedAt?: string; rejectionReason?: string }> }> }>(run: T): T {
+  return {
+    ...run,
+    changes: run.changes.map((change) => ({
+      ...change,
+      hunks: change.hunks.map(({ id, acceptedAt, rejectedAt, rejectionReason }) => ({
+        id,
+        ...(acceptedAt ? { acceptedAt } : {}),
+        ...(rejectedAt ? { rejectedAt } : {}),
+        ...(rejectionReason ? { rejectionReason } : {}),
+      })),
+    })),
+  }
+}
+
+/**
  * List the PNGs a run has captured. The manifest supplies the reviewable
  * metadata, but images are also listed before the manifest exists so a live run
  * shows its captures as they land.
@@ -3298,6 +3389,24 @@ async function listRunCaptures(root: string, requested?: string): Promise<RunCap
     captures.push(capture)
   }
   return captures
+}
+
+/** Screenshots a planning run took while exploring the application. */
+function planCaptureDirectory(root: string, planId: string): string {
+  if (!/^plan-[a-z0-9-]+$/.test(planId)) throw new DoxloopError('That plan does not exist.')
+  return join(root, '.doxloop', 'plans', planId, 'captures')
+}
+
+async function listPlanCaptures(root: string, planId: string): Promise<RunCapture[]> {
+  const directory = planCaptureDirectory(root, planId)
+  let files: string[]
+  try { files = (await readdir(directory)).filter((file) => /\.png$/i.test(file)).sort() } catch { return [] }
+  return files.map((file) => ({
+    run: '',
+    file,
+    url: `/api/captures/file?plan=${encodeURIComponent(planId)}&path=${encodeURIComponent(file)}`,
+    alt: file.replace(/\.png$/i, '').replace(/[-_]+/g, ' '),
+  }))
 }
 
 /** Project-relative PNGs under any guide asset directory. */

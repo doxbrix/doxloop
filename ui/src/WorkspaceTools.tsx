@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api, post, put } from './api'
 import type { ProposalChange } from './types'
+import { timeText } from './components'
 
 type Comment = { id: string; path: string; text: string; createdAt: string; proposalId?: string; changeId?: string; hunkId?: string; resolvedAt?: string }
 export function Comments({ path, proposal, onRequest }: { path: string; proposal?: { id: string; change: ProposalChange }; onRequest: (text: string, hunkId?: string) => Promise<void> }) {
@@ -14,7 +15,7 @@ export function Comments({ path, proposal, onRequest }: { path: string; proposal
   return <details class="text-editor"><summary>Comments and agent requests</summary><div class="text-editor-body">
     {error && <p role="alert">{error}</p>}
     {comments.filter((item) => item.path === path && item.proposalId === proposal?.id).map((item) => <article key={item.id}>
-      <small>{new Date(item.createdAt).toLocaleString()}{item.hunkId ? ` · Hunk ${item.hunkId.slice(0, 8)}` : ''}{item.resolvedAt ? ' · Resolved' : ''}</small><p style={{ whiteSpace: 'pre-wrap' }}>{item.text}</p>
+      <small>{timeText(item.createdAt)}{item.hunkId ? ` · Hunk ${item.hunkId.slice(0, 8)}` : ''}{item.resolvedAt ? ' · Resolved' : ''}</small><p style={{ whiteSpace: 'pre-wrap' }}>{item.text}</p>
       {!item.resolvedAt && <div class="text-editor-actions"><button disabled={busy} onClick={() => void work(() => onRequest(item.text, item.hunkId))}>Ask agent to address</button><button disabled={busy} onClick={() => void work(async () => setComments(await post<Comment[]>('/api/comments', { resolveId: item.id })))}>Resolve comment</button></div>}
     </article>)}
     {proposal && <label>Comment scope<select value={hunkId} onChange={(event) => setHunkId(event.currentTarget.value)}><option value="">Whole file</option>{proposal.change.hunks.map((hunk, index) => <option value={hunk.id}>Hunk {index + 1}</option>)}</select></label>}

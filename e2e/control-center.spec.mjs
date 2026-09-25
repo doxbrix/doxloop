@@ -82,7 +82,7 @@ async function mockWorkspace(page, overrides = {}, apiOverrides = {}) {
 }
 
 test.describe('stable workspace routes', () => {
-  for (const [route, heading] of [['overview', 'Your documentation loop'], ['sources', 'Sources'], ['update', 'Update documentation'], ['pages', 'Pages'], ['review', 'Review'], ['deploy', 'Deploy'], ['settings', 'Settings']]) {
+  for (const [route, heading] of [['overview', 'Your documentation loop'], ['sources', 'Sources'], ['update', 'Update documentation'], ['pages', 'Docs'], ['review', 'Review'], ['deploy', 'Publish'], ['settings', 'Settings']]) {
     test(`${route} has a direct URL`, async ({ page }) => {
       await mockWorkspace(page)
       await page.goto(`/${route}`)
@@ -143,9 +143,8 @@ test('review opens on the first documentation page with supporting files folded'
   await expect(page.getByRole('heading', { name: 'Review proposal' })).toBeVisible()
   await expect(page.getByTitle('Review Events API')).toBeVisible()
   await expect(page).toHaveURL(/\/review\?proposal=proposal-1$/)
-  await page.getByRole('button', { name: /events\.mdx/ }).click()
-  const menu = page.getByRole('dialog', { name: 'Changed files' })
-  await expect(menu.getByText('Documentation', { exact: true })).toBeVisible()
+  const menu = page.getByRole('navigation', { name: 'Changed files' })
+  await expect(menu.getByText('Pages, navigation, and assets', { exact: true })).toBeVisible()
   await expect(menu.getByText('docs.json')).toBeVisible()
   await expect(menu.getByText('evidence-map.json')).toHaveCount(0)
   await menu.getByRole('button', { name: 'Show 2 supporting files' }).click()
@@ -164,9 +163,7 @@ test('a file edited while the agent ran is grouped and needs confirmation before
   })
   await page.goto('/review?proposal=proposal-1')
   await expect(page.getByText('This file was edited in the project while the agent ran.')).toBeVisible()
-  await page.getByRole('button', { name: /events\.mdx/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Changed files' }).getByText('Changed while the agent ran')).toBeVisible()
-  await page.keyboard.press('Escape')
+  await expect(page.getByRole('navigation', { name: 'Changed files' }).getByText('Changed while the agent ran')).toBeVisible()
   await page.getByRole('button', { name: 'Accept all' }).click()
   const dialog = page.getByRole('dialog', { name: 'Apply these documentation changes?' })
   await expect(dialog.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
@@ -217,13 +214,15 @@ test('workspace pages stay fluid, readable, and expose usable buttons', async ({
   await page.setViewportSize({ width: 1600, height: 900 })
   await mockWorkspace(page)
 
+  const pageWidths = new Set()
   for (const route of ['overview', 'sources', 'update', 'pages', 'review', 'deploy', 'settings']) {
     await page.goto(`/${route}`)
 
     const workspaceWidth = await page.locator('.workspace-main').evaluate((element) => element.getBoundingClientRect().width)
     const pageWidth = await page.locator('.workspace-main .page').evaluate((element) => element.getBoundingClientRect().width)
-    expect(pageWidth / workspaceWidth).toBeGreaterThan(0.89)
-    expect(pageWidth / workspaceWidth).toBeLessThan(route === 'pages' ? 0.99 : 0.95)
+    // One centred column, identical on every screen, never wider than the workspace.
+    expect(pageWidth).toBeLessThanOrEqual(workspaceWidth)
+    pageWidths.add(Math.round(pageWidth))
     await expect(page.getByText('Local', { exact: true })).toHaveCount(0)
 
     const invalidButtons = await page.locator('button:visible').evaluateAll((buttons) => buttons.flatMap((button) => {
@@ -240,6 +239,7 @@ test('workspace pages stay fluid, readable, and expose usable buttons', async ({
       : []))
     expect(blackText, `${route} contains black body copy`).toEqual([])
   }
+  expect([...pageWidths]).toHaveLength(1)
 
   await page.goto('/update')
   await page.getByRole('button', { name: /Agent:/ }).click()
@@ -250,12 +250,13 @@ test('workspace pages stay fluid, readable, and expose usable buttons', async ({
     return { x: box.x, y: box.y, width: box.width }
   }))
   expect(optionBoxes).toHaveLength(4)
-  expect(Math.max(...optionBoxes.map((box) => box.y)) - Math.min(...optionBoxes.map((box) => box.y))).toBeLessThan(2)
-  expect(Math.min(...optionBoxes.map((box) => box.width))).toBeGreaterThan(180)
+  // One control per line: every option starts at the same x and takes the full width.
+  expect(Math.max(...optionBoxes.map((box) => box.x)) - Math.min(...optionBoxes.map((box) => box.x))).toBeLessThan(2)
+  expect(Math.min(...optionBoxes.map((box) => box.width))).toBeGreaterThan(360)
 
   await page.goto('/sources')
-  await expect(page.locator('.source-coverage-row-heading').first()).toBeVisible()
-  const coverageHeadings = await page.locator('.source-coverage-row-heading').evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))
+  await expect(page.locator('.coverage-row-label').first()).toBeVisible()
+  const coverageHeadings = await page.locator('.coverage-row-label').evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))
   expect(coverageHeadings.length).toBeGreaterThan(0)
   expect(Math.min(...coverageHeadings)).toBeGreaterThanOrEqual(18)
 })
@@ -314,7 +315,7 @@ test('the preview edit link opens visual content editing', async ({ page }) => {
   })
   await page.goto('/pages?path=index.mdx&edit=1')
   await expect(page.getByRole('button', { name: 'Edit content', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  await expect(page.getByRole('button', { name: 'Content', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('tab', { name: 'Content', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByLabel('Page source', { exact: true })).toBeHidden()
 })
 
@@ -400,7 +401,8 @@ test('source health refresh and project-wide monitoring expose both budgets', as
   await expect(page.getByText(/3 operations/).first()).toBeVisible()
   await expect(page.getByRole('progressbar', { name: 'API operations coverage' })).toHaveAttribute('aria-valuenow', '100')
   await expect(page.getByText('3 of 3 discovered items are documented')).toBeVisible()
-  await page.getByRole('button', { name: 'Test pulse-api' }).click()
+  await page.getByRole('button', { name: 'Source options for pulse-api' }).click()
+  await page.getByRole('menuitem', { name: 'Test pulse-api' }).click()
   await expect.poll(() => calls.includes('POST /api/sources/pulse-api/test')).toBe(true)
   await page.getByRole('button', { name: 'Monitoring' }).click()
   const dialog = page.getByRole('dialog', { name: 'Configure project monitoring' })
@@ -452,6 +454,7 @@ test('create uses the complete plan-review-approval-generation workflow', async 
   await page.goto('/update')
   await expect(page.getByRole('heading', { name: 'Create documentation' })).toBeVisible()
   await page.getByPlaceholder(/Help developers install/).fill('Create complete event API documentation.')
+  await page.getByRole('button', { name: /scope$/ }).click()
   await page.getByRole('button', { name: /Comprehensive/ }).click()
   await page.getByRole('button', { name: 'Create documentation plan' }).click()
   await expect(page.getByRole('heading', { name: 'Review documentation structure' })).toBeVisible()
@@ -475,7 +478,7 @@ test('generated creation points to review instead of reopening the create form',
   await expect(page.getByRole('heading', { name: 'Documentation proposal is ready' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Review generated files' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Create documentation plan' })).toHaveCount(0)
-  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Update' })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Plan' })).toBeVisible()
 })
 
 test('accepted plan-first creation becomes an update workflow without a legacy receipt', async ({ page }) => {
@@ -564,21 +567,36 @@ test('coverage gaps are selected before one batch update plan starts', async ({ 
   await expect.poll(() => calls.filter((call) => call === 'POST /api/plans').length).toBe(1)
 })
 
-test('preview starts explicitly and first deployment requires a visibility decision', async ({ page }) => {
+test('preview starts explicitly and the first publish records the visibility chosen on the page', async ({ page }) => {
   const calls = await mockWorkspace(page, { account: { signedIn: true, apiUrl: 'https://app.doxbrix.com', user: { email: 'dev@example.com', name: 'Developer' } } })
   await page.goto('/deploy')
   await page.getByRole('button', { name: 'Preview docs' }).click()
   await expect.poll(() => calls.includes('POST /api/preview/start')).toBe(true)
-  await page.getByRole('button', { name: 'Deploy to Doxbrix' }).click()
-  const dialog = page.getByRole('dialog', { name: 'Who can see this documentation?' })
-  await expect(dialog.getByRole('radio', { name: /Private/ })).toHaveAttribute('aria-checked', 'true')
-  await expect(dialog.getByRole('radio', { name: /Public/ })).toContainText('Anyone with the published URL')
+  // Doxbrix is the only destination: no target list, dry run, or export on the page.
+  await expect(page.getByRole('radiogroup', { name: 'Deployment target' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dry run' })).toHaveCount(0)
+  await expect(page.getByText('Ready to publish')).toBeVisible()
+  const visibility = page.getByRole('radiogroup', { name: 'Who can read it' })
+  await expect(visibility.getByRole('radio', { name: /Private/ })).toHaveAttribute('aria-checked', 'true')
+  await visibility.getByRole('radio', { name: /Public/ }).click()
+  await page.getByRole('button', { name: 'Publish to Doxbrix' }).click()
+  await expect.poll(() => calls.includes('PATCH /api/project')).toBe(true)
+  await expect.poll(() => calls.includes('POST /api/deploy')).toBe(true)
+})
+
+test('signed out, Publish offers one Doxbrix sign-in and keeps publishing disabled', async ({ page }) => {
+  const calls = await mockWorkspace(page, { account: { signedIn: false, apiUrl: 'https://app.doxbrix.com' } })
+  await page.goto('/deploy')
+  await expect(page.getByRole('heading', { name: 'Put Pulse documentation online' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Publish to Doxbrix' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Sign in to Doxbrix' }).click()
+  await expect.poll(() => calls.includes('POST /api/auth/login')).toBe(true)
 })
 
 test('new-project setup presents the complete guided workflow', async ({ page }) => {
   await mockWorkspace(page, { projectFound: false, project: undefined, validation: undefined, receipt: null })
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Name your documentation' })).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Setup navigation' }).getByRole('button')).toHaveCount(5)
   await expect(page.getByRole('button', { name: /Sources/ })).toBeDisabled()
 })
@@ -639,13 +657,13 @@ test('a failed deployment keeps its progress panel and the sign-in wait state is
   const login = { id: 'login-2', type: 'login', status: 'running', startedAt: finished, lines: ['Waiting for browser approval'], stages: [] }
   const calls = await mockWorkspace(page, { jobs: [login, deploy] })
   await page.goto('/deploy')
-  await expect(page.getByText('Deployment failed')).toBeVisible()
+  await expect(page.getByText('Publish failed')).toBeVisible()
   await expect(page.getByText('The Doxbrix API rejected the upload (401).')).toBeVisible()
-  await expect(page.getByText('Finish signing in in your browser.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Approve the sign-in in your browser' })).toBeVisible()
   await page.getByRole('button', { name: 'Cancel sign-in' }).click()
   await expect.poll(() => calls.includes('POST /api/jobs/login-2/cancel')).toBe(true)
   await page.getByRole('button', { name: 'Dismiss' }).click()
-  await expect(page.getByText('Deployment failed')).toHaveCount(0)
+  await expect(page.getByText('Publish failed')).toHaveCount(0)
 })
 
 const recentProjects = [
@@ -668,13 +686,13 @@ test('the sidebar project switcher lists recent projects and opens one', async (
   } })
   await page.goto('/overview')
   await page.getByRole('button', { name: /Current workspace: Pulse documentation/ }).click()
-  const menu = page.getByRole('menu', { name: 'Projects' })
+  const menu = page.getByRole('dialog', { name: 'Switch project' })
   await expect(menu.getByText('Widget manual')).toBeVisible()
   await expect(menu.getByText('Gone docs')).toBeVisible()
-  await expect(menu.getByRole('menuitem', { name: /Gone docs/ })).toBeDisabled()
-  await expect(menu.getByRole('menuitem', { name: /Open folder/ })).toBeVisible()
-  await expect(menu.getByRole('menuitem', { name: /Import existing documentation/ })).toBeVisible()
-  await menu.getByRole('menuitem', { name: /Widget manual/ }).click()
+  await expect(menu.getByRole('button', { name: /^G Gone docs/ })).toBeDisabled()
+  await expect(menu.getByRole('button', { name: /Open folder/ })).toBeVisible()
+  await expect(menu.getByRole('button', { name: /Import existing documentation/ })).toBeVisible()
+  await menu.getByRole('button', { name: /^W Widget manual/ }).click()
   await expect.poll(() => calls.filter((call) => call === 'POST /api/projects/open').length).toBe(1)
   await expect(page).toHaveURL(/\/overview$/)
 })
@@ -689,7 +707,7 @@ test('importing an existing folder inspects it before adopting it', async ({ pag
   } })
   await page.goto('/overview')
   await page.getByRole('button', { name: /Current workspace/ }).click()
-  await page.getByRole('menuitem', { name: /Import existing documentation/ }).click()
+  await page.getByRole('dialog', { name: 'Switch project' }).getByRole('button', { name: /Import existing documentation/ }).click()
   const dialog = page.getByRole('dialog', { name: 'Import existing documentation' })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Import and open' })).toBeDisabled()
@@ -715,23 +733,20 @@ test('new-project setup offers the location field and explains a rejected source
     return undefined
   } })
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Name your documentation' })).toBeVisible()
   await expect(page.getByLabel('Location')).toHaveValue('/tmp/widget')
   await page.getByRole('button', { name: /Continue/ }).click()
   await page.getByRole('button', { name: 'Add source' }).click()
   await page.getByRole('button', { name: 'Source code' }).click()
   await page.getByRole('button', { name: /^Local folder/ }).click()
   const dialog = page.locator('.sources-reference-dialog')
-  await dialog.getByLabel('Local folder').fill('/tmp/widget')
+  await dialog.getByRole('textbox', { name: 'Local folder' }).fill('/tmp/widget')
   await dialog.getByRole('button', { name: 'Add source' }).click()
   await expect(dialog.getByRole('alert')).toContainText('must be separate directories')
-  await dialog.getByLabel('Local folder').fill('/tmp/widget-source')
+  await dialog.getByRole('textbox', { name: 'Local folder' }).fill('/tmp/widget-source')
   await expect(dialog.getByRole('alert')).toHaveCount(0)
   await dialog.getByRole('button', { name: 'Add source' }).click()
-  const toast = page.getByText('Source added successfully!')
-  await expect(toast).toBeVisible()
   await expect(page.getByText('widget-source', { exact: true })).toBeVisible()
-  await expect(toast).toHaveCount(0, { timeout: 8000 })
   await expect(page.getByRole('button', { name: /Continue/ })).toBeEnabled()
 })
 
@@ -755,16 +770,16 @@ test('new-project setup keeps Continue enabled and explains what is missing on c
   const next = page.getByRole('button', { name: /Continue/ })
 
   // Step 1: an empty title no longer disables the button; it explains itself.
-  await page.getByLabel('What should we call your docs?').fill('')
+  await page.getByLabel('Documentation title').fill('')
   await expect(next).toBeEnabled()
   await next.click()
   await expect(page.getByText('Enter a title for your documentation.')).toBeVisible()
-  await page.getByLabel('What should we call your docs?').fill('Widget docs')
+  await page.getByLabel('Documentation title').fill('Widget docs')
   await expect(page.getByText('Enter a title for your documentation.')).toHaveCount(0)
   await next.click()
 
   // Step 2: no source yet.
-  await expect(page.getByRole('heading', { name: 'Sources' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Connect your content' })).toBeVisible()
   await expect(next).toBeEnabled()
   await next.click()
   await expect(page.getByText(/Add at least one source/)).toBeVisible()
@@ -772,15 +787,15 @@ test('new-project setup keeps Continue enabled and explains what is missing on c
   await page.getByRole('button', { name: 'Source code' }).click()
   await page.getByRole('button', { name: /^Local folder/ }).click()
   const dialog = page.locator('.sources-reference-dialog')
-  await dialog.getByLabel('Local folder').fill('/tmp/widget-source')
+  await dialog.getByRole('textbox', { name: 'Local folder' }).fill('/tmp/widget-source')
   await dialog.getByRole('button', { name: 'Add source' }).click()
   await expect(page.getByText('widget-source', { exact: true })).toBeVisible()
   await next.click()
 
   // Step 3: screenshots on, details missing or malformed, then a page check
   // that Continue runs by itself.
-  await expect(page.getByRole('heading', { name: 'Configure your tools' })).toBeVisible()
-  await page.getByRole('button', { name: 'Yes', exact: true }).first().click()
+  await expect(page.getByRole('heading', { name: 'Choose your coding agent' })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Add product screenshots' }).check()
   await expect(page.getByRole('button', { name: 'Check page' })).toBeDisabled()
   await expect(next).toBeEnabled()
   await next.click()
@@ -795,21 +810,22 @@ test('new-project setup keeps Continue enabled and explains what is missing on c
   await expect(page.getByText(/did not answer at http:\/\/localhost:3001\//).first()).toBeVisible()
   await expect(page.getByText(/choose No for screenshots/).first()).toBeVisible()
   expect(readinessCalls).toHaveLength(1)
-  await expect(page.getByRole('heading', { name: 'Configure your tools' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Choose your coding agent' })).toBeVisible()
   await page.getByLabel('Application URL').fill('http://localhost:3000')
   await next.click()
-  await expect(page.getByRole('heading', { name: 'Guide your documentation' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Guide the writing' })).toBeVisible()
   expect(readinessCalls).toHaveLength(2)
 
   // Editing a sign-in field clears the check; Continue simply checks again.
   await page.getByRole('button', { name: 'Back' }).click()
   await expect(page.getByText('The application page is reachable.')).toBeVisible()
-  await page.getByRole('button', { name: 'Yes', exact: true }).nth(1).click()
+  // The app answered without a sign-in page, so sign-in details are folded away.
+  await page.getByRole('button', { name: 'My app needs a sign-in' }).click()
   await page.getByLabel('Test account username or email').fill('docs-demo@example.com')
   await expect(page.getByText('The application page is reachable.')).toHaveCount(0)
   await expect(next).toBeEnabled()
   await next.click()
-  await expect(page.getByRole('heading', { name: 'Guide your documentation' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Guide the writing' })).toBeVisible()
   expect(readinessCalls).toHaveLength(3)
   expect(readinessCalls[2]).toMatchObject({ baseUrl: 'http://localhost:3000', hasCredentials: false })
 })
@@ -839,7 +855,7 @@ test('planning an update with screenshots re-checks the application instead of d
   await page.goto('/update')
   await expect(page.getByRole('heading', { name: 'Update documentation' })).toBeVisible()
   const plan = page.getByRole('button', { name: 'Plan documentation update' })
-  await page.getByRole('button', { name: 'Yes', exact: true }).click()
+  await page.getByRole('button', { name: 'Screenshots off' }).click()
   await expect(page.getByText(/did not answer/)).toBeVisible()
   await expect(plan).toBeEnabled()
   await plan.click()
@@ -862,9 +878,9 @@ test('new-project setup can adopt an existing documentation folder instead of sc
     return undefined
   } })
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
-  await page.getByRole('radio', { name: /Use existing documentation folder/ }).click()
-  await expect(page.getByRole('heading', { name: 'Use existing documentation' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Name your documentation' })).toBeVisible()
+  await page.getByRole('radio', { name: /existing documentation folder/ }).click()
+  await expect(page.getByRole('heading', { name: 'Use an existing documentation folder' })).toBeVisible()
   await expect(page.getByRole('button', { name: /Continue/ })).toHaveCount(0)
   await expect(page.getByText("Import above to open the folder's pages.")).toBeVisible()
   await page.getByPlaceholder('/path/to/your/docs-site').fill('/tmp/widget-site')
@@ -872,7 +888,7 @@ test('new-project setup can adopt an existing documentation folder instead of sc
   await expect(page.getByText('Doxbrix site · 1 page')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Import and open' })).toBeEnabled()
   await page.getByRole('radio', { name: /Start new/ }).click()
-  await expect(page.getByRole('heading', { name: "Let's name your workspace" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Name your documentation' })).toBeVisible()
 })
 
 const navigationTree = {
@@ -1095,7 +1111,6 @@ test('new-project setup crawls an existing documentation site before it can be a
   expect(inspectBodies).toEqual([{ url: 'https://docs.example.com/' }])
   await expect(addButton).toBeEnabled()
   await addButton.click()
-  await expect(page.getByText('Source added successfully!')).toBeVisible()
   await expect(page.getByText('docs.example.com', { exact: true })).toBeVisible()
   await expect(page.getByText('Docs site', { exact: true })).toBeVisible()
   await expect(page.getByText('38 pages · 12,400 words · docusaurus')).toBeVisible()

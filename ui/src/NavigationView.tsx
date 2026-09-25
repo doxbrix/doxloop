@@ -1,11 +1,12 @@
+import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useMemo, useState } from 'preact/hooks'
 import { api, post, put } from './api'
 import { Button, Note } from './components'
 import { Icon } from './icons'
 import { NavigationEditor } from './NavigationEditor'
 import { NavigationExplorer } from './NavigationExplorer'
-import { flattenItems, fromItems, itemsToPlanNavigation, planNavigationToItems, toItems, type NavItem } from './navigation-tree'
-import type { DocumentationPlan, DocumentationPlanNavigation, NavigationTree } from './types'
+import { flattenItems, fromItems, itemsToPlanNavigation, planNavigationToItems, planPageItem, toItems, updateItem, type NavItem } from './navigation-tree'
+import type { DocumentationPlan, DocumentationPlanNavigation, DocumentationPlanPage, NavigationTree } from './types'
 
 type Action = <T>(run: () => Promise<T>, success?: string, reload?: boolean) => Promise<T | undefined>
 
@@ -35,15 +36,21 @@ export function NavigationView({ act, onError, previewUrl, embedded = false, onS
   const [frameUrl, setFrameUrl] = useState(previewUrl)
   const [frameNonce, setFrameNonce] = useState(0)
 
-  const load = async () => {
+  const [slow, setSlow] = useState(false)
+  const load = async (attempt = 0): Promise<void> => {
     setLoadError('')
+    const slowTimer = setTimeout(() => setSlow(true), 6000)
     try {
-      const raw = await api<NavigationTree>('/api/navigation')
+      // A stalled request is retried once and then reported, never left spinning.
+      const raw = await api<NavigationTree>('/api/navigation', { signal: AbortSignal.timeout(20_000) })
       const next: NavigationTree = { ...raw, spaces: raw.spaces ?? [], orphans: raw.orphans ?? [], icons: raw.icons ?? [], supports: raw.supports ?? { icons: false, hidden: false, labels: false, links: false, dividers: false, spaces: false } }
       setTree(next)
       setSpaces(next.spaces.map((space) => ({ name: space.name, ...(space.version ? { version: space.version } : {}), items: toItems(space.nav) })))
       setConflict('')
-    } catch (cause) { setLoadError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) {
+      if (attempt === 0) { clearTimeout(slowTimer); await new Promise((resolve) => setTimeout(resolve, 1500)); return await load(1) }
+      setLoadError(cause instanceof Error ? cause.message : String(cause))
+    } finally { clearTimeout(slowTimer); setSlow(false) }
   }
 
   useEffect(() => {
@@ -55,7 +62,7 @@ export function NavigationView({ act, onError, previewUrl, embedded = false, onS
   const current = JSON.stringify(spaces.map((space) => ({ name: space.name, ...(space.version ? { version: space.version } : {}), nav: fromItems(space.items) })))
   const dirty = Boolean(tree) && current !== saved
   useEffect(() => { if (!dirty && !saving) void load() }, [refreshToken])
-  useEffect(() => { const matches = (space: typeof spaces[number]) => flattenItems(space.items).some(({ item }) => item.node.type === 'page' && item.node.path === activePath); if (spaces[spaceIndex] && matches(spaces[spaceIndex]!)) return; const index = spaces.findIndex(matches); if (index >= 0) setSpaceIndex(index) }, [activePath])
+  useEffect(() => { const matches = (space: typeof spaces[number]) => flattenItems(space.items).some(({ item }) => item.node.type === 'page' && item.node.path === activePath); if (spaces[spaceIndex] && matches(spaces[spaceIndex]!)) return; const index = spaces.findIndex(matches); if (index >= 0) setSpaceIndex(index) }, [activePath, spaces.length])
   useLayoutEffect(() => { onStatus?.(dirty, saving) }, [dirty, saving])
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => { if (dirty || saving) { event.preventDefault(); event.returnValue = '' } }
@@ -92,7 +99,7 @@ export function NavigationView({ act, onError, previewUrl, embedded = false, onS
   const discard = () => { if (tree) setSpaces(tree.spaces.map((entry) => ({ name: entry.name, ...(entry.version ? { version: entry.version } : {}), items: toItems(entry.nav) }))) }
 
   if (!tree && loadError) return <Note tone="bad"><span>{loadError}</span><Button size="sm" onClick={() => void load()}>Retry navigation</Button></Note>
-  if (!tree) return <div class="page-list-empty"><span class="spinner" />Loading navigation…</div>
+  if (!tree) return <div class="page-list-empty"><span class="spinner" />{slow ? <>Still loading navigation…<Button size="sm" tone="link" onClick={() => void load(1)}>Retry</Button></> : 'Loading navigation…'}</div>
   if (!tree.editable && embedded) return <NavigationExplorer items={pages.map(page => ({ id: page.path, node: { type: 'page', file: page.path, path: page.path, pageTitle: page.title } }))} onChange={() => undefined} supports={tree.supports} icons={[]} editable={false} requiresEveryPage={false} orphans={[]} {...(onSelectPage ? { onSelectPage } : {})} {...(onTogglePage ? { onTogglePage } : {})} {...(selectedPaths ? { selectedPaths } : {})} {...(activePath ? { activePath } : {})} />
   if (!tree.editable) {
     return <div class={`navigation-view ${embedded ? 'navigation-view-embedded' : ''}`}>
@@ -135,11 +142,21 @@ export function NavigationView({ act, onError, previewUrl, embedded = false, onS
   </div>
 }
 
-/** The same editor over a plan's navigation block, used in plan review. */
-export function PlanNavigationEditor({ plan, editable, onChange }: {
+/**
+ * The same editor over a plan's navigation block, used in plan review. The
+ * optional page hooks let the review show each page's purpose, badges and
+ * menu inside the row, open the page drawer from the row, and create a page
+ * straight into a section.
+ */
+export function PlanNavigationEditor({ plan, editable, onChange, renderPage, pageClass, onOpenPage, onCreatePage }: {
   plan: Pick<DocumentationPlan, 'navigation' | 'pages'>
   editable: boolean
   onChange: (navigation: DocumentationPlanNavigation) => void
+  renderPage?: (page: DocumentationPlanPage) => ComponentChildren
+  pageClass?: (page: DocumentationPlanPage) => string
+  onOpenPage?: (page: DocumentationPlanPage) => void
+  /** Adds a page to the plan and returns it; the editor places it in the chosen section. */
+  onCreatePage?: () => DocumentationPlanPage
 }) {
   const pages = plan.pages.filter((page) => page.priority !== 'later' && page.action !== 'remove')
   const key = JSON.stringify([plan.navigation, pages.map((page) => [page.id, page.title, page.path])])
@@ -149,13 +166,26 @@ export function PlanNavigationEditor({ plan, editable, onChange }: {
   }, [key])
   const items = state.key === key ? state.items : planNavigationToItems(plan.navigation, pages).items
   const unsectioned = state.key === key ? state.unsectioned : []
+  const pageById = new Map(pages.map((page) => [page.id, page]))
+  const pageOf = (item: NavItem) => item.node.type === 'page' ? pageById.get(item.node.file) : undefined
+  const change = (next: NavItem[], extraPages: DocumentationPlanPage[] = []) => {
+    const navigation = itemsToPlanNavigation(next, plan.navigation.top)
+    const known = [...pages, ...extraPages]
+    setState({ key: JSON.stringify([navigation, known.map((page) => [page.id, page.title, page.path])]), items: next, unsectioned: known.filter((page) => !navigation.sections.some((section) => section.pageIds.includes(page.id))) })
+    onChange(navigation)
+  }
   return <NavigationEditor
     items={items}
-    onChange={(next) => {
-      const navigation = itemsToPlanNavigation(next, plan.navigation.top)
-      setState({ key: JSON.stringify([navigation, pages.map((page) => [page.id, page.title, page.path])]), items: next, unsectioned: pages.filter((page) => !navigation.sections.some((section) => section.pageIds.includes(page.id))) })
-      onChange(navigation)
-    }}
+    onChange={(next) => change(next)}
+    childNoun="page"
+    {...(pageClass ? { rowClass: (item: NavItem) => { const page = pageOf(item); return page ? pageClass(page) : '' } } : {})}
+    {...(renderPage || (editable && onCreatePage) ? { rowMeta: (item: NavItem) => {
+      const page = pageOf(item)
+      if (page) return renderPage?.(page)
+      if (item.node.type === 'group' && editable && onCreatePage) return <button type="button" class="btn link sm nav-tree-add-page" onClick={(event) => { event.stopPropagation(); const created = onCreatePage(); change(updateItem(items, item.id, (group) => ({ ...group, children: [...(group.children ?? []), planPageItem(created)] })), [created]) }}>Add page</button>
+      return null
+    } } : {})}
+    {...(onOpenPage ? { onOpenItem: (item: NavItem) => { const page = pageOf(item); if (page) onOpenPage(page) } } : {})}
     supports={{ icons: false, hidden: false, labels: false, links: false, dividers: false, spaces: false }}
     icons={[]}
     editable={editable}

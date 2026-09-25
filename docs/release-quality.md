@@ -9,8 +9,8 @@ Doxloop applies quality gates at every step of the loop in the control center:
   The **Why this change** panel shows each file's error and warning counts,
   supporting evidence, reader-facing claims, and assumptions to verify.
   Direct page edits are validated before they are saved.
-- **Deploy** validates the documentation again, and **Dry run** additionally
-  runs the selected generator's strict build without uploading anything.
+- **Publish** validates the documentation again and builds the site before
+  anything is uploaded.
   Validation errors stop a deployment; warnings are reported.
 
 The versioned release-quality contract described below extends those checks

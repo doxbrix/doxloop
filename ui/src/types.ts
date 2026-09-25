@@ -467,7 +467,7 @@ export interface UiState {
   syncStatus?: string | Failed
   drift?: DriftSummary | Failed
   agents?: AgentState[]
-  account?: { signedIn: boolean; apiUrl: string; user?: { email: string; name: string | null }; detail?: string }
+  account?: { signedIn: boolean; apiUrl: string; user?: { email: string; name: string | null }; detail?: string; signedInElsewhere?: string[] }
   receipt?: { mode?: string; completedAt?: string; pendingSources?: string[] } | null
   documentationPlan?: DocumentationPlan
   generators: GeneratorEntry[]

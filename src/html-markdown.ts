@@ -352,3 +352,38 @@ function collect(node: HtmlNode, predicate: (node: HtmlNode) => boolean, results
 function unique(values: string[]): string[] {
   return [...new Set(values)]
 }
+
+/**
+ * The same summary for a page served as Markdown. Mintlify, GitBook, and
+ * other client-rendered docs sites send an empty HTML shell to a crawler but
+ * serve each page's source at `<page>.md` (and list those URLs in llms.txt).
+ * Their own "documentation index" preamble is dropped.
+ */
+export function summarizeMarkdownDocument(source: string): HtmlDocumentSummary {
+  let text = source.replace(/\r\n/g, '\n')
+  let frontmatterTitle: string | undefined
+  let frontmatterDescription: string | undefined
+  const frontmatter = /^---\n([\s\S]*?)\n---\n?/.exec(text)
+  if (frontmatter) {
+    frontmatterTitle = /^title:\s*["']?(.+?)["']?\s*$/m.exec(frontmatter[1]!)?.[1]
+    frontmatterDescription = /^description:\s*["']?(.+?)["']?\s*$/m.exec(frontmatter[1]!)?.[1]
+    text = text.slice(frontmatter[0].length)
+  }
+  // Mintlify prefixes every page with a quoted pointer to llms.txt.
+  text = text.replace(/^(?:>[^\n]*\n)+\n*/, (block) => /llms\.txt|documentation index/i.test(block) ? '' : block).trim()
+  const withoutCode = text.replace(/```[\s\S]*?```/g, ' ')
+  const headings = [...withoutCode.matchAll(/^(#{1,6})\s+(.+?)\s*#*\s*$/gm)].map((match) => ({ level: match[1]!.length, text: match[2]!.replace(/[*_`]/g, '').trim() })).filter((item) => item.text)
+  const images = [...text.matchAll(/!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)/g)].map((match) => match[1]!)
+  const links = [...text.matchAll(/(?<!!)\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)/g)].map((match) => match[1]!)
+  const description = frontmatterDescription ?? /^#\s+.+\n+>\s*(.+)$/m.exec(text)?.[1]?.trim()
+  const words = withoutCode.replace(/!\[[^\]]*\]\([^)]*\)|\]\([^)]*\)|[#>*_`|[\]-]/g, ' ').split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length
+  return {
+    ...(frontmatterTitle ?? headings.find((heading) => heading.level === 1)?.text ? { title: frontmatterTitle ?? headings.find((heading) => heading.level === 1)!.text } : {}),
+    ...(description ? { description } : {}),
+    links,
+    images,
+    headings,
+    markdown: text,
+    words,
+  }
+}

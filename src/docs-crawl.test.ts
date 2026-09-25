@@ -56,6 +56,26 @@ describe('documentation site crawler', () => {
     expect(snapshot.totals).toEqual({ pages: 3, words: expect.any(Number), images: 1, discovered: 4 })
   })
 
+  test('reads client-rendered sites (Mintlify) from their Markdown sources', async () => {
+    const shell = '<html><head><title>Hoppscotch</title><meta name="generator" content="Mintlify"></head><body><div id="root"></div></body></html>'
+    const markdown = (title: string, body: string) => `> ## Documentation Index\n> Fetch the complete documentation index at: https://docs.example.com/llms.txt\n\n# ${title}\n\n> ${title} in one line.\n\n${body}\n`
+    const { fetch } = site({
+      '/llms.txt': { type: 'text/plain', body: '# Docs\n- [CLI](https://docs.example.com/cli/overview.md)\n- [Home](https://docs.example.com/index.md)\n' },
+      '/': { body: shell },
+      '/index.md': { type: 'text/markdown; charset=utf-8', body: markdown('Welcome', 'Hoppscotch is an open source API development ecosystem that helps you create and test requests quickly, share collections with your team, and automate checks in CI. Read the [CLI guide](/cli/overview) to begin.') },
+      '/cli/overview': { body: shell },
+      '/cli/overview.md': { type: 'text/markdown; charset=utf-8', body: markdown('Hoppscotch CLI', 'Install the CLI with npm and run a collection against an environment from your terminal or a CI pipeline.\n\n```bash\nnpm i -g @hoppscotch/cli\n```\n\n![Run](/img/run.png)') },
+    })
+    const snapshot = await crawlDocumentationSite('https://docs.example.com/', { fetch, resolveHostname: publicHost, concurrency: 1 })
+    const byPath = Object.fromEntries(snapshot.pages.map((page) => [page.path, page]))
+    expect(Object.keys(byPath).sort()).toEqual(['', 'cli/overview'])
+    expect(byPath['cli/overview']).toMatchObject({ title: 'Hoppscotch CLI', description: 'Hoppscotch CLI in one line.' })
+    expect(byPath['cli/overview']!.words).toBeGreaterThan(15)
+    expect(byPath['cli/overview']!.markdown).not.toContain('Documentation Index')
+    expect(byPath['']!.words).toBeGreaterThan(30)
+    expect(snapshot.skipped).toEqual([])
+  })
+
   test('uses llms.txt when there is no sitemap and stops at the page limit', async () => {
     const routes: Record<string, Route> = {
       '/llms.txt': { type: 'text/plain', body: '# Site\n\n- [One](https://example.com/one)\n- [Two](/two)\n- [Three](/three)\n' },

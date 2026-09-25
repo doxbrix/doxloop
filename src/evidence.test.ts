@@ -6,6 +6,7 @@ import {
   EVIDENCE_MAP_FILE,
   pagesForChange,
   readEvidenceMap,
+  stampVerifiedRevisions,
   trackedSources,
   writeEvidenceMap,
 } from './evidence.js'
@@ -173,5 +174,24 @@ describe('pagesForChange', () => {
 describe('trackedSources', () => {
   test('lists every source the map attributes pages to', () => {
     expect(trackedSources(map)).toEqual(new Set(['product', 'api']))
+  })
+})
+
+describe('stampVerifiedRevisions', () => {
+  test('stamps verified pages with the recorded baseline and leaves other pages and existing stamps alone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-stamp-'))
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    await writeEvidenceMap(root, { schemaVersion: 1, pages: {
+      'a.mdx': { sources: [{ source: 'app', paths: ['a.go'] }, { source: 'site', paths: ['a.md'] }], confidence: 'verified' },
+      'b.mdx': { sources: [{ source: 'app', paths: ['b.go'] }], confidence: 'inferred' },
+      'c.mdx': { sources: [{ source: 'app', paths: ['c.go'] }], confidence: 'verified', verifiedAt: { app: 'older' } },
+    } } as never)
+    const stamped = await stampVerifiedRevisions(root, { schemaVersion: 1, sources: { app: { commit: 'abc', recordedAt: 'now' }, site: { commit: 'docs-site', recordedAt: 'now' } } } as never)
+    const map = await readEvidenceMap(root)
+    expect(stamped).toBe(1)
+    expect(map!.pages['a.mdx']!.verifiedAt).toEqual({ app: 'abc', site: 'docs-site' })
+    expect(map!.pages['b.mdx']!.verifiedAt).toBeUndefined()
+    expect(map!.pages['c.mdx']!.verifiedAt).toEqual({ app: 'older' })
+    await rm(root, { recursive: true, force: true })
   })
 })

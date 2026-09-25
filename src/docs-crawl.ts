@@ -15,7 +15,7 @@ import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { isPrivateAddress } from './capture.js'
 import { DoxloopError } from './errors.js'
-import { summarizeHtmlDocument, decodeEntities } from './html-markdown.js'
+import { summarizeHtmlDocument, summarizeMarkdownDocument, decodeEntities } from './html-markdown.js'
 
 export const DEFAULT_DOCS_CRAWL_PAGE_LIMIT = 150
 export const MAX_DOCS_CRAWL_PAGE_LIMIT = 500
@@ -213,11 +213,16 @@ export async function crawlDocumentationSite(rawUrl: string, options: DocsCrawlO
         skipped.push({ url, reason: `HTTP ${result.status}`, status: result.status })
         return
       }
-      if (!result.contentType.includes('text/html') && !result.contentType.includes('application/xhtml')) {
+      // A page's Markdown source (`/guide.md`, listed by llms.txt) stands for
+      // the page itself; it is keyed by the page URL so the HTML and Markdown
+      // copies of one page are never both kept.
+      const markdownSource = isMarkdownResponse(result.url, result.contentType)
+      if (!markdownSource && !result.contentType.includes('text/html') && !result.contentType.includes('application/xhtml')) {
         skipped.push({ url, reason: `Unsupported content type ${result.contentType || 'unknown'}` })
         return
       }
-      const finalUrl = normalize(result.url, url) ?? url
+      const fetchedUrl = normalize(result.url, url) ?? url
+      const finalUrl = markdownSource ? pageUrlOfMarkdown(fetchedUrl) : fetchedUrl
       if (finalUrl !== url) {
         if (seen.has(finalUrl) && pages.some((page) => page.url === finalUrl)) return
         seen.add(finalUrl)
@@ -227,7 +232,17 @@ export async function crawlDocumentationSite(rawUrl: string, options: DocsCrawlO
         }
       }
       if (pages.some((page) => page.url === finalUrl)) return
-      const summary = summarizeHtmlDocument(result.body)
+      let summary = markdownSource ? summarizeMarkdownDocument(result.body) : summarizeHtmlDocument(result.body)
+      // A client-rendered page (Mintlify, GitBook, Docusaurus SPA builds)
+      // arrives as an empty shell; its Markdown source carries the content.
+      if (!markdownSource && summary.words < MIN_RENDERED_WORDS) {
+        const source = await fetchMarkdownSource(finalUrl, context)
+        if (source) {
+          const fromSource = summarizeMarkdownDocument(source)
+          summary = { ...fromSource, ...(summary.generator ? { generator: summary.generator } : {}), ...(summary.title && !fromSource.title ? { title: summary.title } : {}), links: [...summary.links, ...fromSource.links] }
+        }
+      }
+      if (pages.some((page) => page.url === finalUrl)) return
       if (!generator && summary.generator) generator = summary.generator
       const internal: string[] = []
       const external: string[] = []
@@ -241,7 +256,9 @@ export async function crawlDocumentationSite(rawUrl: string, options: DocsCrawlO
         } else if (!external.includes(resolved)) external.push(resolved)
       }
       const images = summary.images.map((image) => normalize(image, finalUrl) ?? image)
-      const title = summary.title?.replace(/\s*[|·–-]\s*[^|·–-]+$/, '').trim() || summary.headings.find((heading) => heading.level === 1)?.text || summary.headings[0]?.text || relativePath(finalUrl, origin, scope) || 'Home'
+      const rawTitle = summary.title?.replace(/\s*[|·–-]\s*[^|·–-]+$/, '').trim() || summary.headings.find((heading) => heading.level === 1)?.text || summary.headings[0]?.text || relativePath(finalUrl, origin, scope) || 'Home'
+      // Titles taken from Markdown sources keep inline-code backticks; readers never see those.
+      const title = rawTitle.replace(/`([^`]+)`/g, '$1')
       pages.push({
         url: finalUrl,
         path: relativePath(finalUrl, origin, scope),
@@ -406,6 +423,39 @@ function robotsAllows(rules: RobotsRules, pathname: string): boolean {
   if (!disallowed) return true
   const allowed = rules.allow.filter(matches).sort((left, right) => right.length - left.length)[0]
   return Boolean(allowed && allowed.length >= disallowed.length)
+}
+
+/** Below this many words an HTML page is treated as a client-rendered shell. */
+const MIN_RENDERED_WORDS = 40
+
+function isMarkdownResponse(url: string, contentType: string): boolean {
+  let path = ''
+  try { path = new URL(url).pathname } catch { return false }
+  return /\.mdx?$/i.test(path) && /text\/(?:markdown|x-markdown|plain)/.test(contentType)
+}
+
+function pageUrlOfMarkdown(url: string): string {
+  try {
+    const parsed = new URL(url)
+    parsed.pathname = parsed.pathname.replace(/\/index\.mdx?$/i, '/').replace(/\.mdx?$/i, '') || '/'
+    return parsed.toString()
+  } catch { return url }
+}
+
+async function fetchMarkdownSource(pageUrl: string, context: CrawlContext): Promise<string | undefined> {
+  let candidate: string
+  try {
+    const parsed = new URL(pageUrl)
+    parsed.search = ''
+    parsed.hash = ''
+    parsed.pathname = parsed.pathname === '/' ? '/index.md' : `${parsed.pathname.replace(/\/+$/, '')}.md`
+    candidate = parsed.toString()
+  } catch { return undefined }
+  try {
+    const result = await fetchText(candidate, context, MAX_PAGE_BYTES, 'text/markdown, text/plain;q=0.9')
+    if (result.status >= 400 || !isMarkdownResponse(result.url, result.contentType)) return undefined
+    return result.body.trim().startsWith('<') ? undefined : result.body
+  } catch { return undefined }
 }
 
 async function fetchPage(url: string, context: CrawlContext): Promise<FetchResult> {

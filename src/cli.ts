@@ -13,7 +13,7 @@ import {
   parseArgs,
 } from './args.js'
 import { installSkill, parseAgent, skillStatus } from './agents.js'
-import { loadUserConfig, login, logout, whoami } from './auth.js'
+import { loadUserConfig, tokenFor, login, logout, whoami } from './auth.js'
 import {
   parseClaudeEffort,
   parseReasoning,
@@ -366,8 +366,7 @@ async function main(): Promise<number> {
           return 0
         }
 
-        const token =
-          userConfig.token ?? process.env.DOXLOOP_TOKEN ?? process.env.DOXBRIX_TOKEN
+        const token = target === 'doxbrix' ? tokenFor(userConfig, apiOverride) : undefined
         if (target === 'doxbrix' && !token) {
           process.stdout.write('You are not signed in to Doxbrix.\n')
           const signIn = await promptConfirm({

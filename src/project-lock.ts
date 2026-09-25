@@ -25,6 +25,7 @@ export async function withProjectLock<T>(root: string, name: string, work: () =>
       break
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      let reaped = false
       if (await abandoned(path)) {
         const claim = join(path, 'reaping')
         let claimed = false
@@ -37,11 +38,14 @@ export async function withProjectLock<T>(root: string, name: string, work: () =>
             await rename(path, stale)
             await rm(stale, { recursive: true, force: true })
             claimed = false
+            reaped = true
           }
         } catch (cause) {
           if (!['ENOENT', 'EEXIST'].includes((cause as NodeJS.ErrnoException).code ?? '')) throw cause
         } finally { if (claimed) await rm(claim, { recursive: true, force: true }) }
       }
+      // A lock left by a dead process was just removed: take it now, even with no wait allowed.
+      if (reaped) continue
       if (Date.now() >= deadline) throw new ProjectBusyError(`Another ${name} operation is running for this project. Wait for it to finish and retry.`)
       await delay(40)
     }

@@ -338,6 +338,24 @@ function validateDoxbrixNavigation(
       issues.push(error('unnavigated-page', `Page "${id}" is not in Doxbrix navigation.`))
     }
   }
+
+  // Doxbrix serves a page at its file name, so "guides/troubleshooting" and
+  // "embed/troubleshooting" share one address and the published site shows
+  // only one of them. Within each version, file names must be unique.
+  for (const ids of versions.values()) {
+    const byName = new Map<string, string[]>()
+    for (const id of ids) {
+      // Each edition (editions/<version>/<locale>/…) is its own set of routes.
+      const edition = id.startsWith('editions/') ? id.split('/').slice(0, 3).join('/') : ''
+      const name = `${edition}:${id.split('/').at(-1) === 'index' ? id : id.split('/').at(-1)!}`
+      byName.set(name, [...(byName.get(name) ?? []), id])
+    }
+    for (const [name, same] of byName) {
+      if (same.length < 2) continue
+      const fileName = name.slice(name.indexOf(':') + 1)
+      issues.push(error('duplicate-page-name', `Pages ${same.map((id) => `"${id}"`).join(' and ')} share the file name "${fileName}". Doxbrix serves pages by file name, so only one would be published; rename the others (for example "${same[1]!.replace(/[^/]+$/, `${same[1]!.split('/').at(-2) ?? 'more'}-${fileName}`)}").`, configFile))
+    }
+  }
 }
 
 /** Theme checks shared by validation and the branding panel's pre-write check. */
@@ -995,6 +1013,9 @@ const MINIMUM_STEPS = 3
  */
 export function validatePageDepth(body: string, file: string, planType?: string): ValidationIssue[] {
   const issues: ValidationIssue[] = []
+  // A generated glossary is a list of short definitions by design; the
+  // depth gate is for workflow and concept pages, not term lists.
+  if (body.includes('doxloop:glossary')) return issues
   const withoutCode = stripCodeFences(body)
   const prose = withoutCode
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
@@ -1010,7 +1031,7 @@ export function validatePageDepth(body: string, file: string, planType?: string)
     issues.push(
       warning(
         'thin-page',
-        `The page has about ${words} words of prose; a ${procedural ? 'procedural' : type} page normally needs at least ${minimum} to be complete. Add the reader outcome, prerequisites, every step with its observable result, verification, evidence-backed troubleshooting, and a next step — or merge this page into one that can be complete.`,
+        `The page has about ${words} words of prose; ${procedural ? 'a procedural page' : type === 'other' ? 'a page like this' : `a ${type} page`} normally needs at least ${minimum} to be complete. Add the reader outcome, prerequisites, every step with its observable result, verification, evidence-backed troubleshooting, and a next step — or merge this page into one that can be complete.`,
         file,
       ),
     )

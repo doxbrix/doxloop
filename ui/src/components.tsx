@@ -31,16 +31,18 @@ export function Panel(props: {
   </section>
 }
 
-export function PageHeader({ title, description, icon, actions, meta }: {
+export function PageHeader({ title, description, icon, actions, meta, kicker }: {
   title: string
   description?: string
   icon?: string
   actions?: ComponentChildren
   meta?: ComponentChildren
+  /** A short mono label above the title, usually the screen name. */
+  kicker?: string
 }) {
   return <div class="page-head">
     {icon && <span class="page-head-icon"><Icon name={icon} size={30} /></span>}
-    <div class="page-head-copy"><h1>{title}</h1>{description && <p>{description}</p>}{meta && <div class="page-meta">{meta}</div>}</div>
+    <div class="page-head-copy" data-kicker={kicker}><h1>{title}</h1>{description && <p>{description}</p>}{meta && <div class="page-meta">{meta}</div>}</div>
     {actions && <div class="page-head-actions">{actions}</div>}
   </div>
 }

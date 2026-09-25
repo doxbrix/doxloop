@@ -157,7 +157,7 @@ function preamble(task: ResearchTask, context: ResearchPromptContext): string {
   return `You are one research session of Doxloop's planning stage. Doxloop runs several research sessions at once, and a separate session writes the documentation plan from their briefs; you do not write the plan, decide pages, or author documentation. Do not edit source or documentation files; the application task may save screenshot assets. Do not read the skill files under .agents/skills or .claude/skills: they guide authoring, and this brief is complete for your task.
 
 Research task "${task.id}": ${task.label}.
-
+${task.kind !== 'application' && context.project.application ? `\nDo not open, curl, or otherwise probe the application URL: a separate research session explores the live application through Doxloop's capture browser. Your sandbox may have no network access, so a failed request here says nothing about whether the application is running; never report the application as unavailable or its screens as unconfirmed.\n` : ''}
 Project configuration (compact JSON):
 ${JSON.stringify(context.project)}
 

@@ -1,18 +1,16 @@
-import type { ComponentChildren } from 'preact'
+import { Fragment } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import './SetupApplication.css'
 import { api, post, NO_TIMEOUT } from './api'
-import { Button, Combo, Field, Input, Note, Segmented, Select, Textarea, Toggle } from './components'
+import { Badge, Button, Combo, Field, Input, Note, Select, Textarea, Toggle } from './components'
 import { Icon } from './icons'
-import { DocsSiteSourceFields, describeInspection, type DocsSiteInspection } from './DocsSiteSourceFields'
+import { DocsSiteSourceFields, type DocsSiteInspection } from './DocsSiteSourceFields'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
 import { ImportExistingPanel } from './ProjectSwitcher'
 import { AgentCapabilityMatrix } from './agent-capabilities'
 import { GeneratorPreflightPanel, GeneratorTierBadge, GeneratorTierMatrix } from './generator-tiers'
-import { DEFAULT_READER_OUTCOME, batchLimitsForScope, describeBatchLimits, preferredSetupAgent, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupDraftKey, setupDraftSnapshot, setupStepIssue, signInInstruction } from './setup-plan'
+import { DEFAULT_READER_OUTCOME, batchLimitsForScope, describeBatchLimits, preferredSetupAgent, screenshotIntentFromChoice, relativeSignInRoute, setupApplicationCaptureTarget, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupDraftKey, setupDraftSnapshot, setupStepIssue, signInInstruction } from './setup-plan'
 import type { GeneratorPreflight, UiJob, UiState } from './types'
-
-const DOXLOOP_LOGO = new URL('../../assets/brand/doxloop-logo-light.png', import.meta.url).href
 
 type OpenApiSummary = { title: string; version: string; specificationVersion: string; servers: string[]; securitySchemes: string[]; schemas: string[]; operationCount: number }
 type SetupValidation = { directoryPath?: string; directoryError?: string; sourcePath?: string; sourcePathError?: string; openapiSummary?: OpenApiSummary }
@@ -118,7 +116,9 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       applicationPassword: '',
       audiences: [] as string[],
       scope: 'comprehensive' as 'starter' | 'standard' | 'comprehensive',
-      readerOutcome: DEFAULT_READER_OUTCOME,
+      // Empty means the default shown as the placeholder; a pre-filled value
+      // made typed text land in the middle of the default sentence.
+      readerOutcome: '',
       experienceLevel: 'beginner' as SetupGuidancePreferences['experienceLevel'],
       preferredExamples: '',
       locale: 'en-US',
@@ -133,6 +133,8 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   }
   const [form, setForm] = useState(() => draft ? { ...freshForm(), ...(draft.form as Partial<ReturnType<typeof freshForm>>) } : freshForm())
   const [step, setStep] = useState(() => draft?.step ?? 1)
+  // Each step starts at its heading, not wherever the previous one was scrolled.
+  useEffect(() => { scrollTo({ top: 0 }) }, [step])
   const [sources, setSources] = useState<SetupSource[]>(() => (draft?.sources as SetupSource[] | undefined) ?? [])
   const [draftRestored, setDraftRestored] = useState(Boolean(draft))
   const [projectCreated, setProjectCreated] = useState(false)
@@ -148,7 +150,6 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     setDraftRestored(false)
   }
   const [sourceFlowStep, setSourceFlowStep] = useState<SourceFlowStep>('closed')
-  const [sourceMenuOpen, setSourceMenuOpen] = useState(false)
   const [sourceAddedNotice, setSourceAddedNotice] = useState('')
   // The confirmation is a toast, not a gate: it leaves on its own so it never
   // sits on top of the wizard footer on a short viewport.
@@ -270,7 +271,40 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     screenshots: { policy: 'auto', startPath: form.applicationStartPath },
     ...(form.applicationSignIn === 'yes' && form.applicationLoginPath.trim() ? { authentication: { loginPath: form.applicationLoginPath.trim() } } : {}),
   })
-  const hasSetupCredentials = form.applicationSignIn === 'yes' && Boolean(form.applicationUsername.trim() && form.applicationPassword)
+  // A second project starts next to the one that is open, not inside the
+  // folder the control center happened to be launched from.
+  const defaultParentDirectory = state.projectFound && state.root ? state.root.replace(/[\\/][^\\/]+[\\/]?$/, '') || state.cwd : state.cwd
+  // A pasted repository URL connects by itself when the field is left or
+  // Enter is pressed; the link button stays for a retry.
+  const autoConnectRepository = () => {
+    const url = form.repository.trim()
+    if (!/^(?:https?:\/\/|git@)\S+\/\S+/.test(url) || gitHead || gitTesting) return
+    if (form.authMethod === 'credentials' && (!form.gitUsername.trim() || !form.gitSecret.trim())) return
+    void testGitConnection()
+  }
+  // Sign-in details only when they matter: the check found a sign-in page,
+  // details or a session already exist, a saved sign-in matches this app, or
+  // the reader asks. A public app never shows three empty fields.
+  const [signInOpen, setSignInOpen] = useState(false)
+  const typedSetupCredentials = form.applicationSignIn === 'yes' && Boolean(form.applicationUsername.trim() && form.applicationPassword)
+  // Another recent project may already hold a sign-in for this same app. The
+  // wizard offers it by name; the server copies it, so no secret is typed again.
+  const [savedSignIns, setSavedSignIns] = useState<SavedSignIn[]>([])
+  const [reuseSignInFrom, setReuseSignInFrom] = useState('')
+  const reusedSignIn = !typedSetupCredentials && !setupAuth?.session ? savedSignIns.find((match) => match.path === reuseSignInFrom) : undefined
+  const hasSetupCredentials = typedSetupCredentials || Boolean(reusedSignIn)
+  const showSignIn = signInOpen || form.applicationSignIn === 'yes' || Boolean(setupAuth?.session) || Boolean(setupAuth?.signIn.active) || applicationReadiness?.status === 'authentication-required' || savedSignIns.length > 0
+  useEffect(() => {
+    const baseUrl = form.applicationBaseUrl.trim()
+    if (form.screenshots === 'disabled' || !/^https?:\/\/\S+/.test(baseUrl)) { setSavedSignIns([]); return }
+    let active = true
+    const timer = setTimeout(() => {
+      void post<{ matches: SavedSignIn[] }>('/api/setup/application/saved-sign-ins', { baseUrl })
+        .then((result) => { if (active) setSavedSignIns(result.matches) })
+        .catch(() => { if (active) setSavedSignIns([]) })
+    }, 400)
+    return () => { active = false; clearTimeout(timer) }
+  }, [form.applicationBaseUrl, form.screenshots])
   const runSignIn = async (kind: typeof signInBusy, request: () => Promise<SetupCaptureAuth>) => {
     setSignInBusy(kind)
     clearSetupError()
@@ -310,7 +344,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       setForm((current) => ({
         ...current,
         applicationSignIn: 'yes',
-        applicationLoginPath: current.applicationLoginPath || readiness.signInPath || '',
+        applicationLoginPath: current.applicationLoginPath || (readiness.signInPath ? relativeSignInRoute(current.applicationBaseUrl, readiness.signInPath) : ''),
       }))
     }
     return readiness
@@ -329,7 +363,6 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       ? `Your application shows a sign-in page first${readiness.signInPath ? ` (${readiness.signInPath})` : ''}. Choose "Sign in with browser" and sign in once, or enter a test account below. You can also choose "Continue without signing in" — then screenshots only show the sign-in pages.`
       : /^Application URL/.test(readiness.message) ? readiness.message : `${readiness.message} Start the application and continue again, or choose No for screenshots.`
   const sourceType = form.sourceKind === 'openapi' ? 'openapi' : form.sourceLocation === 'git' ? 'git' : 'local'
-  const filteredSetupSources = sources.map((source, index) => ({ source, index }))
   const updateSourceType = (value: string) => {
     if (value === 'openapi') {
       update('sourceKind', value)
@@ -359,7 +392,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
     try {
       const result = await post<SetupValidation>('/api/setup/validate', {
         directory: form.directory,
-        ...(form.parentDirectory ? { parentDirectory: form.parentDirectory } : {}),
+        parentDirectory: form.parentDirectory || defaultParentDirectory,
         ...(includeSource ? {
           ...source,
         } : {}),
@@ -444,7 +477,6 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       setSources((current) => [...current, normalized])
       resetSourceDraft()
       setSourceFlowStep('closed')
-      setSourceMenuOpen(false)
       setSourceAddedNotice(normalized.name)
     } finally {
       setSavingSource(false)
@@ -568,6 +600,9 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       if (!projectCreated) {
         const created = await act(() => post<UiState>('/api/project', {
           ...form,
+          // The location shown on step 1: an empty field means the default
+          // shown there, never the folder the control center was started in.
+          parentDirectory: form.parentDirectory || defaultParentDirectory,
           sources,
           ...(form.screenshots !== 'disabled' && form.applicationBaseUrl.trim() ? {
             application: {
@@ -583,7 +618,8 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
             },
             // Credentials travel once, over the local socket, and are stored
             // outside the project; they are never part of project.json.
-            ...(hasSetupCredentials ? { applicationCredentials: { username: form.applicationUsername.trim(), password: form.applicationPassword } } : {}),
+            ...(typedSetupCredentials ? { applicationCredentials: { username: form.applicationUsername.trim(), password: form.applicationPassword } } : {}),
+            ...(reusedSignIn ? { applicationSignInFrom: reusedSignIn.path } : {}),
           } : {}),
           documentation: {
             audiences: form.audiences,
@@ -616,76 +652,234 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
       setSubmitting(false)
     }
   }
-  return <div class="setup reference-setup">
-    <section class="setup-panel">
-      <aside class="setup-rail">
-        <div class="doxloop-sidebar-brand"><span><img src={DOXLOOP_LOGO} alt="Doxloop" /></span></div>
-        <div class="setup-sidebar-heading"><strong>Create documentation</strong><small>Configure your documentation workspace</small></div>
-        {onCancel && <button type="button" class="setup-cancel-button" title="Your answers are kept as a draft" onClick={onCancel}><Icon name="chevronRight" size={14} /><span>Back to {state.project?.title ?? 'workspace'}</span></button>}
-        <nav class="reference-sidebar-nav setup-reference-nav" aria-label="Setup navigation">{([['folder', 'Workspace', 'Name your workspace'], ['sources', 'Sources', 'Connect your content'], ['settings', 'Tools', 'Configure generation'], ['users', 'Guidance', 'Audience and instructions'], ['check', 'Review', 'Review and plan']] as const).map(([icon, label, detail], index) => <button type="button" key={label} aria-label={`Step ${index + 1}: ${label}`} aria-current={step === index + 1 ? 'step' : undefined} disabled={submitting || index + 1 > step} class={step === index + 1 ? 'active' : ''} onClick={() => setStep(index + 1)}><Icon name={icon} size={18} /><span><strong>{label}</strong><small>{detail}</small></span></button>)}</nav>
-      </aside>
-      <div class={`setup-body ${step === 1 ? 'setup-home-body' : step === 5 ? 'setup-review-body' : ''}`}>
+  const sourceAccess: 'public' | 'private' | 'local' = form.sourceLocation === 'local' ? 'local' : form.authMethod === 'credentials' ? 'private' : 'public'
+  const chooseSourceAccess = (value: 'public' | 'private' | 'local') => {
+    if (value === 'local') { updateSourceType('local'); return }
+    updateSourceType('git')
+    update('authMethod', value === 'private' ? 'credentials' : 'automatic')
+    editGitConnection()
+  }
+  const chooseSourceKind = (kind: SetupSource['sourceKind']) => {
+    resetSourceDraft()
+    setForm((current) => ({ ...current, sourceKind: kind, sourceLocation: 'git' }))
+    clearSetupError()
+  }
+  const openSourceDialog = () => {
+    resetSourceDraft()
+    setForm((current) => ({ ...current, sourceKind: 'directory', sourceLocation: 'git' }))
+    setSourceFlowStep('type')
+  }
+  // Sign-in details are always offered with screenshots; giving any of them
+  // (or reaching a sign-in page) is what turns the sign-in step on.
+  const updateSignInField = (key: 'applicationLoginPath' | 'applicationUsername' | 'applicationPassword', value: string) => {
+    setForm((current) => {
+      const next = { ...current, [key]: value }
+      const provided = Boolean(next.applicationLoginPath.trim() || next.applicationUsername.trim() || next.applicationPassword)
+      return { ...next, applicationSignIn: provided || setupAuth?.session ? 'yes' : 'no' }
+    })
+    clearSetupError()
+    setApplicationReadiness(undefined)
+    setSkipSignIn(false)
+  }
+  const startBrowserSignIn = () => {
+    setForm((current) => ({ ...current, applicationSignIn: 'yes' }))
+    void runSignIn('start', () => post<SetupCaptureAuth>('/api/setup/application/sign-in', { ...setupApplication(), ...(form.applicationLoginPath.trim() ? { authentication: { loginPath: form.applicationLoginPath.trim() } } : {}) }))
+  }
+  const readinessLabel = applicationReadiness?.status === 'ready' ? 'Reachable' : applicationReadiness?.status === 'authentication-required' ? 'Sign-in required' : 'Unreachable'
+  const readinessTone = applicationReadiness?.status === 'ready' ? 'good' : applicationReadiness?.status === 'authentication-required' ? 'warn' : 'bad'
+  const sourceKindTitle = form.sourceKind === 'openapi' ? 'Add OpenAPI spec' : form.sourceKind === 'docs-site' ? 'Add existing documentation' : 'Add source code'
+  const stepCopy: Record<number, readonly [string, string]> = {
+    1: mode === 'new'
+      ? ['Name your documentation', 'Where the workspace lives and what readers will call it.']
+      : ['Use an existing documentation folder', 'Point Doxloop at a documentation site you already have. Nothing in it is changed.'],
+    2: ['Connect your content', 'Doxloop reads code, specs and live docs sites. Add at least one.'],
+    3: ['Choose your coding agent', 'Doxloop drives the assistant you already pay for. No extra API key.'],
+    4: ['Guide the writing', 'Tell the planner who reads this and how deep to go.'],
+    5: ['Review and create your plan', ''],
+  }
+  const [stepTitle, stepDetail] = stepCopy[step] ?? stepCopy[1]!
+  const reasoningValue = form.agent === 'claude' ? form.effort : form.reasoning
+  const screenshotsOn = form.screenshots !== 'disabled'
+  const sourceSummary = (source: SetupSource) => source.sourceKind === 'openapi'
+    ? ['OpenAPI', source.openapiSummary ? `${source.openapiSummary.title} ${source.openapiSummary.version} · ${source.openapiSummary.operationCount} operations` : source.sourcePath || 'Uploaded specification']
+    : source.sourceKind === 'docs-site'
+      ? ['Docs site', source.docsSite ? `${source.docsSite.pages} pages · ${source.docsSite.words.toLocaleString()} words${source.docsSite.generator ? ` · ${source.docsSite.generator}` : ''}` : source.sourcePath]
+      : source.sourceLocation === 'git'
+        ? [repositoryProvider(source.repository) === 'github' ? 'GitHub' : repositoryProvider(source.repository) === 'gitlab' ? 'GitLab' : 'Git', `${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`]
+        : ['Local folder', source.sourcePath]
+  const sourceIcon = (source: SetupSource) => source.sourceKind === 'openapi' ? 'braces' : source.sourceKind === 'docs-site' ? 'globe' : source.sourceLocation === 'git' ? repositoryProviderIcon(source.repository) : 'folder'
+  return <div class="setup setup-wizard">
+    <header class="wizard-bar">
+      <div class="wizard-brand">
+        <span class="wizard-mark" aria-hidden="true">D</span><span class="wizard-wordmark">Doxloop</span>
+        <i class="wizard-bar-divider" aria-hidden="true" />
+        <span class="wizard-context">Set up documentation</span>
+      </div>
+      <nav class="wizard-stepper" aria-label="Setup navigation">
+        {SETUP_STEPS.map((label, index) => {
+          const number = index + 1
+          const status = number < step ? 'done' : number === step ? 'current' : 'upcoming'
+          return <Fragment key={label}>
+            {index > 0 && <i class={`wizard-connector ${number <= step ? 'done' : ''}`} aria-hidden="true" />}
+            <button type="button" class={`wizard-step ${status}`} aria-label={`Step ${number}: ${label}`} aria-current={number === step ? 'step' : undefined} disabled={submitting || number > step} onClick={() => setStep(number)}>
+              <span class="wizard-step-mark">{number < step ? <Icon name="check" size={12} /> : number}</span>
+              <span class="wizard-step-label">{label}</span>
+            </button>
+          </Fragment>
+        })}
+      </nav>
+      <div class="wizard-bar-actions">{onCancel && <Button tone="ghost" class="setup-cancel-button" title="Your answers are kept as a draft" onClick={onCancel}>Save and exit</Button>}</div>
+    </header>
+    <div class="wizard-body">
+      <div class="wizard-column">
         {draftRestored && <div class="setup-draft-note" role="status"><span>Restored your unfinished setup. Re-enter any passwords.</span><span><Button size="sm" tone="ghost" onClick={() => setDraftRestored(false)}>Dismiss</Button><Button size="sm" onClick={discardDraft}>Start over</Button></span></div>}
-        {step === 1 && <div class="setup-home-card">
-          <header class="setup-home-heading"><span><Icon name="folder" size={34} /></span><div><h1>{mode === 'new' ? "Let's name your workspace" : 'Use existing documentation'}</h1><p>{mode === 'new' ? "This will be your docs' home in Doxloop." : 'Point Doxloop at a documentation site you already have. Nothing in it is changed.'}</p></div></header>
-          <div class="setup-mode-choice" role="radiogroup" aria-label="How to start">
-            <button type="button" role="radio" aria-checked={mode === 'new'} class={mode === 'new' ? 'selected' : ''} onClick={() => { setMode('new'); clearSetupError() }}><span><Icon name="sparkle" size={20} /></span><strong>Start new</strong><small>Create a fresh documentation site from your sources.</small></button>
-            <button type="button" role="radio" aria-checked={mode === 'existing'} class={mode === 'existing' ? 'selected' : ''} onClick={() => { setMode('existing'); clearSetupError() }}><span><Icon name="folder" size={20} /></span><strong>Use existing documentation folder</strong><small>Keep your current generator, or convert Mintlify from a folder or GitHub to Doxbrix.</small></button>
+        <div class="wizard-heading"><span class="kicker">Step {step} of 5</span><h1>{stepTitle}</h1>{stepDetail && <p>{stepDetail}</p>}</div>
+
+        {step === 1 && <>
+          <div class="wizard-group"><span class="field-label">How do you want to start?</span>
+            <div class="radio-rows" role="radiogroup" aria-label="How to start">
+              <button type="button" role="radio" aria-checked={mode === 'new'} class={mode === 'new' ? 'selected' : ''} onClick={() => { setMode('new'); clearSetupError() }}><span><strong>Start new</strong><small>Create a fresh documentation site from your sources.</small></span></button>
+              <button type="button" role="radio" aria-checked={mode === 'existing'} class={mode === 'existing' ? 'selected' : ''} onClick={() => { setMode('existing'); clearSetupError() }}><span><strong>Use an existing documentation folder</strong><small>Keep your generator, or convert Mintlify.</small></span></button>
+            </div>
           </div>
-          {mode === 'existing' && <div class="setup-import-existing"><ImportExistingPanel onImported={() => onContinue('pages')} /></div>}
-          {mode === 'new' && <section class="setup-home-location-field"><Field label="Location" hint="The folder the new workspace is created in. Keep it outside your product source, usually the parent folder of the checkout."><div class="source-folder-input"><Input value={form.parentDirectory || state.cwd} onInput={(value) => update('parentDirectory', value.currentTarget.value)} /><Button icon="folder" busy={browsingLocation} onClick={() => void browseProjectLocation()}>Browse</Button></div></Field></section>}
-          {mode === 'new' && <div class="setup-home-fields"><section class="setup-home-field"><span class="setup-home-field-icon workspace"><Icon name="folder" size={25} /></span><Field label="Workspace name" hint="This is the folder where your docs will live."><ValidatedSetupInput value={form.directory} valid={Boolean(form.directory.trim()) && !pathErrors.directory} invalid={Boolean(pathErrors.directory)} onInput={(value) => update('directory', value)} />{pathErrors.directory && <small class="field-error">{pathErrors.directory}</small>}</Field></section><section class="setup-home-field"><span class="setup-home-field-icon title">T<small>T</small></span><Field label="What should we call your docs?" hint="This is the title people will see."><ValidatedSetupInput value={form.title} valid={Boolean(form.title.trim())} onInput={(value) => update('title', value)} /></Field></section></div>}
-        </div>}
-        {step === 2 && <><header class="sources-page-header setup-sources-header"><div><h1>Sources</h1><p>Manage all the sources you've connected to create documentation.</p></div><div class="sources-page-tools"><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-haspopup="menu" aria-expanded={sourceMenuOpen} onClick={() => setSourceMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === 'Escape') setSourceMenuOpen(false) }}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{sourceMenuOpen && <div class="sources-add-menu" role="menu" aria-label="Add source"><button type="button" role="menuitem" aria-label="Source code" onClick={() => { resetSourceDraft(); setSourceMenuOpen(false); setForm((current) => ({ ...current, sourceKind: 'directory', sourceLocation: 'git' })); setSourceFlowStep('source-location') }}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" role="menuitem" aria-label="OpenAPI spec" onClick={() => { resetSourceDraft(); setSourceMenuOpen(false); setForm((current) => ({ ...current, sourceKind: 'openapi' })); setSourceFlowStep('openapi-format') }}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button><button type="button" role="menuitem" aria-label="Existing documentation: rewrite a live docs site" onClick={() => { resetSourceDraft(); setSourceMenuOpen(false); setForm((current) => ({ ...current, sourceKind: 'docs-site' })); setSourceFlowStep('docs-site') }}><span><Icon name="globe" size={20} /></span><span><strong>Existing documentation</strong><small>Rewrite a live docs site</small></span></button></div>}</div></div></header>
-          <section class="sources-data-panel setup-sources-table"><header>All sources ({sources.length})</header><div class="sources-table-head"><span>Name</span><span>Type</span><span>Details</span><span>Status</span><span /></div>{filteredSetupSources.length ? <div class="sources-table-body">{filteredSetupSources.map(({ source, index }) => <div class="sources-data-row" key={`${source.name}-${index}`}><span class="sources-name-cell"><span class={`source-service-icon ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceKind === 'docs-site' ? 'docs-site' : source.sourceLocation === 'git' ? `git ${repositoryProvider(source.repository)}` : 'local'}`}><Icon name={source.sourceKind === 'openapi' ? 'braces' : source.sourceKind === 'docs-site' ? 'globe' : source.sourceLocation === 'git' ? repositoryProviderIcon(source.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small>{source.sourceKind === 'openapi' ? source.sourcePath || 'Uploaded OpenAPI specification' : source.sourceKind === 'docs-site' ? source.sourcePath : source.sourceLocation === 'git' ? source.repository : source.sourcePath}</small></span></span><span><em class={`source-type-pill ${source.sourceKind === 'openapi' ? 'openapi' : source.sourceKind === 'docs-site' ? 'docs-site' : source.sourceLocation}`}>{source.sourceKind === 'openapi' ? 'OpenAPI' : source.sourceKind === 'docs-site' ? 'Docs site' : source.sourceLocation === 'git' ? 'Git' : 'Local'}</em></span><span class="source-updated">{source.sourceKind === 'openapi' ? source.openapiSummary ? `${source.openapiSummary.title} ${source.openapiSummary.version} · ${source.openapiSummary.operationCount} operations` : 'Specification' : source.sourceKind === 'docs-site' ? source.docsSite ? `${source.docsSite.pages} pages · ${source.docsSite.words.toLocaleString()} words${source.docsSite.generator ? ` · ${source.docsSite.generator}` : ''}` : 'Existing documentation' : source.sourceLocation === 'git' ? `${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}` : 'Local folder'}</span><span><em class="source-sync-status"><Icon name="check" size={12} />Validated</em></span><span class="source-row-menu"><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => setSources((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Icon name="trash" size={22} /></button></span></div>)}</div> : <div class="sources-table-empty"><Icon name={sources.length ? 'search' : 'sources'} size={28} /><strong>{sources.length ? 'No matching sources' : 'No sources added yet'}</strong><small>{sources.length ? 'Try a different name, URL, path, or source type.' : 'Use “Add source” to connect your first source.'}</small></div>}<footer><span>Showing {filteredSetupSources.length ? `1 to ${filteredSetupSources.length}` : '0'} of {sources.length} results</span><span><button disabled><Icon name="chevronRight" size={14} /></button><button disabled><Icon name="chevronRight" size={14} /></button></span></footer></section>
-          {sourceAddedNotice && <div class="source-added-success" role="status"><span><Icon name="check" size={20} /></span><div><strong>Source added</strong><small>{sourceAddedNotice} is connected and ready.</small></div><button type="button" aria-label="Dismiss" onClick={() => setSourceAddedNotice('')}><Icon name="close" size={13} /></button></div>}
-          {sourceFlowStep !== 'closed' && <div class="sources-modal-scrim" onClick={() => setSourceFlowStep('closed')}><section class={`sources-reference-dialog ${form.sourceKind === 'openapi' ? 'openapi' : form.sourceKind === 'docs-site' ? 'docs-site' : 'source'}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <header>{form.sourceKind === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}{form.sourceKind === 'docs-site' && <span class="sources-dialog-icon"><Icon name="globe" size={24} /></span>}<div><h2>{form.sourceKind === 'openapi' ? 'Add OpenAPI spec' : form.sourceKind === 'docs-site' ? 'Add existing documentation' : 'Add source code'}</h2><p>{form.sourceKind === 'openapi' ? 'Import your OpenAPI specification from a local file or a public URL.' : form.sourceKind === 'docs-site' ? 'Point Doxloop at the documentation you have today. The agent audits it, verifies it against your other sources, and rewrites it as a new documentation set.' : 'Choose how you want to connect your source code.'}</p></div><button type="button" aria-label="Close" onClick={() => setSourceFlowStep('closed')}><Icon name="close" size={17} /></button></header>
-            {form.sourceKind === 'docs-site' ? <div class="sources-dialog-body"><DocsSiteSourceFields url={form.sourcePath} onUrl={(value) => { update('sourcePath', value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={pathErrors.sourcePath} onError={(message) => setPathErrors((current) => ({ ...current, sourcePath: message }))} /></div> : form.sourceKind === 'directory' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" aria-pressed={sourceType === 'git'} aria-label="Git repository" class={sourceType === 'git' ? 'selected' : ''} onClick={() => updateSourceType('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" aria-pressed={sourceType === 'local'} aria-label="Local folder" class={sourceType === 'local' ? 'selected' : ''} onClick={() => updateSourceType('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceType === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={form.authMethod} onChange={(event) => { update('authMethod', event.currentTarget.value); editGitConnection() }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={form.repository} onInput={(event) => { update('repository', event.currentTarget.value); editGitConnection() }} /><RepositoryConnectButton connected={Boolean(gitHead)} busy={gitTesting} disabled={!form.repository.trim() || (form.authMethod === 'credentials' && (!form.gitUsername.trim() || !form.gitSecret.trim()))} onClick={() => void testGitConnection()} /></div></Field>{form.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={form.gitUsername} autocomplete="username" onInput={(event) => { update('gitUsername', event.currentTarget.value); editGitConnection() }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={form.gitSecret} autocomplete="off" onInput={(event) => { update('gitSecret', event.currentTarget.value); editGitConnection() }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={form.branch} disabled={!gitHead || gitTesting} onChange={(event) => void selectGitBranch(event.currentTarget.value)}>{gitBranches.length ? gitBranches.map((branch) => <option key={branch}>{branch}</option>) : <option>{gitTesting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={form.subdirectory} disabled={!gitHead || gitFoldersLoading} onChange={(event) => update('subdirectory', event.currentTarget.value)}><option value="">/</option>{gitDirectories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={form.sourcePath} aria-invalid={Boolean(pathErrors.sourcePath)} onInput={(event) => { update('sourcePath', event.currentTarget.value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} /><Button icon="folder" busy={browsing} onClick={() => void browseSourceDirectory()}>Browse</Button></div></Field>}{pathErrors.sourcePath && <p class="field-error" role="alert">{pathErrors.sourcePath}</p>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={form.specInput === 'file' ? 'active' : ''} onClick={() => update('specInput', 'file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={form.specInput === 'url' ? 'active' : ''} onClick={() => update('specInput', 'url')}><Icon name="external" size={18} />From URL</button></div>{form.specInput === 'file' ? <div class={`openapi-dropzone ${setupSpecFileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSetupSpecification(event.dataTransfer?.files[0]) }}><input ref={setupSpecInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSetupSpecification(event.currentTarget.files?.[0])} /><span><Icon name={setupSpecFileName ? 'check' : 'publish'} size={28} /></span><strong>{setupSpecFileName || 'Drag and drop your OpenAPI file here'}</strong>{!setupSpecFileName && <small>or</small>}<Button onClick={() => setupSpecInput.current?.click()}>{setupSpecFileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><div class="openapi-url-input"><Icon name="external" size={18} /><Input value={form.sourcePath} onInput={(event) => { update('sourcePath', event.currentTarget.value); update('specContent', ''); setSetupSpecFileName('') }} /></div><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
-            <footer><Button onClick={() => setSourceFlowStep('closed')}>Cancel</Button><Button tone="primary" busy={savingSource} disabled={form.sourceKind === 'docs-site' ? docsSiteInspection?.status !== 'completed' || docsSiteInspection.url !== form.sourcePath.trim().replace(/#.*$/, '') && !form.sourcePath.trim() : form.sourceKind === 'directory' ? sourceType === 'git' ? !gitHead || gitFoldersLoading : !form.sourcePath.trim() : form.specInput === 'file' ? !form.specContent.trim() : !form.sourcePath.trim()} onClick={() => void addSetupSource()}>Add source</Button></footer>
+          {mode === 'existing' && <div class="wizard-panel setup-import-existing"><ImportExistingPanel onImported={() => onContinue('pages')} /></div>}
+          {mode === 'new' && <>
+            <Field label="Location" hint="The folder the new workspace is created in. Keep it outside your product source, usually the parent folder of the checkout."><div class="wizard-addon-row"><Input class="mono-input" value={form.parentDirectory || defaultParentDirectory} onInput={(value) => update('parentDirectory', value.currentTarget.value)} /><Button icon="folder" busy={browsingLocation} onClick={() => void browseProjectLocation()}>Browse</Button></div></Field>
+            <Field label="Workspace name" hint="The folder your docs will live in."><ValidatedSetupInput value={form.directory} valid={Boolean(form.directory.trim()) && !pathErrors.directory} invalid={Boolean(pathErrors.directory)} onInput={(value) => update('directory', value)} />{pathErrors.directory && <small class="field-error">{pathErrors.directory}</small>}</Field>
+            <Field label="Documentation title" hint="The title readers will see."><ValidatedSetupInput value={form.title} valid={Boolean(form.title.trim())} onInput={(value) => update('title', value)} /></Field>
+          </>}
+        </>}
+
+        {step === 2 && <>
+          <div class="wizard-source-list" aria-label="Connected sources">
+            {sources.map((source, index) => {
+              const [kind, detail] = sourceSummary(source)
+              return <div class="wizard-source-row" key={`${source.name}-${index}`}>
+                <span class="wizard-source-icon"><Icon name={sourceIcon(source)} size={16} /></span>
+                <div class="wizard-source-copy"><strong>{source.name}</strong><span class="wizard-source-meta"><span>{kind}</span><span>{detail}</span></span></div><Badge tone="good">Connected</Badge>
+                <button type="button" class="wizard-icon-button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => setSources((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Icon name="trash" size={16} /></button>
+              </div>
+            })}
+            <button type="button" class="wizard-source-add" onClick={openSourceDialog}><Icon name="plus" size={16} /><span>{sources.length ? 'Add another source' : 'Add source'}</span></button>
+          </div>
+          <Note>Private repositories need a personal access token. It is stored in your keychain, never in the project.</Note>
+          {sourceAddedNotice && <div class="source-added-success" role="status"><span><Icon name="check" size={16} /></span><div><strong>Source added</strong><small>{sourceAddedNotice} is connected and ready.</small></div><button type="button" aria-label="Dismiss" onClick={() => setSourceAddedNotice('')}><Icon name="close" size={13} /></button></div>}
+          {sourceFlowStep !== 'closed' && <div class="sources-modal-scrim" onClick={() => setSourceFlowStep('closed')}><section class={`sources-reference-dialog ${form.sourceKind === 'openapi' ? 'openapi' : form.sourceKind === 'docs-site' ? 'docs-site' : 'source'}`} role="dialog" aria-modal="true" aria-labelledby="setup-source-dialog-title" onClick={(event) => event.stopPropagation()}>
+            <header><h2 id="setup-source-dialog-title">{sourceKindTitle}</h2><button type="button" aria-label="Close" onClick={() => setSourceFlowStep('closed')}><Icon name="close" size={16} /></button></header>
+            <div class="sources-dialog-body">
+              <div class="wizard-group"><span class="field-label">What are you adding?</span>
+                <div class="radio-rows" role="group" aria-label="Source type">
+                  <button type="button" aria-pressed={form.sourceKind === 'directory'} aria-label="Source code" onClick={() => chooseSourceKind('directory')}><span><strong>Source code</strong><small>A Git repository or local folder</small></span></button>
+                  <button type="button" aria-pressed={form.sourceKind === 'openapi'} aria-label="OpenAPI spec" onClick={() => chooseSourceKind('openapi')}><span><strong>OpenAPI spec</strong><small>From a URL or an uploaded file</small></span></button>
+                  <button type="button" aria-pressed={form.sourceKind === 'docs-site'} aria-label="Existing documentation: rewrite a live docs site" onClick={() => chooseSourceKind('docs-site')}><span><strong>Existing documentation</strong><small>Crawl a live docs site to audit and rewrite it</small></span></button>
+                </div>
+              </div>
+              {form.sourceKind === 'docs-site' ? <DocsSiteSourceFields url={form.sourcePath} onUrl={(value) => { update('sourcePath', value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={pathErrors.sourcePath} onError={(message) => setPathErrors((current) => ({ ...current, sourcePath: message }))} />
+                : form.sourceKind === 'directory' ? <>
+                  <div class="wizard-group"><span class="field-label">Where is it?</span>
+                    <div class="radio-rows" role="group" aria-label="Source location">
+                      <button type="button" aria-pressed={sourceAccess === 'public'} aria-label="Public repository" onClick={() => chooseSourceAccess('public')}><span><strong>Public repository</strong><small>GitHub, GitLab or another Git service</small></span></button>
+                      <button type="button" aria-pressed={sourceAccess === 'private'} aria-label="Private repository" onClick={() => chooseSourceAccess('private')}><span><strong>Private repository</strong><small>Needs a personal access token</small></span></button>
+                      <button type="button" aria-pressed={sourceAccess === 'local'} aria-label="Local folder" onClick={() => chooseSourceAccess('local')}><span><strong>Local folder</strong><small>A folder on this computer or network</small></span></button>
+                    </div>
+                  </div>
+                  {sourceType === 'git' ? <>
+                    <Field label="Repository URL" hint="Paste the clone or browser URL of the repository."><div class="wizard-addon-row"><Input class="mono-input" value={form.repository} placeholder="https://github.com/your-team/product" onInput={(event) => { update('repository', event.currentTarget.value); editGitConnection() }} onBlur={autoConnectRepository} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); autoConnectRepository() } }} /><RepositoryConnectButton connected={Boolean(gitHead)} busy={gitTesting} disabled={!form.repository.trim() || (form.authMethod === 'credentials' && (!form.gitUsername.trim() || !form.gitSecret.trim()))} onClick={() => void testGitConnection()} /></div></Field>
+                    {form.authMethod === 'credentials' && <>
+                      <Field label="Username"><Input value={form.gitUsername} autocomplete="username" onInput={(event) => { update('gitUsername', event.currentTarget.value); editGitConnection() }} /></Field>
+                      <Field label="Personal access token" hint="Held in your keychain for this computer only."><Input type="password" value={form.gitSecret} autocomplete="off" onInput={(event) => { update('gitSecret', event.currentTarget.value); editGitConnection() }} /></Field>
+                    </>}
+                    <Field label="Branch"><Select value={form.branch} disabled={!gitHead || gitTesting} onChange={(event) => void selectGitBranch(event.currentTarget.value)}>{gitBranches.length ? gitBranches.map((branch) => <option key={branch}>{branch}</option>) : <option>{gitTesting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field>
+                    <Field label="Folder (optional)" hint="Document one folder of the repository instead of all of it."><Select value={form.subdirectory} disabled={!gitHead || gitFoldersLoading} onChange={(event) => update('subdirectory', event.currentTarget.value)}><option value="">/</option>{gitDirectories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field>
+                  </> : <Field label="Local folder"><div class="wizard-addon-row"><Input class="mono-input" value={form.sourcePath} aria-invalid={Boolean(pathErrors.sourcePath)} onInput={(event) => { update('sourcePath', event.currentTarget.value); setPathErrors((current) => ({ ...current, sourcePath: '' })) }} /><Button icon="folder" busy={browsing} onClick={() => void browseSourceDirectory()}>Browse</Button></div></Field>}
+                  {pathErrors.sourcePath && <p class="field-error" role="alert">{pathErrors.sourcePath}</p>}
+                </> : <>
+                  <div class="wizard-group"><span class="field-label">Format</span>
+                    <div class="radio-rows" role="group" aria-label="Specification input">
+                      <button type="button" aria-pressed={form.specInput === 'file'} onClick={() => update('specInput', 'file')}><span><strong>Upload file</strong><small>.yaml, .yml or .json</small></span></button>
+                      <button type="button" aria-pressed={form.specInput === 'url'} onClick={() => update('specInput', 'url')}><span><strong>From URL</strong><small>A public OpenAPI document</small></span></button>
+                    </div>
+                  </div>
+                  {form.specInput === 'file'
+                    ? <div class={`openapi-dropzone ${setupSpecFileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSetupSpecification(event.dataTransfer?.files[0]) }}><input ref={setupSpecInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSetupSpecification(event.currentTarget.files?.[0])} /><span><Icon name={setupSpecFileName ? 'check' : 'publish'} size={20} /></span><strong>{setupSpecFileName || 'Drop your OpenAPI file here'}</strong><Button size="sm" onClick={() => setupSpecInput.current?.click()}>{setupSpecFileName ? 'Choose another file' : 'Browse file'}</Button></div>
+                    : <Field label="OpenAPI spec URL" hint="Public URLs and standard OpenAPI formats are supported."><Input class="mono-input" value={form.sourcePath} placeholder="https://api.example.com/openapi.json" onInput={(event) => { update('sourcePath', event.currentTarget.value); update('specContent', ''); setSetupSpecFileName('') }} /></Field>}
+                </>}
+            </div>
+            <footer><Button tone="ghost" onClick={() => setSourceFlowStep('closed')}>Cancel</Button><Button tone="primary" icon="plus" busy={savingSource} disabled={form.sourceKind === 'docs-site' ? docsSiteInspection?.status !== 'completed' || docsSiteInspection.url !== form.sourcePath.trim().replace(/#.*$/, '') && !form.sourcePath.trim() : form.sourceKind === 'directory' ? sourceType === 'git' ? !gitHead || gitFoldersLoading : !form.sourcePath.trim() : form.specInput === 'file' ? !form.specContent.trim() : !form.sourcePath.trim()} onClick={() => void addSetupSource()}>Add source</Button></footer>
           </section></div>}
         </>}
-        {step === 3 && <div class="setup-tools-stage"><SetupStepHeading visual="🪄" title="Configure your tools" detail="Choose how Doxloop should generate your documentation." />
-          <div class="setup-tools"><Field label="Documentation generator" hint="Creates and organizes your documentation."><Select value={form.generator} onChange={(event) => update('generator', event.currentTarget.value)}>{generators.map((item) => <option value={item.id}>{item.displayName}</option>)}</Select>{form.generator === 'doxbrix' && <small class="recommended-label"><Icon name="sparkle" size={12} />Recommended</small>}<GeneratorTierBadge entry={selectedGenerator} /></Field><Field label="Coding assistant" hint="Helps understand and explain your product."><Select value={form.agent} disabled={selectedAgentInstallJob?.status === 'running'} onChange={(event) => chooseAgent(event.currentTarget.value)}><option value="">Select coding assistant</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select>{form.agent === 'codex' && <small class="recommended-label"><Icon name="sparkle" size={12} />Recommended</small>}</Field>
-            {form.agent && !selectedAgent && <div class="setup-agent-readiness missing">
-              <span class="setup-agent-readiness-icon"><Icon name="alert" size={17} /></span>
-              <div class="setup-agent-readiness-copy"><strong>{agentLabel(form.agent)} is not installed</strong><small>Install this coding agent to continue creating your documentation.</small></div>
-              {selectedAgentInstallJob
-                ? <AgentInstallProgress job={selectedAgentInstallJob} onRetry={() => void installSelectedAgent()} />
-                : <Button size="sm" tone="primary" busy={agentInstallPending} onClick={() => void installSelectedAgent()}>Install {agentLabel(form.agent)}</Button>}
-            </div>}
-            {selectedAgent?.authentication?.status === 'unauthenticated' && <div class="setup-agent-readiness missing signed-out" role="alert">
-              <span class="setup-agent-readiness-icon"><Icon name="alert" size={17} /></span>
-              <div class="setup-agent-readiness-copy"><strong>{agentLabel(form.agent)} is signed out on this computer</strong><small>{signInInstruction(form.agent)}.{signedInAlternative ? ` Or use ${agentLabel(signedInAlternative)}, which is signed in.` : ''}</small></div>
-              <div class="setup-agent-readiness-actions">
-                {signedInAlternative && <Button size="sm" tone="primary" onClick={() => chooseAgent(signedInAlternative)}>Use {agentLabel(signedInAlternative)}</Button>}
-                <Button size="sm" busy={checkingAgents} onClick={() => void recheckAgents()}>Check again</Button>
-              </div>
-            </div>}
-            <Field label="Select Model" hint={form.agent ? `Search suggested ${agentLabel(form.agent)} models or enter another model ID.` : 'Select a coding assistant first.'}><Combo value={form.model} options={availableModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => update('model', value)} /></Field><Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'} hint={supportedReasoning.length ? 'Search suggested levels or enter a custom value.' : 'Enter a supported value, or leave blank for the default.'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => update(form.agent === 'claude' ? 'effort' : 'reasoning', value)} /></Field><Field label="Add product screenshots?" hint="Doxloop captures the screens your guides describe from your running app. Anything it cannot capture stays text-only."><Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => { update('screenshots', screenshotIntentFromChoice(value)); setApplicationReadiness(undefined) }} items={[['no', 'No'], ['yes', 'Yes']] as const} /></Field></div>
-          <GeneratorPreflightPanel entry={selectedGenerator} result={generatorPreflight} busy={checkingGenerator} onRetry={() => void checkGenerator(form.generator)} />
-          <details class="agent-capabilities-details setup-generator-tiers" open={Boolean(selectedGenerator?.tier) && selectedGenerator?.tier !== 'full'}>
-            <summary>What each generator supports{selectedGenerator?.tier && selectedGenerator.tier !== 'full' ? ` · ${selectedGenerator.displayName} is ${selectedGenerator.tierLabel ?? selectedGenerator.tier}` : ''}</summary>
-            <GeneratorTierMatrix generators={generators} selected={form.generator} />
+
+        {step === 3 && <>
+          <div class="wizard-group"><span class="field-label">Coding agent</span>
+            <div class="radio-rows wizard-agent-rows" role="radiogroup" aria-label="Coding agent">
+              {(['claude', 'codex', 'gemini'] as const).map((name) => {
+                const entry = state.agents?.find((agent) => agent.name === name)
+                const model = agentModels(name)[0]?.label ?? 'default model'
+                const status = !entry ? 'not installed' : entry.authentication?.status === 'authenticated' ? 'signed in' : entry.authentication?.status === 'unauthenticated' ? 'signed out' : 'installed'
+                const installJob = state.jobs.find((job) => job.type === 'agent:install' && job.agent === name && (job.status === 'running' || job.agent === requestedAgentInstall))
+                const installing = installJob?.status === 'running' || (requestedAgentInstall === name && !installJob)
+                return <label key={name} class={form.agent === name ? 'selected' : ''}>
+                  <input type="radio" name="setup-agent" class="wizard-radio-input" value={name} checked={form.agent === name} disabled={selectedAgentInstallJob?.status === 'running'} onChange={() => chooseAgent(name)} />
+                  <span><strong>{agentLabel(name)}</strong><small>{model} · {status}</small></span>
+                  {!entry
+                    ? <Button size="sm" busy={installing} onClick={(event) => { event.preventDefault(); chooseAgent(name); setRequestedAgentInstall(name); void act(() => post<UiJob | { name: string; executable: string; alreadyInstalled: true }>('/api/agent/install', { agent: name })).then((result) => { if (!result || !('status' in result)) setRequestedAgentInstall('') }) }}>Install</Button>
+                    : entry.authentication?.status === 'authenticated' ? <Badge tone="good">Ready</Badge>
+                      : entry.authentication?.status === 'unauthenticated' ? <Badge tone="warn">Signed out</Badge>
+                        : <Badge tone="neutral">Installed</Badge>}
+                </label>
+              })}
+            </div>
+          </div>
+          {form.agent && !selectedAgent && selectedAgentInstallJob && <AgentInstallProgress job={selectedAgentInstallJob} onRetry={() => void installSelectedAgent()} />}
+          {selectedAgent?.authentication?.status === 'unauthenticated' && <div class="wizard-inline-alert" role="alert">
+            <Note tone="warn">{agentLabel(form.agent)} is signed out on this computer. {signInInstruction(form.agent)}.{signedInAlternative ? ` Or use ${agentLabel(signedInAlternative)}, which is signed in.` : ''}</Note>
+            <div class="wizard-inline-actions">
+              {signedInAlternative && <Button size="sm" tone="primary" onClick={() => chooseAgent(signedInAlternative)}>Use {agentLabel(signedInAlternative)}</Button>}
+              <Button size="sm" busy={checkingAgents} onClick={() => void recheckAgents()}>Check again</Button>
+            </div>
+          </div>}
+          <Field label="Model" hint={form.agent ? `Search suggested ${agentLabel(form.agent)} models or enter another model ID.` : 'Select a coding agent first.'}><Combo value={form.model} options={availableModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Search or enter a model ID" onValueChange={(value) => update('model', value)} /></Field>
+          <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'} hint={supportedReasoning.length ? 'Higher levels plan more carefully and take longer. Search suggested levels or enter a custom value.' : 'Enter a supported value, or leave blank for the default.'}><Combo value={reasoningValue} options={supportedReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Search or enter a value" onValueChange={(value) => update(form.agent === 'claude' ? 'effort' : 'reasoning', value)} /></Field>
+          <details class="wizard-advanced">
+            <summary><span><strong>Advanced</strong><small>Documentation generator and what each tool supports</small></span><Icon name="chevronDown" size={16} /></summary>
+            <div class="wizard-advanced-fields">
+              <Field label="Documentation generator" hint="Creates and organizes your documentation site."><Select value={form.generator} onChange={(event) => update('generator', event.currentTarget.value)}>{generators.map((item) => <option value={item.id}>{item.displayName}</option>)}</Select><span class="wizard-field-badges">{form.generator === 'doxbrix' && <span class="badge teal no-dot">Recommended</span>}<GeneratorTierBadge entry={selectedGenerator} /></span></Field>
+              <GeneratorPreflightPanel entry={selectedGenerator} result={generatorPreflight} busy={checkingGenerator} onRetry={() => void checkGenerator(form.generator)} />
+              <details class="agent-capabilities-details setup-generator-tiers" open={Boolean(selectedGenerator?.tier) && selectedGenerator?.tier !== 'full'}>
+                <summary>What each generator supports{selectedGenerator?.tier && selectedGenerator.tier !== 'full' ? ` · ${selectedGenerator.displayName} is ${selectedGenerator.tierLabel ?? selectedGenerator.tier}` : ''}</summary>
+                <GeneratorTierMatrix generators={generators} selected={form.generator} />
+              </details>
+              <details class="agent-capabilities-details setup-agent-capabilities" open={form.agent === 'gemini'}>
+                <summary>What each assistant supports{form.agent === 'gemini' ? ' · Gemini is limited in some areas' : ''}</summary>
+                <AgentCapabilityMatrix selected={form.agent || undefined} />
+              </details>
+            </div>
           </details>
-          <details class="agent-capabilities-details setup-agent-capabilities" open={form.agent === 'gemini'}>
-            <summary>What each assistant supports{form.agent === 'gemini' ? ' · Gemini is limited in some areas' : ''}</summary>
-            <AgentCapabilityMatrix selected={form.agent || undefined} />
-          </details>
-          {form.screenshots !== 'disabled' && <section class="setup-capture-profile"><header><span><Icon name="camera" size={18} /></span><div><strong>Screenshot details</strong></div></header><div class="setup-capture-grid"><Field label="Application URL" hint="The address of your running local, demo, or test application."><Input value={form.applicationBaseUrl} placeholder="http://localhost:3000" onInput={(event) => update('applicationBaseUrl', event.currentTarget.value)} /></Field><Field label="Starting page" hint="The first application page Doxloop may open. Use / for the home page."><Input value={form.applicationStartPath} placeholder="/ or /settings/team" onInput={(event) => update('applicationStartPath', event.currentTarget.value)} /></Field><div class="setup-capture-test"><Button disabled={!captureProfileComplete} busy={testingApplication} onClick={() => void testApplication()}>Check page</Button>{applicationReadiness && <small class={applicationReadiness.status === 'ready' ? 'ready' : 'missing'}><Icon name={applicationReadiness.status === 'ready' ? 'check' : 'alert'} size={13} />{applicationReadiness.message}</small>}</div></div>
-            <Field label="Does your app need sign-in?" hint="Sign in once so screenshots show the signed-in product. The session and test account stay on this computer, never in the project."><Segmented value={form.applicationSignIn} onChange={(value) => { update('applicationSignIn', value); setApplicationReadiness(undefined) }} items={[['no', 'No'], ['yes', 'Yes']] as const} /></Field>
-            {form.applicationSignIn === 'yes' && <div class="setup-capture-signin">
-              <div class="setup-capture-grid">
-                <Field label="Sign-in route" hint="Optional. Where the sign-in window opens; leave empty when the app redirects to its sign-in page."><Input value={form.applicationLoginPath} placeholder="/login" onInput={(event) => update('applicationLoginPath', event.currentTarget.value)} /></Field>
-                <div class="setup-capture-test"><Button disabled={!captureProfileComplete || setupAuth?.signIn.active} busy={signInBusy === 'start'} onClick={() => void runSignIn('start', () => post<SetupCaptureAuth>('/api/setup/application/sign-in', setupApplication()))}>{setupAuth?.session ? 'Sign in again with browser' : 'Sign in with browser'}</Button>{setupAuth?.session && !setupAuth.signIn.active && <small class="ready"><Icon name="check" size={13} />Signed in</small>}</div>
-                <Field label="Test account username or email" hint="Optional. For a plain username and password form."><Input value={form.applicationUsername} autocomplete="off" placeholder="docs-demo@example.com" onInput={(event) => update('applicationUsername', event.currentTarget.value)} /></Field>
-                <Field label="Test account password" hint="Typed by the capture browser, never shown to the agent or saved in the project."><Input type="password" value={form.applicationPassword} autocomplete="new-password" placeholder="Password" onInput={(event) => update('applicationPassword', event.currentTarget.value)} /></Field>
-              </div>
-              {setupAuth?.signIn.active && <div class="setup-capture-signin-actions"><Note tone={setupAuth.signIn.open ? 'info' : 'warn'}><span>{setupAuth.signIn.open ? <>Sign in in the Chrome window, then choose <strong>Save session</strong>.</> : <>The Chrome window was closed. Choose <strong>Save session</strong> to keep the last signed-in state, or start again.</>}</span></Note><div class="setup-capture-signin-buttons"><Button busy={signInBusy === 'cancel'} onClick={() => void runSignIn('cancel', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/cancel'))}>Cancel</Button><Button tone="primary" busy={signInBusy === 'finish'} onClick={() => void runSignIn('finish', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/finish'))}>Save session</Button></div></div>}
-              {applicationReadiness?.status === 'authentication-required' && !skipSignIn && <Button size="sm" tone="ghost" onClick={() => { setSkipSignIn(true); clearSetupError() }}>Continue without signing in</Button>}
+          <section class="wizard-box setup-capture-profile" aria-label="Screenshots">
+            <div class="wizard-box-row"><span class="wizard-box-title">Add product screenshots</span><Toggle checked={screenshotsOn} label="Add product screenshots" onChange={(checked) => { update('screenshots', screenshotIntentFromChoice(checked ? 'yes' : 'no')); setApplicationReadiness(undefined) }} /></div>
+            {screenshotsOn && <div class="wizard-box-body">
+              <Field label="Application URL" hint="The address of your running local, demo, or test application. Doxloop captures the screens your guides describe; anything it cannot reach stays text-only."><div class="wizard-addon-row"><Input class="mono-input" value={form.applicationBaseUrl} placeholder="http://localhost:3000" onInput={(event) => update('applicationBaseUrl', event.currentTarget.value)} /><Button aria-label="Check page" disabled={!captureProfileComplete} busy={testingApplication} onClick={() => void testApplication()}>Check</Button></div></Field>
+              {applicationReadiness && <div class={`wizard-readiness ${readinessTone}`}><Badge tone={readinessTone}>{readinessLabel}</Badge><span>{applicationReadiness.message}</span></div>}
+              <Field label="Starting page" hint="The first application page Doxloop may open. Use / for the home page."><Input class="mono-input" value={form.applicationStartPath} placeholder="/ or /settings/team" onInput={(event) => update('applicationStartPath', event.currentTarget.value)} /></Field>
+              {showSignIn ? <>
+              <Field label="Sign-in route" hint="Optional. Where the sign-in window opens; leave empty when the app redirects to its sign-in page. Sign in once so screenshots show the signed-in product; the session and test account stay on this computer."><div class="wizard-addon-row"><Input class="mono-input" value={form.applicationLoginPath} placeholder="/login" onInput={(event) => updateSignInField('applicationLoginPath', event.currentTarget.value)} /><Button icon="globe" disabled={!captureProfileComplete || setupAuth?.signIn.active} busy={signInBusy === 'start'} onClick={startBrowserSignIn}>{setupAuth?.session ? 'Sign in again with browser' : 'Sign in with browser'}</Button></div></Field>
+              {setupAuth?.session && !setupAuth.signIn.active && <div class="wizard-readiness good"><Badge tone="good">Signed in</Badge><span>A browser session is saved for screenshots.</span></div>}
+              {!setupAuth?.session && !typedSetupCredentials && savedSignIns.length > 0 && <div class="radio-rows wizard-saved-sign-ins" role="radiogroup" aria-label="Saved sign-in">
+                {savedSignIns.map((match) => <button key={match.path} type="button" role="radio" aria-checked={reuseSignInFrom === match.path} class={reuseSignInFrom === match.path ? 'selected' : ''} onClick={() => { setReuseSignInFrom(reuseSignInFrom === match.path ? '' : match.path); setForm((current) => ({ ...current, applicationSignIn: 'yes', applicationUsername: current.applicationUsername || match.username || '', applicationLoginPath: current.applicationLoginPath || match.loginPath || '' })); setApplicationReadiness(undefined); clearSetupError() }}>
+                  <span><strong>Use the saved sign-in from {match.title}</strong><small>{[match.username, match.session ? 'browser session' : '', match.path.split(/[\\/]/).filter(Boolean).at(-1)].filter(Boolean).join(' · ')}</small></span>
+                </button>)}
+              </div>}
+              <Field label="Test account username or email" hint="Optional. For a plain username and password form."><Input value={form.applicationUsername} autocomplete="off" placeholder="docs-demo@example.com" onInput={(event) => updateSignInField('applicationUsername', event.currentTarget.value)} /></Field>
+              <Field label="Test account password" hint="Typed by the capture browser, never shown to the agent or saved in the project."><Input type="password" value={form.applicationPassword} autocomplete="new-password" placeholder={reusedSignIn ? 'Using the saved sign-in' : 'Enter a password'} onInput={(event) => updateSignInField('applicationPassword', event.currentTarget.value)} /></Field>
+              </> : <Button tone="link" class="wizard-signin-open" onClick={() => setSignInOpen(true)}>My app needs a sign-in</Button>}
+              {setupAuth?.signIn.active && <div class="setup-capture-signin-actions"><Note tone={setupAuth.signIn.open ? 'info' : 'warn'}><span>{setupAuth.signIn.open ? <>Sign in in the Chrome window, then choose <strong>Save session</strong>.</> : <>The Chrome window was closed. Choose <strong>Save session</strong> to keep the last signed-in state, or start again.</>}</span></Note><div class="wizard-inline-actions"><Button busy={signInBusy === 'cancel'} onClick={() => void runSignIn('cancel', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/cancel'))}>Cancel</Button><Button tone="primary" busy={signInBusy === 'finish'} onClick={() => void runSignIn('finish', () => post<SetupCaptureAuth>('/api/setup/application/sign-in/finish'))}>Save session</Button></div></div>}
+              {applicationReadiness?.status === 'authentication-required' && !skipSignIn && <div><Button size="sm" tone="ghost" onClick={() => { setSkipSignIn(true); clearSetupError() }}>Continue without signing in</Button></div>}
               {skipSignIn && <small class="setup-signin-skipped">Continuing without sign-in: screenshots show only pages visible before sign-in.</small>}
+              {captureProfileIssue ? <Note>{captureProfileIssue}</Note> : null}
             </div>}
-            {captureProfileIssue ? <Note>{captureProfileIssue}</Note> : null}</section>}</div>}
+          </section>
+        </>}
+
         {step === 4 && <DocumentationGuidance
           audiences={form.audiences}
           scope={form.scope}
@@ -698,36 +892,44 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
           onPreferencesChange={(preferences) => setForm((current) => ({ ...current, ...preferences }))}
           onInstructionsChange={(customInstructions) => setForm((current) => ({ ...current, customInstructions }))}
         />}
-        {step === 5 && <><div class="setup-review-heading"><span aria-hidden="true">🗺️</span><div><h1>Review and plan</h1><p>Check your choices, then create the plan.</p></div></div>
-          <div class="setup-review-grid">
-            <section class="setup-review-summary concise" aria-label="Documentation configuration">
-              <ReviewSummaryRow icon="file" label="Title"><strong>{form.title}</strong></ReviewSummaryRow>
-              <ReviewSummaryRow icon="link" label="Sources" trailing={<span class="review-source-count"><Icon name="check" size={12} />{sources.length} {sources.length === 1 ? 'source' : 'sources'}</span>}><span class="review-source-list">{sources.map((source) => <span class="review-source" key={source.name}><strong>{source.name} · {source.sourceKind === 'openapi' ? 'OpenAPI Specification' : source.sourceKind === 'docs-site' ? 'Existing Documentation' : source.sourceLocation === 'git' ? 'Git Repository' : 'Local Folder'}</strong><small>{source.sourceKind === 'docs-site' ? `${source.sourcePath} · ${describeInspection(source.docsSite ? { id: source.inspectionId ?? '', url: source.sourcePath, status: 'completed', progress: { fetched: 0, discovered: 0 }, summary: source.docsSite } : undefined)}` : source.sourceKind === 'openapi' || source.sourceLocation === 'local' ? source.sourcePath || 'Uploaded specification' : `${source.repository} · ${source.branch}${source.subdirectory ? ` / ${source.subdirectory}` : ''}`}</small></span>)}</span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="bot" label="Assistant"><span class="review-guidance"><strong>{agentLabel(form.agent)} · {form.model || 'default model'}{(form.agent === 'claude' ? form.effort : form.reasoning) ? ` · ${form.agent === 'claude' ? 'effort' : 'reasoning'} ${form.agent === 'claude' ? form.effort : form.reasoning}` : ''}</strong><small>{selectedAgent?.authentication?.status === 'unauthenticated' ? `Signed out. ${signInInstruction(form.agent)}.` : selectedAgent?.authentication?.status === 'authenticated' ? 'Signed in and ready.' : 'Sign-in could not be confirmed; the plan checks it again when it starts.'}</small></span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="map" label="Plan"><span class="review-guidance"><strong>{scopeLabel(form.scope)} depth</strong><small>{form.readerOutcome.trim() || DEFAULT_READER_OUTCOME}</small></span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="check" label="Run limits"><span class="review-guidance"><strong>{describeBatchLimits(batchLimitsForScope(form.scope, form.screenshots))}</strong></span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="camera" label="Screenshots"><span class="review-guidance"><strong>{form.screenshots === 'disabled' ? 'No' : form.applicationSignIn === 'yes' && !setupAuth?.session && !hasSetupCredentials ? 'Yes — without sign-in (only pages visible before sign-in)' : 'Yes'}</strong><small>{form.screenshots === 'disabled' ? 'Documentation will be created without product screenshots.' : `${setupApplicationCaptureTarget(form.applicationBaseUrl, form.applicationStartPath)}${form.applicationSignIn === 'yes' ? ` · sign-in: ${[setupAuth?.session ? 'recorded browser session' : '', hasSetupCredentials ? 'test account credentials' : ''].filter(Boolean).join(' and ') || 'none provided yet'}` : ''}`}</small></span></ReviewSummaryRow>
-              <ReviewSummaryRow icon="users" label="Guidance"><span class="review-guidance"><strong>{form.audiences.length ? form.audiences.join(', ') : 'Agent will determine the audience'}</strong><small>{form.customInstructions.trim() || 'No custom instructions'}</small></span></ReviewSummaryRow>
-            </section>
-          </div>
-          <div class="setup-review-ready"><span><Icon name="check" size={20} /></span><div><strong>Ready to prepare your plan</strong><small>Nothing is written until you approve the plan.</small></div></div>
+
+        {step === 5 && <>
+          <section class="wizard-panel wizard-summary" aria-label="Documentation configuration">
+            <div class="vrows">
+              <SummaryRow label="Title" value={`${form.title || 'Untitled documentation'} · ${(form.parentDirectory || defaultParentDirectory).replace(/[\\/]+$/, '')}/${form.directory}`} onEdit={() => setStep(1)} />
+              <SummaryRow label="Sources" value={sources.length ? sources.map((source) => source.name).join(' · ') : 'No sources yet'} onEdit={() => setStep(2)} />
+              <SummaryRow label="Agent" value={`${agentLabel(form.agent)} · ${form.model || 'default model'}${reasoningValue ? ` · ${reasoningValue}` : ''}${selectedAgent?.authentication?.status === 'unauthenticated' ? ' · signed out' : ''}`} onEdit={() => setStep(3)} />
+              <SummaryRow label="Depth" value={`${scopeLabel(form.scope)} · ${describeBatchLimits(batchLimitsForScope(form.scope, form.screenshots))}`} onEdit={() => setStep(4)} />
+              <SummaryRow label="Screenshots" value={form.screenshots === 'disabled' ? 'Off' : `On · ${setupApplicationCaptureTarget(form.applicationBaseUrl, form.applicationStartPath)}${form.applicationSignIn === 'yes' ? ` · ${setupAuth?.session ? 'sign-in saved' : reusedSignIn ? `sign-in from ${reusedSignIn.title}` : hasSetupCredentials ? 'test account' : 'without sign-in'}` : ''}`} onEdit={() => setStep(3)} />
+              <SummaryRow label="Audience" value={`${form.audiences.length ? form.audiences.join(', ') : 'Agent decides the audience'}${styleLabels(form.customInstructions).length ? ` · ${styleLabels(form.customInstructions).join(', ')}` : ''}`} onEdit={() => setStep(4)} />
+              <SummaryRow label="Reader goal" value={form.readerOutcome.trim() || DEFAULT_READER_OUTCOME} onEdit={() => setStep(4)} />
+            </div>
+          </section>
+          <div class="wizard-callout setup-review-ready"><span class="wizard-callout-icon"><Icon name="lock" size={18} /></span><div><strong>Nothing is written until you approve the plan.</strong><small>Planning takes several minutes and produces a plan you can edit before any page is generated.</small></div></div>
           {submitting && sources.some((source) => source.sourceLocation === 'git') && <Note>Downloading read-only repository snapshots and starting documentation planning…</Note>}
-          </>}
+        </>}
+
         {setupError?.step === step && <Note tone="bad">{setupError.message}</Note>}
         {error && <Note tone="bad">{error}</Note>}
-        <footer class="setup-actions setup-review-actions">
-          <div class="setup-review-progress"><strong>Step {step} of 5</strong><span>{[1, 2, 3, 4, 5].map((item) => <span class={item === step ? 'current' : item < step ? 'complete' : 'pending'} key={item}><i>{item <= step && <Icon name="check" size={10} />}</i>{item < 5 && <b />}</span>)}</span></div>
-          <div>{step > 1 && <Button class="setup-back-button" disabled={submitting} onClick={() => setStep((value) => value - 1)}>Back</Button>}
-            {step === 1 && mode === 'existing'
-              ? <span class="setup-existing-hint">Import above to open the folder's pages.</span>
-              : step < 5
-              ? <Button tone="primary" busy={validatingPaths} disabled={submitting} onClick={() => void continueSetup()}>Continue <Icon name="arrowRight" size={14} /></Button>
-              : <Button tone="primary" icon="sparkle" busy={submitting} onClick={() => void createDocumentation()}>Create documentation plan</Button>}
-          </div>
+        <footer class="wizard-footer setup-actions">
+          <span>{step > 1 && <Button tone="ghost" class="setup-back-button wizard-back" icon="arrowRight" disabled={submitting} onClick={() => setStep((value) => value - 1)}>Back</Button>}</span>
+          {step === 1 && mode === 'existing'
+            ? <span class="setup-existing-hint">Import above to open the folder's pages.</span>
+            : step < 5
+              ? <Button tone="primary" busy={validatingPaths} disabled={submitting} onClick={() => void continueSetup()}>Continue <Icon name="arrowRight" size={16} /></Button>
+              : <Button tone="primary" class="wizard-create" icon="sparkles" busy={submitting} onClick={() => void createDocumentation()}>Create documentation plan</Button>}
         </footer>
       </div>
-    </section>
+    </div>
   </div>
+}
+
+interface SavedSignIn { path: string; title: string; username?: string; session: boolean; loginPath?: string }
+
+const SETUP_STEPS = ['Workspace', 'Sources', 'Agent', 'Guidance', 'Review'] as const
+
+function SummaryRow({ label, value, onEdit }: { label: string; value: string; onEdit: () => void }) {
+  return <div class="vrow"><span class="vrow-label">{label}<small>{value}</small></span><span class="vrow-value"><Button tone="link" aria-label={`Edit ${label.toLowerCase()}`} onClick={onEdit}>Edit</Button></span></div>
 }
 
 const AUDIENCE_SUGGESTIONS = [
@@ -745,6 +947,11 @@ const INSTRUCTION_SUGGESTIONS = [
   ['Include examples', 'Include realistic examples for important workflows.'],
 ] as const
 
+function styleLabels(customInstructions: string): string[] {
+  const lines = customInstructions.split('\n').map((line) => line.trim())
+  return INSTRUCTION_SUGGESTIONS.filter(([, instruction]) => lines.includes(instruction)).map(([label]) => label.toLowerCase())
+}
+
 function DocumentationGuidance({ audiences, scope, readerOutcome, preferences, customInstructions, onAudiencesChange, onScopeChange, onReaderOutcomeChange, onPreferencesChange, onInstructionsChange }: {
   audiences: string[]
   scope: 'starter' | 'standard' | 'comprehensive'
@@ -758,8 +965,11 @@ function DocumentationGuidance({ audiences, scope, readerOutcome, preferences, c
   onInstructionsChange: (instructions: string) => void
 }) {
   const [audienceInput, setAudienceInput] = useState('')
+  // Picked audiences show as tokens in the field, so the suggestions only
+  // offer what is not chosen yet and the row never reflows under the pointer.
   const matchingSuggestions = AUDIENCE_SUGGESTIONS.filter((suggestion) =>
-    suggestion.toLowerCase().includes(audienceInput.trim().toLowerCase()),
+    suggestion.toLowerCase().includes(audienceInput.trim().toLowerCase()) &&
+    !audiences.some((item) => item.toLowerCase() === suggestion.toLowerCase()),
   )
   const addAudience = (value: string) => {
     const audience = value.trim().replace(/,$/, '').trim()
@@ -776,66 +986,61 @@ function DocumentationGuidance({ audiences, scope, readerOutcome, preferences, c
       ? audiences.filter((item) => item.toLowerCase() !== audience.toLowerCase())
       : [...audiences, audience])
   }
+  const instructionLines = customInstructions.split('\n').map((line) => line.trim())
   const toggleInstruction = (instruction: string) => {
-    const lines = customInstructions.split('\n').map((line) => line.trim()).filter(Boolean)
+    const lines = instructionLines.filter(Boolean)
     onInstructionsChange(lines.includes(instruction)
       ? lines.filter((line) => line !== instruction).join('\n')
       : [...lines, instruction].join('\n'))
   }
-  return <div class="setup-guidance-stage">
-    <SetupStepHeading visual="✍️" title="Guide your documentation" detail="Help the agent tailor the documentation to your readers and preferences." />
-    <div class="setup-guidance-card">
-      <section class="setup-guidance-section setup-coverage-guidance">
-        <div class="setup-guidance-label"><span><strong>What should readers be able to do?</strong></span></div>
-        <Input value={readerOutcome} placeholder="For example: Install the SDK, authenticate, and complete the primary workflows." onInput={(event) => onReaderOutcomeChange(event.currentTarget.value)} />
-        <div class="setup-guidance-label"><span><strong>Documentation depth</strong></span></div>
-        <div class="setup-scope-options" role="radiogroup" aria-label="Documentation depth">
-          {([
-            ['starter', 'Starter', 'First success path and essential reference'],
-            ['standard', 'Standard', 'Primary journeys, concepts, troubleshooting, and reference'],
-            ['comprehensive', 'Comprehensive', 'Every evidence-supported workflow, screen, and interface', 'Recommended'],
-          ] as const).map(([value, label, detail, badge]) => <button type="button" role="radio" aria-checked={scope === value} class={scope === value ? 'selected' : ''} onClick={() => onScopeChange(value)} key={value}><span><strong>{label}</strong><small>{detail}</small></span>{badge && <em>{badge}</em>}</button>)}
-        </div>
-      </section>
-      <section class="setup-guidance-section">
-        <div class="setup-guidance-label"><span><strong>Who is this documentation for?</strong></span><em>Optional</em></div>
-        <div class="audience-picker" onClick={(event) => (event.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
-          {audiences.map((audience) => <span class="audience-token" key={audience}>{audience}<button type="button" aria-label={`Remove ${audience}`} onClick={(event) => { event.stopPropagation(); toggleAudience(audience) }}><Icon name="close" size={11} /></button></span>)}
-          <input value={audienceInput} aria-label="Add an audience" placeholder={audiences.length ? 'Add another audience…' : 'Type an audience and press Enter…'} onInput={(event) => setAudienceInput(event.currentTarget.value)} onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ',') {
-              event.preventDefault()
-              addAudience(event.currentTarget.value)
-            } else if (event.key === 'Backspace' && !event.currentTarget.value && audiences.length) {
-              onAudiencesChange(audiences.slice(0, -1))
-            }
-          }} onBlur={() => addAudience(audienceInput)} />
-        </div>
-        <div class="guidance-suggestions" aria-label="Suggested audiences">
-          {matchingSuggestions.map((audience) => <button type="button" class={audiences.includes(audience) ? 'selected' : ''} aria-pressed={audiences.includes(audience)} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleAudience(audience)} key={audience}>{audiences.includes(audience) && <Icon name="check" size={11} />}{audience}</button>)}
-        </div>
-      </section>
-      <details class="setup-guidance-advanced">
-        <summary><span><strong>Advanced planning preferences</strong></span><Icon name="chevronDown" size={14} /></summary>
-        <div class="setup-guidance-advanced-fields">
-          <Field label="Reader experience"><Select value={preferences.experienceLevel} onChange={(event) => onPreferencesChange({ experienceLevel: event.currentTarget.value as SetupGuidancePreferences['experienceLevel'] })}><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option><option value="mixed">Mixed experience</option></Select></Field>
-          <Field label="Preferred examples" hint="Comma-separated languages or tools"><Input value={preferences.preferredExamples} placeholder="TypeScript, curl" onInput={(event) => onPreferencesChange({ preferredExamples: event.currentTarget.value })} /></Field>
-          <Field label="Locale"><Input value={preferences.locale} placeholder="en-US" onInput={(event) => onPreferencesChange({ locale: event.currentTarget.value })} /></Field>
-          <Field label="Accessibility target"><Input value={preferences.accessibilityTarget} placeholder="WCAG 2.2 AA" onInput={(event) => onPreferencesChange({ accessibilityTarget: event.currentTarget.value })} /></Field>
-          <Field label="Terminology" hint="One term = guidance per line"><Textarea rows={3} value={preferences.terminology} placeholder="access key = API access token" onInput={(event) => onPreferencesChange({ terminology: event.currentTarget.value })} /></Field>
-          <Field label="Exclusions" hint="Comma-separated"><Textarea rows={3} value={preferences.exclusions} placeholder="Internal APIs, unreleased features" onInput={(event) => onPreferencesChange({ exclusions: event.currentTarget.value })} /></Field>
-          <Field label="Design direction"><Textarea rows={3} value={preferences.designDirection} placeholder="Use the product brand and prioritize a compact developer-focused layout." onInput={(event) => onPreferencesChange({ designDirection: event.currentTarget.value })} /></Field>
-          <Field label="If the planner has questions"><Select value={preferences.clarificationMode} onChange={(event) => onPreferencesChange({ clarificationMode: event.currentTarget.value as SetupGuidancePreferences['clarificationMode'] })}><option value="review">Ask me in the review screen</option><option value="defaults">Use recommended defaults when possible</option><option value="stop">Stop and wait for explicit answers</option></Select></Field>
-        </div>
-      </details>
-      <section class="setup-guidance-section">
-        <div class="setup-guidance-label"><span><strong>Instructions</strong></span><em>Optional</em></div>
-        <Textarea rows={6} value={customInstructions} placeholder="For example: Use concise explanations, include TypeScript examples, and add troubleshooting sections." onInput={(event) => onInstructionsChange(event.currentTarget.value)} />
-        <div class="guidance-suggestions instruction-suggestions" aria-label="Suggested writing instructions">
-          {INSTRUCTION_SUGGESTIONS.map(([label, instruction]) => <button type="button" class={customInstructions.split('\n').map((line) => line.trim()).includes(instruction) ? 'selected' : ''} aria-pressed={customInstructions.split('\n').map((line) => line.trim()).includes(instruction)} onClick={() => toggleInstruction(instruction)} key={label}>{customInstructions.split('\n').map((line) => line.trim()).includes(instruction) && <Icon name="check" size={11} />}{label}</button>)}
-        </div>
-      </section>
+  return <>
+    <div class="wizard-group"><span class="field-label">Documentation depth</span>
+      <div class="radio-rows" role="radiogroup" aria-label="Documentation depth">
+        {([
+          ['starter', 'Starter', 'A quickstart and the essentials'],
+          ['standard', 'Standard', 'Guides for every main workflow, concepts and troubleshooting'],
+          ['comprehensive', 'Comprehensive', 'Every surface, reference included', 'Recommended'],
+        ] as const).map(([value, label, detail, badge]) => <button type="button" role="radio" aria-checked={scope === value} class={scope === value ? 'selected' : ''} onClick={() => onScopeChange(value)} key={value}><span><strong>{label}</strong><small>{detail}</small></span>{badge && <span class="badge teal no-dot">{badge}</span>}</button>)}
+      </div>
     </div>
-  </div>
+    <div class="wizard-group">
+      <span class="field-label">Who is this documentation for?<span class="field-hint" tabIndex={0} role="img" aria-label="Optional. Name the readers so the planner can choose the right depth and examples. Press Enter after each audience." data-hint="Optional. Name the readers so the planner can choose the right depth and examples. Press Enter after each audience."><Icon name="info" size={12} /></span></span>
+      <div class="audience-picker input" onClick={(event) => (event.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
+        {audiences.map((audience) => <span class="audience-token" key={audience}>{audience}<button type="button" aria-label={`Remove ${audience}`} onClick={(event) => { event.stopPropagation(); toggleAudience(audience) }}><Icon name="close" size={11} /></button></span>)}
+        <input value={audienceInput} aria-label="Add an audience" placeholder={audiences.length ? 'Add another audience…' : 'Backend developers evaluating the product for a new app'} onInput={(event) => setAudienceInput(event.currentTarget.value)} onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ',') {
+            event.preventDefault()
+            addAudience(event.currentTarget.value)
+          } else if (event.key === 'Backspace' && !event.currentTarget.value && audiences.length) {
+            onAudiencesChange(audiences.slice(0, -1))
+          }
+        }} onBlur={() => addAudience(audienceInput)} />
+      </div>
+      {matchingSuggestions.length > 0 && <div class="wizard-chips" aria-label="Suggested audiences">
+        {matchingSuggestions.map((audience) => <button type="button" class={`chip ${audiences.includes(audience) ? 'on' : ''}`} aria-pressed={audiences.includes(audience)} onMouseDown={(event) => event.preventDefault()} onClick={() => toggleAudience(audience)} key={audience}>{audiences.includes(audience) && <Icon name="check" size={14} />}{audience}</button>)}
+      </div>}
+    </div>
+    <div class="wizard-group"><span class="field-label">Style</span>
+      <div class="wizard-chips" aria-label="Suggested writing instructions">
+        {INSTRUCTION_SUGGESTIONS.map(([label, instruction]) => <button type="button" class={`chip ${instructionLines.includes(instruction) ? 'on' : ''}`} aria-pressed={instructionLines.includes(instruction)} onClick={() => toggleInstruction(instruction)} key={label}>{instructionLines.includes(instruction) && <Icon name="check" size={14} />}{label}</button>)}
+      </div>
+    </div>
+    <details class="wizard-advanced setup-guidance-advanced">
+      <summary><span><strong>Advanced planning preferences</strong><small>Reader experience, locale, terminology, exclusions, open-question policy</small></span><Icon name="chevronDown" size={16} /></summary>
+      <div class="wizard-advanced-fields">
+        <Field label="What should readers be able to do?" hint="The outcomes the documentation must make possible. Leave it empty to use the default shown."><Input value={readerOutcome} placeholder={DEFAULT_READER_OUTCOME} onInput={(event) => onReaderOutcomeChange(event.currentTarget.value)} /></Field>
+        <Field label="Reader experience"><Select value={preferences.experienceLevel} onChange={(event) => onPreferencesChange({ experienceLevel: event.currentTarget.value as SetupGuidancePreferences['experienceLevel'] })}><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option><option value="mixed">Mixed experience</option></Select></Field>
+        <Field label="Preferred examples" hint="Comma-separated languages or tools"><Input value={preferences.preferredExamples} placeholder="TypeScript, curl" onInput={(event) => onPreferencesChange({ preferredExamples: event.currentTarget.value })} /></Field>
+        <Field label="Locale"><Input value={preferences.locale} placeholder="en-US" onInput={(event) => onPreferencesChange({ locale: event.currentTarget.value })} /></Field>
+        <Field label="Accessibility target"><Input value={preferences.accessibilityTarget} placeholder="WCAG 2.2 AA" onInput={(event) => onPreferencesChange({ accessibilityTarget: event.currentTarget.value })} /></Field>
+        <Field label="Terminology" hint="One term = guidance per line"><Textarea rows={3} value={preferences.terminology} placeholder="access key = API access token" onInput={(event) => onPreferencesChange({ terminology: event.currentTarget.value })} /></Field>
+        <Field label="Exclusions" hint="Comma-separated"><Textarea rows={3} value={preferences.exclusions} placeholder="Internal APIs, unreleased features" onInput={(event) => onPreferencesChange({ exclusions: event.currentTarget.value })} /></Field>
+        <Field label="Design direction"><Textarea rows={3} value={preferences.designDirection} placeholder="Use the product brand and prioritize a compact developer-focused layout." onInput={(event) => onPreferencesChange({ designDirection: event.currentTarget.value })} /></Field>
+        <Field label="If the planner has questions"><Select value={preferences.clarificationMode} onChange={(event) => onPreferencesChange({ clarificationMode: event.currentTarget.value as SetupGuidancePreferences['clarificationMode'] })}><option value="review">Ask me in the review screen</option><option value="defaults">Use recommended defaults when possible</option><option value="stop">Stop and wait for explicit answers</option></Select></Field>
+        <Field label="Custom instructions" hint="Free-form guidance for the writer. Style choices above are kept here as lines."><Textarea rows={5} value={customInstructions} placeholder="For example: Use concise explanations, include TypeScript examples, and add troubleshooting sections." onInput={(event) => onInstructionsChange(event.currentTarget.value)} /></Field>
+      </div>
+    </details>
+  </>
 }
 
 function scopeLabel(scope: 'starter' | 'standard' | 'comprehensive'): string {
@@ -854,14 +1059,6 @@ function parseSetupTerminology(value: string): Record<string, string> {
     const guidance = line.slice(separator + 1).trim()
     return term && guidance ? [[term, guidance]] : []
   }))
-}
-
-function ReviewSummaryRow({ icon, label, trailing, children }: { icon: string; label: string; trailing?: ComponentChildren; children: ComponentChildren }) {
-  return <div class="review-summary-row"><span class="review-summary-icon"><Icon name={icon} size={20} /></span><span class="review-summary-label">{label}</span><span class="review-summary-value">{children}</span>{trailing && <span class="review-summary-trailing">{trailing}</span>}</div>
-}
-
-function SetupStepHeading({ visual, title, detail }: { visual: string; title: string; detail: string }) {
-  return <div class="setup-step-heading"><span class="setup-heading-visual" aria-hidden="true">{visual}</span><div><h3>{title}</h3><p>{detail}</p></div></div>
 }
 
 function ValidatedSetupInput({ value, valid, invalid, onInput }: { value: string; valid: boolean; invalid?: boolean; onInput: (value: string) => void }) {

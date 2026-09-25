@@ -139,8 +139,8 @@ and the documentation project is still unchanged.
    Accept one change, one file, or everything, or ask the agent to revise a
    specific file.
 2. Choose **Preview docs** in the top bar to open the rendered site locally.
-3. Open **Deploy**, sign in with your browser, run a **Dry run** if you want to
-   validate and build without uploading, and choose **Deploy to Doxbrix**.
+3. Open **Publish**, sign in to Doxbrix once from your browser, choose who can
+   read the site, and choose **Publish to Doxbrix**.
 
 Your source and docs remain separate:
 
@@ -210,12 +210,12 @@ left navigation shows:
 
 | Page | What you do there |
 | --- | --- |
-| **Overview** | Follow the loop from sources through plan, write, review, and deploy. See what needs your review, overall coverage, the published address, and recent activity. |
+| **Home** | Follow the loop from sources through plan, write, review, and publish. See what needs your review, overall coverage, the published address, and recent activity. Press ⌘K to search pages, screens, and actions from anywhere. |
 | **Sources** | Connect and test local folders, Git repositories, OpenAPI specifications, and existing documentation sites. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
-| **Create** or **Update** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
-| **Pages** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
+| **Plan** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
+| **Docs** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
 | **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, ask the agent to revise, and optionally prepare a pull request branch. |
-| **Deploy** | Export a static folder/zip or publish to Doxbrix, GitHub Pages, Netlify, or Vercel, with target-specific settings and **Deployment history**. |
+| **Publish** | Publish to Doxbrix: a pre-publish checklist, public or private access, the live site with its address, changes waiting since the last publish, and **History**. |
 | **Settings** | Change the site title, default agent, audience and voice, terminology and the generated glossary, application screenshot settings, branding (logo, colours, fonts), and see the active generator. |
 
 **Preview docs** in the top bar starts a local preview of the current
@@ -402,8 +402,8 @@ only the selected changes and keeps the proposal pending. Rejected proposals
 never change the documentation.
 
 Doxloop also keeps a local record of what it was asked to do and what happened.
-**Update history** on the Create and Update pages lists each request, its
-outcome, and the pages it touched. **Deployment history** on the Deploy page
+**Update history** on the Plan page lists each request, its
+outcome, and the pages it touched. **Deployment history** on the Publish page
 lists every deployment, including the ones that failed. The record lives in
 `.doxloop/doxloop.db`, which is added to `.gitignore` automatically and is
 readable only by its owner. Agent transcripts are not recorded.
@@ -415,17 +415,17 @@ depth every time it creates a proposal, and again before every dry run and
 deployment. Validation errors stop a deployment; warnings are reported.
 
 Choose **Preview docs** at any time to open the local site. Then open
-**Deploy**:
+**Publish**:
 
-1. Select Doxbrix, GitHub Pages, Netlify, or Vercel and save its settings.
-   Netlify and Vercel tokens are stored outside the project; GitHub Pages uses
-   the repository's existing `origin` remote.
-2. Choose **Dry run** to validate, build, and leave a timestamped zip in
-   `.doxloop/exports` without uploading.
-3. Choose **Export folder + zip** for self-hosting, or deploy to the selected
-   target. Doxbrix deployments can be private or public.
+1. Sign in to Doxbrix once. Doxloop opens your browser, you approve the code it
+   shows, and the session stays on this computer.
+2. Check **Ready to publish**: validation, and whether changes still wait in
+   **Review**. A check that fails keeps the publish button disabled.
+3. Choose who can read the site, **Public** or **Private**, and choose
+   **Publish to Doxbrix**. Doxloop validates, builds, and uploads; the site is
+   usually live in under a minute, and **Publish changes** sends later edits.
 
-The same export is available from the command line:
+To self-host instead of using Doxbrix, export a static site from the command line:
 
 ```bash
 doxloop export --out ./site-export --zip

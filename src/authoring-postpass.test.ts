@@ -173,17 +173,17 @@ describe('authoring post-pass', () => {
     expect(report.repairs).toContain('docs.json: removed space "Contributing" because no page was written for it.')
   })
 
-  test('nests section groups under the area group the page path names and prunes area groups left empty', async () => {
+  test('turns the plan areas into spaces when the writer laid them out as groups in the one starter space', async () => {
     const root = await scaffold()
     await write(root, 'self-hosting/docker.mdx', '---\ntitle: "Docker"\ndescription: "Run it."\n---\n\n# Docker\n')
     await write(root, 'self-hosting/backups.mdx', '---\ntitle: "Backups"\ndescription: "Keep it."\n---\n\n# Backups\n')
     await write(root, 'api/webhooks.mdx', '---\ntitle: "Webhooks"\ndescription: "Call out."\n---\n\n# Webhooks\n')
     const config = await siteConfig(root)
-    // The writer laid the plan's top-level areas out as groups in one space and left them empty.
+    const starterNav = structuredClone(config.spaces[0]!.nav)
+    // The first batch laid the plan's top-level areas out as groups in one space.
     config.spaces[0]!.nav.push(
       { type: 'group', label: 'Self-hosting', items: [] },
       { type: 'group', label: 'API & integrations', items: [] },
-      { type: 'group', label: 'Contributing', items: [] },
     )
     await writeFile(join(root, 'docs.json'), `${JSON.stringify(config, null, 2)}\n`)
     const documentationPlan = plan([
@@ -193,34 +193,25 @@ describe('authoring post-pass', () => {
     ], [
       { id: 'install', title: 'Install & upgrade', pageIds: ['docker'] },
       { id: 'self-hosting', title: 'Self-hosting', pageIds: ['backups'] },
-      // No section names the webhooks page: its path's first segment picks the area group.
+      // No section names the webhooks page: its path's first segment picks the space.
     ])
     documentationPlan.navigation.top = ['Guides', 'Self-hosting', 'API & Integrations']
 
-    const interim = await run(root, documentationPlan)
-    let nav = (await siteConfig(root)).spaces[0]!.nav
-    expect(group(nav, 'Self-hosting')).toEqual({
-      type: 'group',
-      label: 'Self-hosting',
-      items: [
-        { type: 'group', label: 'Install & upgrade', items: [{ type: 'page', file: 'self-hosting/docker', title: 'Docker' }] },
-        { type: 'page', file: 'self-hosting/backups', title: 'Backups' },
-      ],
-    })
-    expect(group(nav, 'API & integrations')!.items).toEqual([{ type: 'page', file: 'api/webhooks', title: 'Webhooks' }])
-    expect(group(nav, 'Install & upgrade')).toBeUndefined()
-    expect(interim.repairs).toEqual(expect.arrayContaining([
-      'docs.json: created navigation group "Install & upgrade" under "Self-hosting" in space "Documentation".',
-      'docs.json: added "self-hosting/docker" to group "Install & upgrade".',
-      'docs.json: added "self-hosting/backups" to group "Self-hosting".',
-      'docs.json: added "api/webhooks" to group "API & integrations".',
-    ]))
-    // Between batches the empty area stays; at the end of the run it goes.
-    expect(group(nav, 'Contributing')).toBeDefined()
-    const report = await run(root, documentationPlan, documentationPlan.pages, { pruneEmptySpaces: true })
-    nav = (await siteConfig(root)).spaces[0]!.nav
-    expect(group(nav, 'Contributing')).toBeUndefined()
-    expect(report.repairs).toContain('docs.json: removed empty navigation group "Contributing" from space "Documentation".')
+    const report = await run(root, documentationPlan)
+    const saved = await siteConfig(root)
+    // Areas become spaces in the plan's order; the starter content opens the
+    // first area, so no stray "Documentation" space is left beside them.
+    expect(saved.spaces.map((space) => space.name)).toEqual(['Guides', 'Self-hosting', 'API & Integrations'])
+    expect(saved.spaces[0]!.nav).toEqual(starterNav)
+    expect(saved.spaces[1]!.nav).toEqual([
+      { type: 'group', label: 'Install & upgrade', items: [{ type: 'page', file: 'self-hosting/docker', title: 'Docker' }] },
+      { type: 'page', file: 'self-hosting/backups', title: 'Backups' },
+    ])
+    expect(saved.spaces[2]!.nav).toEqual([{ type: 'page', file: 'api/webhooks', title: 'Webhooks' }])
+    expect(report.repairs[0]).toContain('split the navigation into 3 spaces from the plan')
+    // Once there are several spaces the layout is left as it is.
+    const again = await run(root, documentationPlan)
+    expect(again.repairs.filter((repair) => repair.includes('split the navigation'))).toEqual([])
   })
 
   test('a planned page written over a starter file is found there and linked by the file that exists', async () => {
@@ -469,6 +460,36 @@ describe('authoring post-pass', () => {
     expect(group(administration!.nav, 'Configure the instance')!.items).toHaveLength(2)
     expect(group(api!.nav, 'APIs')).toBeDefined()
     expect(group(api!.nav, 'Integrations')).toBeDefined()
+  })
+
+  test('the end-of-run pass moves planned pages out of a leftover starter space into their planned spaces', async () => {
+    const root = await scaffold()
+    const config = await siteConfig(root)
+    // The writer nested the plan's first section inside the starter space's "Get started" group.
+    config.spaces = [
+      { name: 'Documentation', slug: 'docs', nav: [{ type: 'group', label: 'Get started', items: [{ type: 'group', label: 'Create', items: [{ type: 'page', file: 'guides', title: 'Overview' }, { type: 'page', file: 'guides/draw', title: 'Draw' }] }] }] },
+      { name: 'Guides', slug: 'guides', nav: [{ type: 'group', label: 'Share', items: [{ type: 'page', file: 'guides/export', title: 'Export' }] }] },
+      { name: 'Embed', slug: 'embed', nav: [{ type: 'page', file: 'embed/react', title: 'React' }] },
+    ]
+    await writeFile(join(root, 'docs.json'), `${JSON.stringify(config, null, 2)}\n`)
+    for (const file of ['guides', 'guides/draw', 'guides/export', 'embed/react']) await write(root, `${file}.mdx`, `---\ntitle: "${file}"\ndescription: "Page."\n---\n\n# Page\n`)
+    const documentationPlan = plan([
+      page({ id: 'overview', path: 'guides', title: 'Overview' }),
+      page({ id: 'draw', path: 'guides/draw', title: 'Draw' }),
+      page({ id: 'export', path: 'guides/export', title: 'Export' }),
+      page({ id: 'react', path: 'embed/react', title: 'React' }),
+    ], [
+      { id: 'start', title: 'Start and create', pageIds: ['overview', 'draw'], space: 'Guides' },
+      { id: 'share', title: 'Share', pageIds: ['export'], space: 'Guides' },
+      { id: 'embed', title: 'Embed', pageIds: ['react'], space: 'Embed' },
+    ] as Array<{ id: string; title: string; pageIds: string[] }>)
+    documentationPlan.navigation.top = ['Guides', 'Embed']
+    await run(root, documentationPlan, documentationPlan.pages, { pruneEmptySpaces: true })
+    const saved = await siteConfig(root)
+    expect(saved.spaces.map((space) => space.name)).toEqual(['Guides', 'Embed'])
+    expect(group(saved.spaces[0]!.nav, 'Start and create')!.items!.map((item) => (item as { file: string }).file)).toEqual(['guides', 'guides/draw'])
+    // The plan lists "Start and create" first, so it opens the space.
+    expect(saved.spaces[0]!.nav.map((node) => (node as { label?: string }).label)).toEqual(['Start and create', 'Share'])
   })
 
   test('the end-of-run pass merges a plan section split across spaces and drops empty groups', async () => {

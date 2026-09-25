@@ -733,7 +733,8 @@ async function recoverSyncRunLocked(root: string, id: string, options: RecoverSy
       ...(options.ignoreScreenshotProblems ? { tolerateScreenshotDefects: true } : {}),
       label: options.repair ? 'repaired' : 'recovered',
     })
-    const { error: _previousError, recovery: _recovery, ...cleanRun } = run
+    // Advisories are rebuilt below from the repaired workspace; an empty result must not keep the old list.
+    const { error: _previousError, recovery: _recovery, advisories: _previousAdvisories, ...cleanRun } = run
     const next: SyncRun = {
       ...cleanRun,
       status: 'awaiting-review',
@@ -743,7 +744,7 @@ async function recoverSyncRunLocked(root: string, id: string, options: RecoverSy
       validation: finalized.validation,
       screenshots: finalized.screenshots,
       sourceSnapshot: currentSnapshot,
-      ...withAdvisories(withAdvisoryRun(run, sourcesChanged ? SOURCES_CHANGED_RECOVERED : undefined), finalized.advisories),
+      ...withAdvisories(withAdvisoryRun(run, sourcesChanged ? SOURCES_CHANGED_RECOVERED : undefined), finalized.advisories, true),
       undo: { status: 'unavailable', reason: 'Undo becomes available after the complete proposal is applied.' },
     }
     await writeRun(root, next)
@@ -771,8 +772,17 @@ const LEGACY_STALE_SOURCE_ERROR = 'Configured source evidence changed after this
 function withAdvisory(run: SyncRun, advisory: string | undefined): { advisories?: string[] } {
   return withAdvisories(run, advisory ? [advisory] : [])
 }
-function withAdvisories(run: Pick<SyncRun, 'advisories'>, notes: string[]): { advisories?: string[] } {
-  const advisories = [...(run.advisories ?? [])]
+/**
+ * Notes the finalize step writes from the workspace as it is now. A repair
+ * recomputes them, so earlier copies are dropped rather than kept as stale
+ * claims about a workspace that has since changed.
+ */
+function isFinalizeAdvisory(note: string): boolean {
+  return /^Repaired before review: |validation errors? remains? in this proposal|was modified although the plan did not name it|^Outside the approved plan|; the approved batch allows /.test(note)
+}
+
+function withAdvisories(run: Pick<SyncRun, 'advisories'>, notes: string[], replaceFinalize = false): { advisories?: string[] } {
+  const advisories = (run.advisories ?? []).filter((note) => !(replaceFinalize && isFinalizeAdvisory(note)))
   for (const note of notes) if (note && !advisories.includes(note)) advisories.push(note)
   return advisories.length > 0 ? { advisories } : {}
 }
@@ -2278,6 +2288,25 @@ function normalizeSyncRun(raw: unknown, id: string): { run?: SyncRun; migrated: 
 
 function validRationale(value: unknown): value is SyncFileChange['rationale'] {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { reason?: unknown }).reason === 'string')
+}
+
+/**
+ * A run left at "generating" by a process that is gone (cancelled, killed, or
+ * the UI server restarted) is marked failed so Review offers Resume instead
+ * of showing it as still being written. Only runs created after `since`
+ * are touched, so an older interrupted run keeps whatever it recorded.
+ */
+export async function markInterruptedSyncRuns(root: string, since: string, message: string): Promise<string[]> {
+  const marked: string[] = []
+  const floor = Date.parse(since) - 5_000
+  for (const run of await listSyncRuns(root)) {
+    if (run.status !== 'generating' || Date.parse(run.createdAt) < floor) continue
+    const failed: SyncRun = { ...run, status: 'failed', error: message, completedAt: new Date().toISOString() }
+    await writeRun(root, failed)
+    await recordSyncRun(root, failed).catch(() => undefined)
+    marked.push(run.id)
+  }
+  return marked
 }
 
 async function writeRun(root: string, run: SyncRun): Promise<void> {

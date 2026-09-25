@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { batchLimits, defaultBatchLimits } from '../../src/batch-limits.js'
-import { batchLimitsForScope, describeBatchLimits, preferredSetupAgent, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileIssue, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupDraftSnapshot, setupStepIssue } from './setup-plan'
+import { relativeSignInRoute, batchLimitsForScope, describeBatchLimits, preferredSetupAgent, screenshotIntentFromChoice, setupApplicationCaptureTarget, setupCaptureProfileIssue, setupCaptureProfileStatus, setupDocumentationPlanRequest, setupDraftSnapshot, setupStepIssue } from './setup-plan'
 
 describe('setupDocumentationPlanRequest', () => {
   it('turns an explicit Yes into required screenshots', () => {
@@ -195,4 +195,23 @@ describe('setup limit compatibility', () => {
       expect(batchLimits(limits)).toEqual(batchLimitsForScope(scope, screenshots))
     })
   }
+})
+
+describe('setupApplicationCaptureTarget with hash routes', () => {
+  it('keeps the document of a hash-routed app and routes in the fragment', () => {
+    expect(setupApplicationCaptureTarget('https://pocketbase.io/_/#', '/')).toBe('https://pocketbase.io/_/#/')
+    expect(setupApplicationCaptureTarget('https://pocketbase.io/_/#/', '/collections')).toBe('https://pocketbase.io/_/#/collections')
+  })
+  it('joins plain paths for path-routed apps', () => {
+    expect(setupApplicationCaptureTarget('http://localhost:3000', '/settings')).toBe('http://localhost:3000/settings')
+  })
+})
+
+describe('relativeSignInRoute', () => {
+  it('reads a hash-routed sign-in page relative to the application address', () => {
+    expect(relativeSignInRoute('https://pocketbase.io/_/#', '/_/#/login')).toBe('/login')
+    expect(relativeSignInRoute('https://pocketbase.io/_/#/', '/_/#/login')).toBe('/login')
+    expect(relativeSignInRoute('https://app.example.com', '/login')).toBe('/login')
+    expect(relativeSignInRoute('https://example.com/app', '/app/sign-in')).toBe('/sign-in')
+  })
 })

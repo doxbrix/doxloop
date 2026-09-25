@@ -293,6 +293,11 @@ function stepOrdinal(value: string): number | undefined {
  * Repeats are collapsed within a guide only. Two guides showing the same screen
  * is ordinary documentation and is left alone.
  */
+/** Whether any other manifest step, in any guide, still uses this image file. */
+function fileUsedByOtherSteps(manifest: ScreenshotManifest, self: ScreenshotManifestStep, file: string): boolean {
+  return manifest.guides.some((guide) => Array.isArray(guide?.steps) && guide.steps.some((step) => step !== self && step?.file === file && step.status === 'verified'))
+}
+
 export async function collapseDuplicateCaptures(
   workspace: string,
   plan: DocumentationPlan | undefined,
@@ -326,12 +331,17 @@ export async function collapseDuplicateCaptures(
         continue
       }
       const file = step.file
-      if (pagePath) {
-        const content = await readFile(pagePath, 'utf8')
-        const stripped = removeImageReference(content, file)
-        if (stripped !== content) await writeFile(pagePath, stripped, 'utf8')
+      // Steps can point at one shared file (a planning capture reused by
+      // several steps and guides). Removing or quarantining it would break
+      // the step that keeps it, so a same-file repeat only becomes text-only.
+      if (file !== original) {
+        if (pagePath) {
+          const content = await readFile(pagePath, 'utf8')
+          const stripped = removeImageReference(content, file)
+          if (stripped !== content) await writeFile(pagePath, stripped, 'utf8')
+        }
+        if (!fileUsedByOtherSteps(manifest, step, file)) await quarantineImage(workspace, file)
       }
-      await quarantineImage(workspace, file)
       step.capture = false
       step.status = 'text-only'
       step.textOnlyReason = `This step shows the same screen as "${original}", so it adds no new image.`
@@ -400,14 +410,22 @@ export async function embedMissingCaptures(
     if (!pagePath) continue
     let content = await readFile(pagePath, 'utf8')
     const captures = guide.steps.filter((step) => step.capture && step.status === 'verified' && step.file)
+    // The same screen saved under another name is already on the page.
+    const shown = await pageImageHashes(workspace, content)
     for (const [order, step] of captures.entries()) {
       const file = step.file!.replaceAll('\\', '/')
       const basename = file.split('/').at(-1)!
       if (content.includes(file) || content.includes(basename)) continue
-      if (!(await pathExists(safeWorkspacePath(workspace, file)))) continue
+      const absolute = safeWorkspacePath(workspace, file)
+      if (!(await pathExists(absolute))) continue
+      const hash = await fileHash(absolute)
+      if (hash && shown.has(hash)) continue
       const reference = imageReference(content, file)
       const image = `![${(step.alt ?? step.expectedState ?? basename).replaceAll(']', ')')}](${reference})`
-      content = insertIntoStep(content, image, order)
+      const next = insertIntoStep(content, image, order)
+      if (next === undefined) continue
+      content = next
+      if (hash) shown.add(hash)
       embedded.push(step.file!)
     }
     if (embedded.length > 0) await writeFile(pagePath, content, 'utf8')
@@ -420,12 +438,37 @@ function imageReference(content: string, file: string): string {
   return /\]\(\/assets|\]\(\/img|\]\(\/images|\]\(\/_static|\]\(\//.test(content) ? `/${file}` : file
 }
 
-/** Insert inside the nth `<Step>` body, or append when there is no step markup. */
-function insertIntoStep(content: string, image: string, order: number): string {
+/**
+ * Insert inside the nth `<Step>` body, or append when there is no step markup.
+ * A step that already shows an image is left alone: a second, unrelated
+ * screen under text that describes the first misleads the reader.
+ */
+function insertIntoStep(content: string, image: string, order: number): string | undefined {
   const closes = [...content.matchAll(/\n?[ \t]*<\/Step>/g)]
   const target = closes[order]
   if (!target || target.index === undefined) return `${content.trimEnd()}\n\n${image}\n`
+  const opening = content.lastIndexOf('<Step', target.index)
+  const body = opening >= 0 ? content.slice(opening, target.index) : ''
+  if (/!\[[^\]]*\]\(|<img\b/.test(body)) return undefined
   return `${content.slice(0, target.index)}\n\n${image}\n${content.slice(target.index)}`
+}
+
+async function fileHash(path: string): Promise<string | undefined> {
+  try { return createHash('sha256').update(await readFile(path)).digest('hex') } catch { return undefined }
+}
+
+/** Content hashes of the images a page already shows, resolved inside the workspace. */
+async function pageImageHashes(workspace: string, content: string): Promise<Set<string>> {
+  const hashes = new Set<string>()
+  for (const match of content.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)|<img[^>]*\ssrc=["']([^"']+)["']/g)) {
+    const target = (match[1] ?? match[2] ?? '').replace(/^\/+/, '')
+    if (!target || /^[a-z]+:/i.test(target)) continue
+    try {
+      const hash = await fileHash(safeWorkspacePath(workspace, target))
+      if (hash) hashes.add(hash)
+    } catch { /* an unsafe or missing path is simply not counted */ }
+  }
+  return hashes
 }
 
 async function guidePagePath(
@@ -723,7 +766,7 @@ export async function validateScreenshotManifest(
         if (stripped !== content) await writeFile(pagePath, stripped, 'utf8')
       }
     }
-    if (file && removeImage) {
+    if (file && removeImage && !(Array.isArray(manifest.guides) && fileUsedByOtherSteps(manifest, step, file))) {
       try {
         await quarantineImage(workspace, file)
       } catch {
@@ -926,7 +969,7 @@ export async function validateScreenshotManifest(
     }
     // One guide that photographed the same screen several times never advanced
     // its workflow, so the extra images document nothing.
-    const guideRepeats = [...guideHashes.values()].filter((files) => files.length > 1)
+    const guideRepeats = [...guideHashes.values()].map((files) => [...new Set(files)]).filter((files) => files.length > 1)
     if (guideRepeats.length > 0) {
       const groups = guideRepeats.map((files) => files.join(' = ')).join('; ')
       defects.push(`Guide "${guide.page}" photographed the same screen more than once: ${groups}. Keep one image of that screen and record the other steps as text-only, or reach the states those steps name.`)
@@ -952,7 +995,8 @@ export async function validateScreenshotManifest(
   // Two guides sharing a screen is normal documentation — a tour page and the
   // reference page for that screen show the same thing — so this is reported
   // for the reviewer rather than failing a run that did the work.
-  const duplicates = [...hashes.values()].filter((files) => files.length > 1)
+  // One file placed in two guides is one screenshot, not a repeat of itself.
+  const duplicates = [...hashes.values()].map((files) => [...new Set(files)]).filter((files) => files.length > 1)
   const repeated = duplicates.reduce((count, files) => count + files.length - 1, 0)
   if (duplicates.length > 0) {
     const groups = duplicates.map((files) => files.join(' = ')).join('; ')

@@ -405,6 +405,17 @@ async function runSyncNowLocked(options: RunSyncOptions): Promise<number> {
   }
 
   write(`${formatDrift(drift)}\n`)
+  // Without a baseline (no documentation generated or accepted yet) nothing
+  // can be stale, so drafting an update would only spend agent time. Report
+  // it; the first accepted update records the baseline.
+  if (drift.status === 'unknown' && drift.pages.length === 0 && !options.authoring) {
+    const message = drift.notes.some((note) => /no sync baseline/i.test(note))
+      ? 'No documentation has been generated or accepted from these sources yet, so there is nothing to compare. Generate the documentation from the plan first.'
+      : drift.notes[0] ?? 'Doxloop could not determine whether the documentation is current.'
+    await appendSyncLog(root, `check: drift unknown, no update drafted`)
+    outcome('unknown', message)
+    return 1
+  }
   if (project.sync.mode === 'check' && !options.authoring) {
     await appendSyncLog(root, `check: ${pageCount(drift.pages.length)}, reporting only`)
     if (drift.status === 'stale') outcome('stale', `${pageCount(drift.pages.length)} · monitoring is in check mode, so no proposal was drafted.`)

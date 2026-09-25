@@ -1,0 +1,215 @@
+/**
+ * Page frame — the one place that decides how wide a screen is.
+ *
+ * Loaded after every other stylesheet. Older layers set page widths per route
+ * (1040, 1120, 1280, none) with `:has()` selectors of varying specificity, so
+ * the frame rules here are marked !important on purpose: every workspace
+ * screen, including focus mode, sits in the same centred 1200px column with
+ * the same gutters. Screen layers must not set .page widths.
+ */
+
+:root { --page-width: 1200px; --page-gutter: 40px; }
+
+.shell:has(.reference-sidebar-nav) .workspace-main .page {
+  width: 100% !important;
+  max-width: calc(var(--page-width) + 2 * var(--page-gutter)) !important;
+  margin: 0 auto !important;
+  padding: 32px var(--page-gutter) 64px !important;
+  box-sizing: border-box;
+  background: transparent !important;
+}
+
+/* Screen wrappers fill the frame instead of choosing their own width. */
+.shell:has(.reference-sidebar-nav) .workspace-main .page > :is(.authoring-page, .publish-page, .settings, .overview-page, .sources-page, .pages-page, .proposals-page, .sync-page) {
+  width: 100% !important;
+  max-width: none !important;
+  margin-inline: 0 !important;
+}
+
+@media (max-width: 760px) {
+  :root { --page-gutter: 16px; }
+  .shell:has(.reference-sidebar-nav) .workspace-main .page { padding-top: 20px !important; padding-bottom: 48px !important; }
+}
+
+/* ── Fixes from the first review ─────────────────────────────────────── */
+
+/* Home rail: only the first span is the stage circle; the copy is plain text. */
+.pipeline-card button > span.pipeline-copy {
+  width: auto; height: auto; display: grid; place-items: initial; border: 0; border-radius: 0;
+  background: transparent; color: inherit; animation: none;
+}
+.pipeline-card button.done > span.pipeline-copy { background: transparent; color: inherit; }
+.pipeline-card button.active > span.pipeline-copy { border: 0; background: transparent; }
+.pipeline-card button.active > span.pipeline-copy::after { content: none; }
+.pipeline-card button > span.pipeline-copy strong { color: var(--ink); }
+.pipeline-card button.idle > span.pipeline-copy strong { color: var(--muted); }
+
+/* Home metric: long URLs stay on one line. */
+.ov-metric-copy code { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; overflow-wrap: normal; }
+
+/* Radio rows: a trailing badge sits at the right edge, not mid-row. */
+.radio-rows > * > span.badge { flex: 0 0 auto; margin-left: auto; }
+
+/* Docs: the page title wraps by word and the actions keep their own line when space runs out. */
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .page-detail-header { flex-wrap: wrap; row-gap: 12px; }
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .page-detail-copy { flex: 1 1 320px; min-width: 0; }
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .page-detail-title { flex-wrap: wrap; }
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .page-detail-title h2 { overflow-wrap: normal; word-break: normal; hyphens: none; }
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .page-detail-actions { flex: 0 0 auto; flex-wrap: nowrap; }
+
+/* Reserve the scrollbar's space so short and long screens line up exactly. */
+html, .shell:has(.reference-sidebar-nav) .main, .shell:has(.reference-sidebar-nav) .workspace-main { scrollbar-gutter: stable; }
+
+/* A teal badge on a selected (teal-tinted) row gets a white chip so it stays visible. */
+.radio-rows > :is(.selected, [aria-checked="true"], [aria-pressed="true"], .active) .badge.teal { background: #fff; box-shadow: 0 0 0 1px var(--brand-tint); }
+
+/* Indeterminate progress: a moving segment when the run cannot say how far along it is. */
+.progress.indeterminate { position: relative; }
+.progress.indeterminate > i { position: absolute; left: 0; width: 30% !important; animation: progress-slide 1.4s ease-in-out infinite; }
+@keyframes progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .progress.indeterminate > i { animation: none; width: 100% !important; opacity: .35; } }
+
+/* Folded image list inside a screenshot note. */
+.screenshot-message-paths { margin-top: 6px; }
+.screenshot-message-paths summary { cursor: pointer; color: var(--brand); font-weight: 500; }
+.screenshot-message-paths ul { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+.screenshot-message-paths code { font-size: 12px; }
+
+/* Docs: a wider explorer so page titles read in full more often. */
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .pages-workbench,
+.shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages.navigation-open .pages-workbench { grid-template-columns: 320px minmax(0, 1fr); }
+/* Below 1050px the explorer folds behind the "Pages" button and the card takes the full width. */
+@media (min-width: 1051px) and (max-width: 1100px) {
+  .shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .pages-workbench,
+  .shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages.navigation-open .pages-workbench { grid-template-columns: 260px minmax(0, 1fr); }
+}
+
+/* Coverage dialog: one reason for several internal gaps, on the footer line. */
+.coverage-bulk-internal { display: inline-flex; align-items: center; gap: 8px; }
+.coverage-bulk-internal .input { width: 280px; }
+
+/* The sidebar is a drawer only on phones (≤760px), where the menu button
+   opens it. An older layer turned it into a hidden drawer below 900px while
+   the menu button only appeared below 760px, so between the two the left
+   panel was simply gone. Above 760px it always stays in place. */
+@media (min-width: 761px) {
+  .shell:has(.reference-sidebar-nav) .sidebar {
+    position: sticky !important;
+    top: 0;
+    inset: auto;
+    height: 100vh;
+    width: var(--sidebar-width);
+    transform: none !important;
+    box-shadow: none !important;
+  }
+  .shell:has(.reference-sidebar-nav) .nav-scrim { display: none !important; }
+  .shell:has(.reference-sidebar-nav) .workspace-mobile-menu,
+  .shell:has(.reference-sidebar-nav) .sidebar-close { display: none !important; }
+}
+@media (min-width: 761px) and (max-width: 1024px) {
+  :root { --sidebar-width: 208px; --page-gutter: 24px; }
+}
+@media (max-width: 1050px) {
+  .shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages .pages-workbench,
+  .shell:has(.reference-sidebar-nav) .pages-page.preview-first-pages.navigation-open .pages-workbench { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Docs-site crawl that read almost no text: a warning, not a success. */
+.docs-site-summary.thin { border-color: #f3d9a4 !important; background: var(--warn-soft) !important; }
+.docs-site-summary.thin .docs-site-summary-icon { color: var(--warn) !important; background: #fff !important; }
+.docs-site-thin-note { margin: 8px 0 0; color: var(--warn); font-size: 13px; line-height: 19px; }
+
+/* Run activity in plain words, above the technical log. */
+.pl-activity-summary { display: grid; gap: 8px; margin: 12px 20px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.pl-activity-summary p { display: grid; gap: 2px; margin: 0; color: var(--text); font-size: 13.5px; line-height: 20px; }
+.pl-activity-summary p strong { color: var(--ink); font-size: 12px; font-weight: 600; }
+.pl-activity-summary ul { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 12.5px; }
+.pl-activity-summary li { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Publish: rarely changed endpoints fold away. */
+.publish-advanced { border-top: 1px solid var(--border); padding-top: 12px; }
+.publish-advanced > summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 500; }
+.publish-advanced[open] > summary { margin-bottom: 12px; }
+.publish-signin-code { display: block; margin-top: 4px; }
+.publish-signin-code code { padding: 1px 6px; border-radius: 5px; background: #fff; box-shadow: var(--hairline); font-family: var(--font-mono); font-size: 12.5px; letter-spacing: .04em; }
+
+/* The reserved scrollbar gutter paints the root background; match the app
+   canvas so no white strip shows down the right edge of grey screens. */
+html:has(.setup-wizard), html:has(.shell) { background: var(--app-canvas); }
+
+/* Audit columns share a row height; keep each list at the top instead of
+   stretching its rows apart to fill the tallest column. */
+.plan-existing-docs-columns section, .plan-existing-docs-columns ul { align-content: start; }
+
+/* ---- Publish (Doxbrix only) ---- */
+.publish-doxbrix { display: grid; gap: 20px; }
+.publish-doxbrix .publish-hero,
+.publish-doxbrix .publish-live { display: grid; gap: 18px; padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-xl); background: #fff; box-shadow: var(--lift); }
+.publish-hero-head { display: flex; gap: 18px; align-items: flex-start; }
+.publish-hero-head h2 { margin: 0 0 6px; font-family: var(--font-display); font-size: 21px; line-height: 1.25; color: var(--ink); letter-spacing: -0.01em; }
+.publish-hero-head p { margin: 0; max-width: 72ch; font-size: 15px; line-height: 1.55; color: var(--text); }
+.publish-mark { width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 12px; background: var(--ink); color: #5eead4; }
+.publish-connect { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid var(--divider); border-radius: var(--radius-md); background: var(--subtle); color: var(--brand); }
+.publish-connect > span { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.publish-connect strong { color: var(--ink); font-size: 15px; font-weight: 600; }
+.publish-connect small { color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+.publish-code { display: grid; justify-items: center; gap: 12px; padding: 26px; border: 1px dashed var(--brand-tint); border-radius: var(--radius-lg); background: var(--subtle); }
+.shell:has(.reference-sidebar-nav) .page .publish-code code:not(pre code) { padding: 0; border: 0; font-family: var(--font-mono); font-size: 40px; font-weight: 500; letter-spacing: 0.08em; color: var(--ink); background: none; }
+.publish-code-wait { display: inline-flex; align-items: center; gap: 10px; font-size: 14px; color: var(--info); }
+.publish-hero-foot { display: flex; align-items: center; gap: 12px; }
+.publish-hero-foot > span { flex: 1 1 auto; font-size: 14px; color: var(--muted); }
+.publish-hero-foot a { font-family: var(--font-mono); font-size: 13.5px; }
+
+.publish-live-meta { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--muted); }
+.publish-live-address { display: flex; align-items: center; gap: 12px; }
+.publish-live-address > a.mono { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 22px; color: var(--ink); }
+.publish-live-address > a.mono:hover { color: var(--brand-dark); }
+.publish-live-stats { display: flex; flex-wrap: wrap; gap: 24px; padding-top: 16px; border-top: 1px solid var(--divider); font-size: 14px; color: var(--text); }
+.publish-live-stats span { display: inline-flex; align-items: center; gap: 8px; }
+.publish-live-stats .icon { color: var(--muted); }
+
+.publish-doxbrix .publish-attention { display: flex; align-items: center; gap: 16px; padding: 20px 22px; border: 1px solid #f3d9a4; border-radius: var(--radius-xl); background: #fff8ec; }
+.publish-attention-icon { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 10px; background: var(--warn-soft); color: var(--warn); }
+.publish-attention > div { flex: 1 1 auto; display: grid; gap: 4px; }
+.publish-attention h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--ink); }
+.publish-attention p { margin: 0; font-size: 14.5px; line-height: 1.5; color: var(--text); }
+
+.publish-checklist { list-style: none; margin: 0; padding: 0 20px 6px; }
+.publish-checklist li { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid var(--divider); }
+.publish-checklist li:first-child { border-top: 0; }
+.publish-check-mark { width: 26px; height: 26px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; background: var(--good-soft); color: var(--good); }
+.publish-checklist li.warn .publish-check-mark { background: var(--warn-soft); color: var(--warn); }
+.publish-checklist li.bad .publish-check-mark { background: var(--bad-soft); color: var(--bad); }
+.publish-check-copy { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.publish-check-copy strong { font-size: 15px; font-weight: 500; color: var(--ink); }
+.publish-check-copy small { font-size: 13.5px; line-height: 1.45; color: var(--muted); }
+
+.shell:has(.reference-sidebar-nav) .publish-visibility.radio-rows > button { gap: 14px; }
+.shell:has(.reference-sidebar-nav) .publish-visibility.radio-rows > button > .icon { flex: 0 0 auto; color: var(--muted); }
+.shell:has(.reference-sidebar-nav) .publish-visibility.radio-rows > button.selected > .icon { color: var(--brand); }
+
+.publish-doxbrix .publish-bar { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border-radius: var(--radius-xl); background: var(--brand-ink); }
+.publish-bar > span { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.publish-bar strong { font-size: 15px; font-weight: 600; color: #fff; }
+.publish-bar small { font-size: 13.5px; color: #a7d9d5; }
+.shell:has(.reference-sidebar-nav) .publish-bar .btn.primary { background: #5eead4; border-color: #5eead4; color: var(--brand-ink); }
+.shell:has(.reference-sidebar-nav) .publish-bar .btn.primary:disabled { background: rgb(255 255 255 / 14%); border-color: transparent; color: #a7d9d5; }
+
+.publish-change-list { list-style: none; margin: 0; padding: 0 20px 6px; }
+.publish-change-list li { display: flex; align-items: center; gap: 12px; min-height: 48px; border-top: 1px solid var(--divider); }
+.publish-change-list li:first-child { border-top: 0; }
+.publish-change-list code { width: 18px; font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--good); background: none; }
+.publish-change-list span { flex: 1 1 auto; font-size: 15px; color: var(--ink); }
+.publish-change-list small { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+
+.publish-doxbrix .publish-settings { border: 1px solid var(--border); border-radius: var(--radius-xl); background: #fff; }
+.publish-settings > summary { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 20px; cursor: pointer; list-style: none; font-size: 15px; font-weight: 600; color: var(--ink); }
+.publish-settings > summary::-webkit-details-marker { display: none; }
+.publish-settings > summary small { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; font-weight: 400; color: var(--muted); }
+.publish-settings-body { display: grid; gap: 16px; padding: 0 20px 20px; }
+.publish-doxbrix .vrow-value.mono { font-family: var(--font-mono); font-size: 13.5px; }
+
+/* Crawled docs preview: long page paths truncate inside the dialog instead of spilling past its edge. */
+.docs-site-sample-pages li { min-width: 0; }
+.docs-site-sample-pages li > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docs-site-sample-pages li > small { flex: 0 1 auto; min-width: 0; max-width: 62%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

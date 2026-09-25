@@ -10,7 +10,7 @@ import type { DoxloopProject, SourceBinding, SourceKind } from './types.js'
 
 const DISCOVERY_SCHEMA_VERSION = 1 as const
 /** Bump when inventory rules change so cached inventories are rebuilt. */
-const DISCOVERY_RULES_VERSION = 3
+const DISCOVERY_RULES_VERSION = 6
 const DISCOVERY_CACHE_DIRECTORY = join('.doxloop', 'cache', 'discovery')
 /**
  * Inspectable text files per source. The cap applies after product code is
@@ -280,7 +280,9 @@ async function discoverSource(
   const candidates = inspectable.slice(0, MAX_FILES_PER_SOURCE)
   // Package entry points decide which exports count as public surface, and a
   // package manifest can sort after the code it describes, so read them first.
-  const entryPoints = await packageEntryPoints(sourceRoot, candidates.map((entry) => entry.path))
+  const packageFolders: PackageFolder[] = []
+  const entryPoints = await packageEntryPoints(sourceRoot, candidates.map((entry) => entry.path), packageFolders)
+  const noEntryPoints = new Set<string>()
   let budgetExhausted = false
   for (const { path, sourcePath } of candidates) {
     const extension = extname(path).toLowerCase()
@@ -297,7 +299,7 @@ async function discoverSource(
     textBytes += size
     filesScanned += 1
     languages.add(languageForExtension(extension))
-    inspectTextFile(source.name, sourcePath, content, evidence, packageNames, entryPoints)
+    inspectTextFile(source.name, sourcePath, content, evidence, packageNames, exportsArePublic(sourcePath, packageFolders) ? entryPoints : noEntryPoints)
   }
   const truncated = inspectable.length > MAX_FILES_PER_SOURCE || budgetExhausted
   if (inspectable.length > MAX_FILES_PER_SOURCE) warnings.push(`Inventory inspected ${filesScanned} of ${inspectable.length} inspectable files; product code was read first and supporting files were cut off.`)
@@ -442,7 +444,10 @@ const FIXTURE_PATH = /(^|\/)(?:evals?|evaluations?|fixtures?|__fixtures__|__mock
  * authentication surface or command.
  */
 const INFRASTRUCTURE_PATH = /(^|\/)(?:db|database|migrations?|migrate|seeds?|prisma|drizzle|docker|podman|k8s|kubernetes|helm|charts?|deploy|deployment|infra|infrastructure|terraform|ansible|extra|extras|ci|\.github|\.gitlab|\.circleci)(\/|$)/i
-const TEST_PATH = /(^|\/)(?:__tests__|tests?|specs?)(\/|$)|\.(?:test|spec|stories)\.[^.]+$/i
+// Test files by each ecosystem's own convention: `*.test.ts`, Go's
+// `*_test.go`, Python's `test_*.py` / `*_test.py`, Ruby's `*_spec.rb`,
+// Java/C#'s `*Test.java` / `*Tests.cs`.
+const TEST_PATH = /(^|\/)(?:__tests__|tests?|specs?)(\/|$)|\.(?:test|spec|stories)\.[^.]+$|_test\.(?:go|py|rb|exs?)$|(^|\/)test_[^/]+\.py$|_spec\.rb$|Tests?\.(?:java|kt|cs)$/
 const EXAMPLE_PATH = /(^|\/)(?:examples?|demos?|samples?|recipes?)(\/|$)/i
 const DOCUMENTATION_PATH = /(^|\/)(?:docs?|documentation|skills?|prompts?|references?|guides?|wiki|adr|rfcs?|proposals?)(\/|$)|\.(?:md|mdx|rst|txt)$/i
 const ASSET_PATH = /(^|\/)(?:assets?|public|static|images?|fonts?|media)(\/|$)/i
@@ -456,6 +461,35 @@ export function classifySourceFile(path: string): SourceFileRole {
   if (ASSET_PATH.test(path)) return 'asset'
   if (INFRASTRUCTURE_PATH.test(path)) return 'infrastructure'
   return CODE_EXTENSIONS.has(extname(path).toLowerCase()) ? 'code' : 'other'
+}
+
+/**
+ * Front-end source of a web app or admin dashboard. Its components mention
+ * sign-in, providers, and events on every screen without being an API or
+ * integration surface of their own; what the reader sees there is covered by
+ * UI journeys and screenshots, so keyword families do not apply to it.
+ */
+const FRONTEND_PATH = /(^|\/)(?:ui|web|webapp|frontend|client|dashboard|admin|app-ui|desktop|components|pages|views|layouts|composables|stores|[\w-]*-(?:web|desktop|ui|frontend))\/.*\.(?:jsx?|tsx?|mjs|vue|svelte)$|\.(?:vue|svelte|jsx|tsx)$/i
+
+/** Keyword-derived signal kinds, counted once per folder rather than per file. */
+export const KEYWORD_SIGNAL_KINDS: ReadonlySet<DiscoveryEvidenceKind> = new Set(['authentication', 'authorization', 'integration', 'event'])
+
+/** Build and shell variables every toolchain reads; not product configuration. */
+export const TOOLCHAIN_ENV = /^(?:NODE_ENV|CI|HOME|PATH|PWD|SHELL|TERM|USER|LANG|TZ|TMPDIR|npm_\w+|TAURI_\w+|VITEST\w*|JEST_\w+|GITHUB_\w+|RUNNER_\w+)$/
+
+const MONOREPO_ROOTS = new Set(['packages', 'apps', 'libs', 'services', 'crates', 'modules', 'plugins', 'extensions'])
+
+/**
+ * The module a file belongs to, for counting keyword signals once per module:
+ * a folder at most three levels deep, or four inside a monorepo's
+ * `packages/<name>/src/<module>`. A page citing any file in the module covers
+ * it. Shared by discovery and coverage so both group the same way.
+ */
+export function signalModule(path: string): string {
+  const segments = path.split('/').slice(0, -1)
+  if (segments.length === 0) return '.'
+  const depth = MONOREPO_ROOTS.has(segments[0]!) ? 4 : 3
+  return segments.slice(0, depth).join('/')
 }
 
 /**
@@ -495,7 +529,25 @@ function isProseLine(line: string, inTemplate: boolean): boolean {
  * `exports`), by extension-less stem, plus conventional entry names. Exports
  * from any other module are internal wiring, not public surface.
  */
-async function packageEntryPoints(sourceRoot: string, files: string[]): Promise<Set<string>> {
+/** Package manifests by folder, and whether each is private (never published). */
+type PackageFolder = { dir: string; private: boolean }
+
+/**
+ * Exports are public surface only in a package people install. A monorepo's
+ * apps and internal libraries are `"private": true`, and their hundreds of
+ * index exports read as undocumented API to a coverage count.
+ */
+function exportsArePublic(sourcePath: string, packages: readonly PackageFolder[]): boolean {
+  let nearest: PackageFolder | undefined
+  for (const entry of packages) {
+    if (entry.dir === '' || sourcePath.startsWith(`${entry.dir}/`)) {
+      if (!nearest || entry.dir.length > nearest.dir.length) nearest = entry
+    }
+  }
+  return !nearest?.private
+}
+
+async function packageEntryPoints(sourceRoot: string, files: string[], packages: PackageFolder[] = []): Promise<Set<string>> {
   const stems = new Set(['index', 'main', 'lib', 'mod', 'public-api', '__init__'])
   for (const path of files) {
     if (path.split(/[\\/]/).at(-1) !== 'package.json' || classifySourceFile(portable(relative(sourceRoot, path))) === 'fixture') continue
@@ -506,6 +558,8 @@ async function packageEntryPoints(sourceRoot: string, files: string[]): Promise<
       continue
     }
     if (!json) continue
+    const manifest = portable(relative(sourceRoot, path))
+    packages.push({ dir: manifest.includes('/') ? manifest.slice(0, manifest.lastIndexOf('/')) : '', private: json.private === true })
     const values: unknown[] = [json.main, json.module, json.types, json.typings, json.browser]
     values.push(...Object.values(record(json.bin)))
     const walkExports = (value: unknown): void => {
@@ -547,7 +601,9 @@ function inspectTextFile(
     // Operator-facing scripts only. A repository's forty `test-*`, `lint`,
     // and `build-docker-nightly` scripts are contributor tooling, and each
     // one counted as an undocumented public command.
-    for (const script of Object.keys(record(json?.scripts)).filter((item) => /^(?:start|dev|serve|build|migrate|deploy|preview|setup)(?::[a-z0-9-]+)?$/.test(item))) {
+    // Only the repository's own package: `ui/package.json` scripts build the
+    // bundled dashboard and are contributor tooling, not reader commands.
+    for (const script of (path === 'package.json' ? Object.keys(record(json?.scripts)) : []).filter((item) => /^(?:start|dev|serve|build|migrate|deploy|preview|setup)(?::[a-z0-9-]+)?$/.test(item))) {
       evidence.push({ source, path, kind: 'command', label: `npm run ${script}` })
     }
   }
@@ -568,7 +624,7 @@ function inspectTextFile(
   if (role === 'infrastructure') {
     content.split(/\r?\n/).forEach((line, index) => {
       for (const match of line.matchAll(/\b(?:process\.env\.|env\[['"`]|ENV\[['"`])([A-Z][A-Z0-9_]{2,})/g)) {
-        evidence.push({ source, path, kind: 'configuration', label: match[1]!, line: index + 1 })
+        if (!TOOLCHAIN_ENV.test(match[1]!)) evidence.push({ source, path, kind: 'configuration', label: match[1]!, line: index + 1 })
       }
     })
     return
@@ -578,6 +634,7 @@ function inspectTextFile(
   // One signal per keyword family per file: "this module authenticates" is a
   // public-surface fact; the forty lines that mention a token are not.
   const seenKeywords = new Set<string>()
+  const frontend = FRONTEND_PATH.test(path)
   const lines = content.split(/\r?\n/)
   let inTemplate = false
   lines.forEach((line, index) => {
@@ -592,20 +649,23 @@ function inspectTextFile(
     const route = /\b(?:app|router|server)\.(get|post|put|patch|delete|options|head)\s*\(\s*['"`]([^'"`]+)/i.exec(line)
       ?? /\bmap(get|post|put|patch|delete|options|head)\s*\(\s*['"`]([^'"`]+)/i.exec(line)
       ?? /@(get|post|put|patch|delete|request)mapping\s*\(\s*(?:value\s*=\s*)?['"`]([^'"`]+)/i.exec(line)
+      // Go routers (net/http 1.22 patterns aside): `rg.GET("/records", h)`,
+      // gin/echo/chi/PocketBase style, with an upper-case method name.
+      ?? /\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*\(\s*["'`](\/[^"'`]*)/.exec(line)
     if (route) evidence.push({ source, path, kind: 'route', label: `${route[1]!.toUpperCase()} ${route[2]}`, line: index + 1 })
     const command = /\.(?:command|option)\(\s*['"`]([^'"`]+)/.exec(line)?.[1]
     if (command) evidence.push({ source, path, kind: 'command', label: command, line: index + 1 })
     const configuration = /\b(?:interface|type|class)\s+([A-Za-z_$][\w$]*(?:Config|Options|Settings))\b/.exec(line)?.[1]
     if (configuration && publicExports) evidence.push({ source, path, kind: 'configuration', label: configuration, line: index + 1 })
     for (const match of line.matchAll(/\b(?:process\.env\.|env\[['"`]|ENV\[['"`])([A-Z][A-Z0-9_]{2,})/g)) {
-      evidence.push({ source, path, kind: 'configuration', label: match[1]!, line: index + 1 })
+      if (!TOOLCHAIN_ENV.test(match[1]!)) evidence.push({ source, path, kind: 'configuration', label: match[1]!, line: index + 1 })
     }
     const option = /(?:add_argument|addOption|option)\(\s*['"`](-{1,2}[a-z0-9][\w-]*)/i.exec(line)?.[1]
       ?? /\b(?:flag\.(?:String|Bool|Int|Duration)|StringVar|BoolVar|IntVar)\s*\([^,]*,?\s*['"`]([a-z0-9][\w-]*)/i.exec(line)?.[1]
     if (option) evidence.push({ source, path, kind: 'command', label: option, line: index + 1 })
     // Comments, markup, and translated strings mention these words without
     // implementing anything; keyword families below apply to code lines only.
-    if (prose) return
+    if (prose || frontend) return
     const authentication = /\b(oauth2?|oidc|sso|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authenticate|authentication|sign[ -]?in|login)(?:\b|(?=[A-Z_]))/i.exec(line)?.[1]
     if (authentication && keywordOnce(seenKeywords, 'authentication', authentication)) evidence.push({ source, path, kind: 'authentication', label: conciseLabel(line, authentication), line: index + 1 })
     // Bare "scope", "policy", and "role" are ordinary vocabulary in most code;
@@ -676,9 +736,41 @@ export function suggestedPageCounts(signals: number, existingPages: number): { s
   }
 }
 
+/**
+ * Keyword signals ("this file mentions OAuth") count once per folder and
+ * family: a module that authenticates is one surface to document, not one
+ * per file. The signal's path is the folder, and its label names the
+ * keywords found there, so the gap reads as "Authentication in apis".
+ */
+export function groupKeywordSignals(items: DiscoveryEvidence[]): DiscoveryEvidence[] {
+  const groups = new Map<string, { item: DiscoveryEvidence; keywords: Set<string> }>()
+  const out: DiscoveryEvidence[] = []
+  for (const item of items) {
+    if (!KEYWORD_SIGNAL_KINDS.has(item.kind)) { out.push(item); continue }
+    const folder = signalModule(item.path)
+    const key = `${item.source}\0${item.kind}\0${folder}`
+    const keyword = item.kind === 'event' ? item.label.slice(0, 40) : keywordOf(item.label)
+    const group = groups.get(key)
+    if (group) { if (keyword) group.keywords.add(keyword); continue }
+    const created = { item: { source: item.source, kind: item.kind, path: folder, label: '' } as DiscoveryEvidence, keywords: new Set(keyword ? [keyword] : []) }
+    groups.set(key, created)
+    out.push(created.item)
+  }
+  for (const { item, keywords } of groups.values()) {
+    const family = item.kind === 'authentication' ? 'Authentication' : item.kind === 'authorization' ? 'Permissions' : item.kind === 'event' ? 'Events' : 'Integrations'
+    const found = [...keywords].slice(0, 4).join(', ')
+    item.label = `${family} in ${item.path === '.' ? 'the project root' : item.path}${found ? ` (${found})` : ''}`
+  }
+  return out
+}
+
+function keywordOf(label: string): string | undefined {
+  return /\b(oauth2?|oidc|sso|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authenticate|authentication|sign[ -]?in|login|authori[sz]e|authorization|permissions?|rbac|roles?|scopes?|policy|webhook|integration|connector|plugin|provider|adapter)/i.exec(label)?.[1]?.toLowerCase()
+}
+
 function uniqueEvidence(items: DiscoveryEvidence[]): DiscoveryEvidence[] {
   const seen = new Set<string>()
-  return items.filter((item) => {
+  return groupKeywordSignals(items).filter((item) => {
     const key = `${item.source}\0${item.path}\0${item.kind}\0${item.label}`
     if (seen.has(key)) return false
     seen.add(key)

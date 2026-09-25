@@ -1,0 +1,347 @@
+/* Screen layer for the Paper & teal redesign (ops). Imported after theme.css; tokens live there. */
+
+/*
+ * Sources, Publish and Settings. These screens are lists of facts and a few
+ * controls: flush panels of rows, choices as radio rows, and every editor in a
+ * right-side sheet or a centred dialog. Older feature rules are beaten with the
+ * same `.shell:has(.reference-sidebar-nav)` prefix plus source order.
+ */
+
+/* ── Shared: sheet, dialog, menu, icon button ───────────────────────────── */
+
+.sources-modal-scrim.ops-sheet-scrim,
+.sources-modal-scrim.ops-dialog-scrim { background: rgb(15 31 61 / 28%); backdrop-filter: blur(2px); }
+.sources-modal-scrim.ops-sheet-scrim { display: block; padding: 0; }
+
+.ops-sheet {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(560px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  box-shadow: -24px 0 64px rgb(15 31 61 / 20%);
+  animation: ops-sheet-in .18s ease;
+}
+@keyframes ops-sheet-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ops-sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 28px; border-bottom: 1px solid var(--border); }
+.ops-sheet-head h2, .ops-dialog-head h2 { margin: 0; color: var(--ink); font-family: var(--font-ui); font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -.01em; }
+.ops-sheet-head p, .ops-dialog-head p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; line-height: 19px; }
+.ops-dialog-head p strong { color: var(--ink); font-weight: 600; }
+.ops-sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 22px; padding: 24px 28px; }
+.ops-sheet-foot, .ops-dialog-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 16px 28px; border-top: 1px solid var(--border); background: var(--subtle); }
+.ops-dialog-foot > span { flex: 1 1 auto; }
+.ops-sheet-body > .field, .ops-dialog-body > .field, .ops-dialog-body .monitoring-policy-fields > .field { gap: 8px; }
+.ops-sheet-body .field-label, .ops-dialog-body .field-label { color: var(--ink); font-size: 13px; font-weight: 500; }
+.ops-choice { display: grid; gap: 8px; }
+.ops-sheet-body .input, .ops-dialog-body .input { font-size: 14px; }
+.ops-sheet-body .mono-input, .ops-dialog-body .mono-input { font-family: var(--font-mono); font-size: 13px; }
+
+.ops-icon-button {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease;
+}
+.ops-icon-button:hover, .ops-icon-button[aria-expanded="true"] { color: var(--ink); background: var(--hover); }
+
+/* Centred dialogs (monitoring, ownership) share one frame. */
+.shell:has(.reference-sidebar-nav) .ops-dialog,
+.shell:has(.reference-sidebar-nav) .monitoring-dialog.ops-dialog,
+.shell:has(.reference-sidebar-nav) .sources-reference-dialog.ops-dialog {
+  width: min(560px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 0;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: var(--float);
+  animation: none;
+}
+.shell:has(.reference-sidebar-nav) .ops-dialog > .ops-dialog-head,
+.monitoring-dialog.ops-dialog > header,
+.sources-reference-dialog.ops-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 24px 28px 16px; border-bottom: 1px solid var(--border); }
+.monitoring-dialog.ops-dialog > header > div, .sources-reference-dialog.ops-dialog > header > div { display: block; }
+.monitoring-dialog.ops-dialog > .ops-dialog-body,
+.sources-reference-dialog.ops-dialog > .ops-dialog-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; padding: 20px 28px 24px; }
+.monitoring-dialog.ops-dialog > footer, .sources-reference-dialog.ops-dialog > footer { padding: 16px 28px; }
+.sources-reference-dialog.ops-dialog > footer .btn { min-width: 0; min-height: 0; }
+.monitoring-policy-fields { display: grid; gap: 20px; }
+.shell:has(.reference-sidebar-nav) .monitoring-dialog-status { min-height: 44px; padding: 8px 8px 8px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--subtle); }
+.shell:has(.reference-sidebar-nav) .monitoring-dialog-status > span { color: var(--text); font-size: 13.5px; }
+.shell:has(.reference-sidebar-nav) .monitoring-dialog-status > span i { background: var(--faint); }
+.shell:has(.reference-sidebar-nav) .monitoring-dialog-status > span.active { color: var(--good); }
+.shell:has(.reference-sidebar-nav) .monitoring-dialog-status > span.active i { background: var(--good); box-shadow: none; }
+.ops-dialog-body .schedule-summary { margin: -6px 0 0; color: var(--muted); font-size: 13px; }
+.ops-dialog-body .disclosure { color: var(--brand); font-size: 13.5px; font-weight: 500; }
+
+/* Row menus float from the ⋯ button. */
+.ops-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 232px;
+  display: grid;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: var(--pop);
+  animation: fade-up .12s ease;
+}
+.ops-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ops-menu > button .icon { color: var(--muted); }
+.ops-menu > button:hover:not(:disabled) { background: var(--hover); }
+.ops-menu > button.danger, .ops-menu > button.danger .icon { color: var(--bad); }
+.ops-menu > button.danger:hover:not(:disabled) { background: var(--bad-soft); }
+.ops-menu > button:disabled { opacity: .5; cursor: default; }
+
+.ops-empty-wrap { padding: 20px; }
+.ops-empty-wrap .history-loading { color: var(--muted); font-size: 13.5px; }
+
+/* Value rows used as buttons keep the row look. */
+.vrow-label.faint { color: var(--faint); font-weight: 400; }
+.vrow-value.error { color: var(--bad); }
+.vrow-value .btn.link { height: auto; padding: 0; }
+.vrow-value code { color: var(--muted); background: none; border: 0; box-shadow: none; padding: 0; font-size: 13px; }
+
+/* ── Sources ────────────────────────────────────────────────────────────── */
+
+.shell:has(.reference-sidebar-nav) .sources-reference-page { display: grid; gap: 24px; }
+.shell:has(.reference-sidebar-nav) .sources-library { display: block; overflow: visible; }
+.shell:has(.reference-sidebar-nav) .sources-library .panel-body.flush { overflow: visible; }
+.source-rows { display: grid; }
+.source-row { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-top: 1px solid var(--border); }
+.source-rows [role="rowgroup"] > .source-row:first-child { border-top: 0; }
+.source-row-icon { display: inline-flex; flex: 0 0 auto; margin-right: 12px; color: var(--muted); }
+.source-row-copy { flex: 1 1 auto; min-width: 0; display: grid; }
+.source-row-name { color: var(--ink); font-size: 14px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-row-meta { margin: 2px 0 0; display: flex; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; align-items: baseline; gap: 0 6px; color: var(--muted); font-size: 12.5px; line-height: 19px; }
+.source-row-meta > span + span::before { content: '·'; margin-right: 6px; color: var(--faint); }
+.source-row-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-row-meta small { display: block; color: var(--muted); font-size: 12.5px; line-height: 18px; }
+.source-row-meta small.source-health-error { color: var(--bad); }
+.source-row-status, .source-row-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+.source-row-actions { position: relative; }
+
+/* Coverage: a figure, then one bar per surface. */
+.coverage-summary { display: flex; align-items: center; gap: 20px; padding: 20px 20px 8px; }
+.coverage-figure { color: var(--ink); font-family: var(--font-display); font-size: 36px; line-height: 1; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.coverage-figure.good { color: var(--good); }
+.coverage-figure.warn { color: var(--warn-dot); }
+.coverage-figure.bad { color: var(--bad); }
+.shell:has(.reference-sidebar-nav) .coverage-panel .coverage-summary-copy { display: grid; gap: 2px; }
+.shell:has(.reference-sidebar-nav) .coverage-panel .coverage-assessment { color: var(--ink); font-size: 14px; line-height: 20px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .coverage-panel .coverage-assessment.attention { color: var(--warn); }
+.coverage-summary-detail { color: var(--muted); font-size: 13px; line-height: 18px; }
+.coverage-rows { display: grid; }
+.coverage-row { display: flex; align-items: center; gap: 20px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.coverage-rows > .coverage-row:first-child { border-top: 0; }
+.coverage-row-label { flex: 0 0 200px; width: 200px; color: var(--ink); font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coverage-row > .progress { flex: 1 1 auto; width: auto; }
+.progress.warn > i { background: var(--warn-dot); }
+.coverage-row-percent { flex: 0 0 44px; width: 44px; color: var(--text); font-family: var(--font-mono); font-size: 13px; font-style: normal; text-align: right; }
+.coverage-row.unknown .coverage-row-percent { flex: 0 0 auto; width: auto; color: var(--faint); font-family: var(--font-ui); }
+.coverage-row.unknown .coverage-row-label { color: var(--muted); }
+.shell:has(.reference-sidebar-nav) .coverage-row .coverage-review-action { flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--brand); font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.shell:has(.reference-sidebar-nav) .coverage-row .coverage-review-action:hover { text-decoration: underline; }
+.shell:has(.reference-sidebar-nav) .coverage-panel .source-evidence-notes { margin: 0; padding: 12px 20px 14px; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: var(--subtle); }
+.shell:has(.reference-sidebar-nav) .coverage-panel .source-evidence-notes summary { color: var(--muted); font-size: 13px; font-weight: 500; }
+
+/* Freshness rows */
+.freshness-panel .vrow-value { flex: 0 1 auto; text-align: right; }
+.freshness-panel .freshness-page .vrow-label code { color: var(--ink); font-size: 12.5px; }
+.freshness-panel .freshness-page .vrow-value { color: var(--muted); font-size: 13px; }
+
+/* Add-source sheet details */
+.ops-sheet .repository-connect-input { display: flex; align-items: center; gap: 8px; }
+.ops-sheet .repository-connect-input .input { flex: 1 1 auto; min-width: 0; border-radius: 8px; }
+.shell:has(.reference-sidebar-nav) .ops-sheet .repository-connect-input .btn.primary { color: var(--ink); border-color: transparent; background: #fff; box-shadow: 0 0 0 1px var(--strong-border), var(--lift); }
+.shell:has(.reference-sidebar-nav) .ops-sheet .repository-connect-input .btn.primary:hover:not(:disabled) { background: var(--subtle); border-color: transparent; }
+.ops-sheet .repository-connected-button { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--good); background: var(--good-soft); font: inherit; font-size: 13px; font-weight: 500; }
+.ops-sheet .source-folder-input { display: flex; align-items: center; gap: 8px; }
+.ops-sheet .source-folder-input .input { flex: 1 1 auto; min-width: 0; }
+.ops-sheet .openapi-dropzone { min-height: 160px; gap: 10px; padding: 24px; border: 1px dashed var(--strong-border); border-radius: 12px; background: var(--subtle); }
+.ops-sheet .openapi-dropzone > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; color: var(--brand); background: var(--brand-soft); }
+.ops-sheet .openapi-dropzone strong { color: var(--ink); font-size: 14px; font-weight: 500; text-align: center; overflow-wrap: anywhere; }
+.ops-sheet .openapi-dropzone.has-file { border-style: solid; border-color: var(--brand-tint); background: var(--brand-soft); }
+.ops-sheet .source-scope-fields { margin: 0; padding: 18px 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
+.ops-sheet .source-scope-fields > summary { color: var(--muted); font-size: 13.5px; font-weight: 500; cursor: pointer; }
+.ops-sheet .source-scope-fields > div { display: grid; gap: 20px; padding-top: 18px; }
+.ops-sheet .docs-site-fields { display: grid; gap: 16px; }
+
+/* ── Publish ────────────────────────────────────────────────────────────── */
+
+.shell:has(.reference-sidebar-nav) .publish-page { display: grid; gap: 24px; }
+.input-addon-row { display: flex; align-items: center; gap: 8px; }
+.input-addon-row .input { flex: 1 1 auto; min-width: 0; }
+.input-addon { color: var(--muted); font-size: 14px; white-space: nowrap; }
+.publish-visibility-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid var(--strong-border); border-radius: 10px; background: #fff; }
+.publish-visibility-row > div { display: grid; gap: 2px; min-width: 0; }
+.shell:has(.reference-sidebar-nav) .publish-visibility-row .segmented { display: inline-flex; flex: 0 0 auto; }
+.publish-visibility-row > div > span { color: var(--ink); font-size: 14px; font-weight: 500; }
+.publish-visibility-row > div > small { color: var(--muted); font-size: 12.5px; line-height: 17px; }
+.shell:has(.reference-sidebar-nav) .publish-account-row,
+.shell:has(.reference-sidebar-nav) .publish-target-panel .publish-account-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+.shell:has(.reference-sidebar-nav) .publish-account-row .avatar { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #fff; background: #1f2a44; box-shadow: none; font-size: 13px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .publish-account-row .avatar.muted { color: var(--muted); background: #fff; box-shadow: var(--hairline); }
+.shell:has(.reference-sidebar-nav) .publish-account-identity { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.shell:has(.reference-sidebar-nav) .publish-account-identity strong { color: var(--ink); font-size: 14px; font-weight: 500; }
+.shell:has(.reference-sidebar-nav) .publish-account-identity small { color: var(--muted); font-size: 12.5px; }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending,
+.shell:has(.reference-sidebar-nav) .publish-signin-required {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 19px;
+}
+.shell:has(.reference-sidebar-nav) .publish-signin-pending { color: var(--info); background: var(--info-soft); }
+.shell:has(.reference-sidebar-nav) .publish-signin-required { color: var(--warn); background: var(--warn-soft); }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending > .icon,
+.shell:has(.reference-sidebar-nav) .publish-signin-required > .icon { flex: 0 0 auto; margin-top: 2px; }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending > span,
+.shell:has(.reference-sidebar-nav) .publish-signin-required > span { flex: 1 1 auto; display: grid; gap: 2px; }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending strong,
+.shell:has(.reference-sidebar-nav) .publish-signin-required strong { color: inherit; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending small,
+.shell:has(.reference-sidebar-nav) .publish-signin-required small { color: inherit; font-size: 13px; opacity: .85; }
+.shell:has(.reference-sidebar-nav) .publish-signin-pending a { color: inherit; font-size: 13px; font-weight: 500; }
+
+/* Latest deployment: the running (or just finished) job as a panel. */
+.shell:has(.reference-sidebar-nav) .deploy-progress { display: block; padding: 0; gap: 0; border-color: var(--border); box-shadow: none; }
+.shell:has(.reference-sidebar-nav) .deploy-progress.running,
+.shell:has(.reference-sidebar-nav) .deploy-progress.failed { border-color: var(--border); box-shadow: none; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-head { gap: 10px; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon { width: 20px; height: 20px; border-radius: 0; color: var(--muted); background: transparent; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon.succeeded { color: var(--good); }
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon.failed,
+.shell:has(.reference-sidebar-nav) .deploy-progress-icon.cancelled { color: var(--bad); background: transparent; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-title { display: block; gap: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-title p strong { color: var(--ink); font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-head .panel-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-bar { padding: 16px 20px 4px; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-track { background: var(--border); }
+.shell:has(.reference-sidebar-nav) .deploy-progress-track i { background: var(--brand); }
+.shell:has(.reference-sidebar-nav) .deploy-progress-track.running i { background: linear-gradient(90deg, var(--brand), #6fd0c9, var(--brand)); background-size: 200% 100%; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps { gap: 0; padding: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li { grid-template-columns: 22px minmax(0, 1fr); gap: 14px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li:first-child { border-top: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-bar + .deploy-progress-steps li:first-child { border-top: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-step-mark { width: 22px; height: 22px; border: 0; color: transparent; background: var(--hover); }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.done .deploy-step-mark { color: var(--good); background: var(--good-soft); border: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.failed .deploy-step-mark { color: var(--bad); background: var(--bad-soft); border: 0; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.running .deploy-step-mark { border: 2px solid var(--brand); border-top-color: transparent; background: transparent; }
+.shell:has(.reference-sidebar-nav) .deploy-step-copy { justify-content: space-between; }
+.shell:has(.reference-sidebar-nav) .deploy-step-copy strong { color: var(--ink); font-size: 14px; font-weight: 500; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-steps li.pending .deploy-step-copy strong { color: var(--faint); font-weight: 500; }
+.shell:has(.reference-sidebar-nav) .deploy-step-copy small { color: var(--muted); font-size: 13px; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-log { gap: 10px; padding: 12px 20px 16px; border-top: 1px solid var(--border); }
+.shell:has(.reference-sidebar-nav) .deploy-log-toggle { color: var(--brand); font-size: 13px; font-weight: 500; }
+.shell:has(.reference-sidebar-nav) .deploy-progress-log .live-terminal { min-height: 120px; max-height: 280px; border-color: var(--border); }
+
+.deploy-history-name { color: var(--ink); font-family: var(--font-mono); font-size: 13px; }
+.shell:has(.reference-sidebar-nav) .deploy-history .history-lines { display: block; margin-top: 3px; color: var(--muted); font-size: 12.5px; }
+.shell:has(.reference-sidebar-nav) .deploy-history .history-lines i { font-style: normal; }
+.shell:has(.reference-sidebar-nav) .deploy-history .history-lines i.added { color: var(--good); }
+.shell:has(.reference-sidebar-nav) .deploy-history .history-error { display: block; margin-top: 4px; color: var(--bad); font-size: 12.5px; }
+.shell:has(.reference-sidebar-nav) .deploy-history .history-duration { display: block; color: var(--faint); font-size: 12px; }
+.shell:has(.reference-sidebar-nav) .deploy-history tbody tr:last-child td { border-bottom: 0; }
+
+/* ── Settings ───────────────────────────────────────────────────────────── */
+
+.shell:has(.reference-sidebar-nav) .settings .stack { gap: 24px; }
+.settings-row {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .12s ease;
+}
+.settings-row:hover { background: var(--subtle); }
+.settings-row.static { cursor: default; }
+.settings-row.static:hover { background: #fff; }
+.settings-row > .vrow-value { max-width: 60%; }
+.settings-row > .vrow-value > .value-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row > .vrow-value > .icon { flex: 0 0 auto; color: var(--faint); }
+.settings-row > .vrow-value > em { color: var(--faint); font-style: normal; }
+.settings-row > .vrow-value > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row:focus-visible { outline-offset: -2px; }
+
+/* Application sign-in blocks inside the sheet */
+.capture-signin-embedded { display: grid; gap: 20px; }
+.shell:has(.reference-sidebar-nav) .capture-signin { gap: 0; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block { gap: 14px; padding: 20px 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block + .capture-signin-block { margin-top: 20px; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block > header { gap: 4px; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block > header strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block > header small { color: var(--muted); font-size: 13px; line-height: 19px; }
+.shell:has(.reference-sidebar-nav) .capture-signin-block .plan-capture-readiness { border-radius: 10px; background: var(--subtle); box-shadow: var(--hairline); }
+.shell:has(.reference-sidebar-nav) .plan-capture-readiness span { display: grid; gap: 2px; }
+.shell:has(.reference-sidebar-nav) .plan-capture-readiness strong { color: var(--ink); font-size: 13.5px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .plan-capture-readiness small { color: var(--muted); font-size: 12.5px; line-height: 17px; }
+
+.shell:has(.reference-sidebar-nav) .stale-form-notice { margin: 0; padding: 12px 14px; border-radius: 10px; font-size: 13.5px; line-height: 19px; }
+
+/* ── Error banner ───────────────────────────────────────────────────────── */
+
+.shell:has(.reference-sidebar-nav) .banner { align-items: center; gap: 14px; padding: 14px 18px; color: var(--ink); animation: none; }
+.shell:has(.reference-sidebar-nav) .banner.bad { color: var(--ink); background: #fff; }
+.shell:has(.reference-sidebar-nav) .banner.bad > .icon { flex: 0 0 auto; color: var(--bad); }
+.shell:has(.reference-sidebar-nav) .banner strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.shell:has(.reference-sidebar-nav) .banner span { color: var(--text); font-size: 13.5px; opacity: 1; }
+.shell:has(.reference-sidebar-nav) .banner > button { color: var(--muted); opacity: 1; }
+.shell:has(.reference-sidebar-nav) .banner > button:hover { color: var(--ink); }
+
+@media (max-width: 900px) {
+  .coverage-row { flex-wrap: wrap; gap: 8px 12px; }
+  .coverage-row-label { flex-basis: 100%; width: auto; }
+  .source-row { flex-wrap: nowrap; }
+  .source-row-meta > span:first-child { flex: 0 0 auto; }
+  .publish-visibility-row { flex-direction: column; align-items: flex-start; }
+  .settings-row > .vrow-value { max-width: 50%; }
+}

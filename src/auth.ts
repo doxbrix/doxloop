@@ -12,6 +12,12 @@ const DEVICE_SCOPES = ['docs:read', 'docs:write', 'project:read', 'project:admin
 interface UserConfig {
   apiUrl: string
   token?: string
+  /**
+   * One token per Doxbrix server. Signing in to a local development server
+   * must not replace the app.doxbrix.com sign-in, and a token is only ever
+   * sent to the server that issued it.
+   */
+  tokens?: Record<string, string>
 }
 
 interface DeviceStart {
@@ -64,16 +70,38 @@ export async function loadUserConfig(): Promise<UserConfig> {
   if (!(await pathExists(path))) return { apiUrl: apiUrl() }
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as UserConfig
-    return { apiUrl: apiUrl(parsed.apiUrl), ...(parsed.token ? { token: parsed.token } : {}) }
+    const current = apiUrl(parsed.apiUrl)
+    const tokens: Record<string, string> = {}
+    for (const [url, token] of Object.entries(parsed.tokens ?? {})) {
+      if (typeof token === 'string' && token) tokens[apiUrl(url)] = token
+    }
+    // Files written before per-server tokens hold one token for `apiUrl`.
+    if (parsed.token && !tokens[current]) tokens[current] = parsed.token
+    return { apiUrl: current, ...(tokens[current] ? { token: tokens[current] } : {}), tokens }
   } catch {
     throw new DoxloopError(`Cannot read Doxloop credentials at ${path}.`)
   }
 }
 
+/** The token issued by `baseUrl`, never one issued by another server. */
+export function tokenFor(config: UserConfig, baseUrl: string): string | undefined {
+  const environment = process.env.DOXLOOP_TOKEN || process.env.DOXBRIX_TOKEN
+  if (environment) return environment
+  const url = apiUrl(baseUrl)
+  return config.tokens?.[url] ?? (config.apiUrl === url ? config.token : undefined)
+}
+
+/** Servers this computer holds a sign-in for, for "signed in elsewhere" hints. */
+export function signedInServers(config: UserConfig): string[] {
+  return Object.keys(config.tokens ?? (config.token ? { [config.apiUrl]: config.token } : {}))
+}
+
 export async function saveToken(token: string, baseUrl: string): Promise<void> {
   const path = configPath()
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  await writeFile(path, `${JSON.stringify({ apiUrl: baseUrl, token }, null, 2)}\n`, {
+  const existing = await pathExists(path) ? await loadUserConfig().catch(() => undefined) : undefined
+  const tokens = { ...(existing?.tokens ?? {}), [apiUrl(baseUrl)]: token }
+  await writeFile(path, `${JSON.stringify({ apiUrl: baseUrl, token, tokens }, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600,
   })
@@ -116,7 +144,8 @@ export async function login(options: {
     await verifyAndSaveToken(baseUrl, await readSecret('Token: '))
     return
   }
-  process.stdout.write(`Open ${start.verificationUri}\nEnter code: ${start.userCode}\n`)
+  const minutes = Math.max(1, Math.round(start.expiresIn / 60))
+  process.stdout.write(`Open ${start.verificationUri}\nEnter code: ${start.userCode}\nThe code expires in ${minutes} minute${minutes === 1 ? '' : 's'}.\n`)
   openBrowser(`${start.verificationUri}?code=${encodeURIComponent(start.userCode)}`)
 
   const deadline = Date.now() + start.expiresIn * 1000
@@ -204,10 +233,11 @@ async function verifyToken(baseUrl: string, token: string): Promise<CurrentUser>
 
 export async function whoami(override?: string): Promise<void> {
   const config = await loadUserConfig()
-  const token = config.token ?? process.env.DOXLOOP_TOKEN ?? process.env.DOXBRIX_TOKEN
-  if (!token) throw new DoxloopError('Not signed in. Run `doxloop login`.')
+  const destination = apiUrl(override ?? config.apiUrl)
+  const token = tokenFor(config, destination)
+  if (!token) throw new DoxloopError(`Not signed in to ${new URL(destination).host}. Run \`doxloop login\`.`)
   const account = await requestJson<CurrentUser>(
-    `${apiUrl(override ?? config.apiUrl)}/api/v1/me`,
+    `${destination}/api/v1/me`,
     { headers: { Authorization: `Bearer ${token}` } },
   )
   process.stdout.write(`${account.email}${account.name ? ` (${account.name})` : ''}\n`)
@@ -237,11 +267,12 @@ async function authenticatedRequestInternal<T>(
   allowNotFound: boolean,
 ): Promise<T | undefined> {
   const config = await loadUserConfig()
-  const token = config.token ?? process.env.DOXLOOP_TOKEN ?? process.env.DOXBRIX_TOKEN
-  if (!token) throw new DoxloopError('Not signed in. Run `doxloop login` first.')
+  const destination = apiUrl(override ?? config.apiUrl)
+  const token = tokenFor(config, destination)
+  if (!token) throw new DoxloopError(`Not signed in to ${new URL(destination).host}. Sign in with Doxbrix first.`)
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${token}`)
-  const url = `${apiUrl(override ?? config.apiUrl)}${path}`
+  const url = `${destination}${path}`
   let response: Response
   try {
     response = await fetch(url, { ...init, headers, redirect: 'error' })
@@ -349,6 +380,8 @@ function configPath(): string {
 }
 
 function openBrowser(url: string): void {
+  // Headless machines, SSH sessions, and recordings print the link instead.
+  if (process.env.DOXLOOP_NO_BROWSER === '1') return
   const command =
     process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]

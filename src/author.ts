@@ -1,3 +1,4 @@
+import { stampVerifiedRevisions } from './evidence.js'
 import { pathExists } from './fs.js'
 import { UsageBudget, isAccountLimit } from './usage-budget.js'
 import { adoptPlanningCaptures } from './planning-captures.js'
@@ -1215,6 +1216,7 @@ Finish with a short summary of what you changed and anything the instruction ask
     const state = options.recordOperationalState === false
       ? undefined
       : await recordSyncState(options.root, completedProject.sources)
+    if (state) await stampVerifiedRevisions(options.root, state)
     const recorded = state ? Object.keys(state.sources).length : 0
     if (recorded > 0) {
       process.stdout.write(

@@ -7,15 +7,19 @@ import { applyBlockEdits, type EditableBlock } from './page-content-edits'
 interface Content { content: string; fingerprint: string }
 interface Preview { url: string; blocks: EditableBlock[] }
 
-export function PageContentEditor({ root, path, editing, native, base, focusLine, refreshToken, onEditingChange, onStatus, onChanged, children }: {
+export function PageContentEditor({ root, path, editing, native, base, focusLine, refreshToken, mode: controlledMode, onModeChange, onEditingChange, onStatus, onChanged, children }: {
   root: string; path: string; editing: boolean; native: boolean; base: string; focusLine: number; refreshToken: number
+  /** When given, the Content / Source mode is owned by the parent (the tab row above the page). */
+  mode?: 'visual' | 'source'; onModeChange?: (mode: 'visual' | 'source') => void
   onEditingChange: (editing: boolean) => void; onStatus: (dirty: boolean, busy: boolean) => void
   onChanged: () => Promise<void>; children: ComponentChildren
 }) {
   const key = `doxloop:text-draft:${root}:live:${path}`
   const [saved, setSaved] = useState<Content>()
   const [draft, setDraft] = useState<Content>()
-  const [mode, setMode] = useState<'visual' | 'source'>(native && !focusLine ? 'visual' : 'source')
+  const [ownMode, setOwnMode] = useState<'visual' | 'source'>(native && !focusLine ? 'visual' : 'source')
+  const mode = controlledMode ?? ownMode
+  const setMode = (next: 'visual' | 'source') => { setOwnMode(next); onModeChange?.(next) }
   const [preview, setPreview] = useState<Preview>()
   const [rendering, setRendering] = useState(false)
   const [busy, setBusy] = useState(false)

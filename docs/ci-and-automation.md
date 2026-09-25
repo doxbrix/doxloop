@@ -61,9 +61,9 @@ time but never correctness.
 ## Check status and run a cycle
 
 The **Sources** page shows each connected source with its last check time and
-a **Test connection** action. **Overview** shows when the loop was last
+a **Test connection** action. **Home** shows when the loop was last
 checked and whether a proposal needs review. In the Monitoring dialog, **Check
-now** starts one cycle as a visible job: its live log is under **Update**, and
+now** starts one cycle as a visible job: its live log is under **Plan**, and
 when it finishes a notice reports whether anything changed, how many pages
 are stale, and which proposal was drafted. **Disable** removes the schedule
 while keeping the saved settings for later.
@@ -78,12 +78,12 @@ an **Accept change** button on each change. Only accepted changes are applied:
 current file fingerprints are verified and the selected result is validated
 before the actual documentation is touched.
 
-## Deploy from the control center
+## Publish from the control center
 
-Publishing is always an explicit action on the **Deploy** page. Sign in with
-your browser, confirm visibility, run a **Dry run** to validate and build
-without uploading, then choose **Deploy to Doxbrix**. Deployments are private by
-default, and a public deployment is shown clearly before it happens.
+Publishing is always an explicit action on the **Publish** page. Sign in to
+Doxbrix with your browser, choose **Public** or **Private**, then choose
+**Publish to Doxbrix**. Every publish validates and builds first and uploads
+nothing if a check fails. Sites are private unless you choose otherwise.
 
 ## Headless checks for hosted CI
 

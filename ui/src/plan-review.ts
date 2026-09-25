@@ -115,6 +115,8 @@ export interface PlanScreenshotCoverage {
   withScreenshots: number
   /** Why coverage is thin, when the evidence says so. */
   reason: 'sign-in' | 'unreachable' | 'unknown'
+  /** Text-only guides the planner gave a reason for (code tutorials, contributor workflows). */
+  explained: number
 }
 
 const SIGN_IN_ROUTE = /(sign-?in|sign-?up|log-?in|register|auth|password)/i
@@ -138,7 +140,8 @@ export function planScreenshotCoverage(
   const reason = readiness?.status === 'authentication-required' || readiness?.signInPath || onlySignInScreens
     ? 'sign-in'
     : readiness && readiness.reachable === false ? 'unreachable' : 'unknown'
-  return { guides: guides.length, withScreenshots: visual.length, reason }
+  const explained = guides.filter((page) => page.visuals?.mode === 'none' && Boolean(page.visuals.rationale?.trim())).length
+  return { guides: guides.length, withScreenshots: visual.length, reason, explained }
 }
 
 export interface RetryAgentOption {

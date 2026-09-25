@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { readEvidenceMap } from './evidence.js'
-import { GLOSSARY_MARKER, generateGlossaryPage, readGlossary, renderGlossary } from './glossary.js'
+import { GLOSSARY_MARKER, generateGlossaryPage, readGlossary, readerDefinition, renderGlossary } from './glossary.js'
 import { listRequests } from './history.js'
 import { loadProject, saveProjectSettings, scaffoldProject } from './project.js'
 import { validateProject } from './validation.js'
@@ -51,8 +51,10 @@ describe('glossary page', () => {
     expect(JSON.stringify(config.spaces[0]!.nav)).toContain('"file":"glossary"')
     expect((await readEvidenceMap(root))?.pages['glossary.mdx']).toMatchObject({ sources: [], confidence: 'inferred' })
     const validation = await validateProject(root)
-    expect(validation.issues.filter((issue) => issue.severity === 'error' && issue.file === 'glossary.mdx')).toEqual([])
+    expect(validation.issues.filter((issue) => issue.file === 'glossary.mdx')).toEqual([])
     expect((await listRequests(root))[0]).toMatchObject({ kind: 'glossary', status: 'completed' })
+    expect(page).not.toContain('# Glossary')
+    expect(page).not.toContain('Doxloop')
     const again = await generateGlossaryPage(root, { terms: [{ term: 'Only', definition: 'One term.' }] })
     expect(again.generated).toBe(true)
     expect(await readFile(join(root, 'glossary.mdx'), 'utf8')).toContain('## Only')
@@ -79,5 +81,15 @@ describe('glossary page', () => {
     expect(html).toContain('<dt id="alpha">Alpha</dt>')
     expect(html).toContain('First &amp; foremost.')
     expect(html).toContain(GLOSSARY_MARKER)
+  })
+
+  test('keeps the definition and drops writer style notes', () => {
+    expect(readerDefinition('Hoppscotch Desktop application; use this capitalization consistently.')).toBe('Hoppscotch Desktop application.')
+    expect(readerDefinition('Use this capitalization instead of Websocket.')).toBe('')
+    expect(readerDefinition('Named set of regular and secret variables.')).toBe('Named set of regular and secret variables.')
+    const page = renderGlossary([{ term: 'WebSocket', definition: 'Use this capitalization instead of Websocket.' }, { term: 'Proxy', definition: 'Server-side execution path.' }], 'markdown', 'Pulse')
+    expect(page).toContain('## Proxy')
+    expect(page).not.toContain('## WebSocket')
+    expect(renderGlossary([{ term: 'app state', definition: 'Editor state.' }, { term: 'onChange', definition: 'Callback.' }], 'markdown', 'X')).toMatch(/## App state[\s\S]*## onChange/)
   })
 })

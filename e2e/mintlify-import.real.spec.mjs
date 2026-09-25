@@ -27,7 +27,7 @@ test('converts a local Mintlify folder through setup and opens editable Doxbrix 
     })
     await waitForOutput(ui, 'Doxloop UI:')
     await page.goto('http://127.0.0.1:' + port + '/overview')
-    await page.getByRole('radio', { name: /Use existing documentation folder/ }).click()
+    await page.getByRole('radio', { name: /existing documentation folder/ }).click()
     await page.getByRole('tab', { name: 'Mintlify to Doxbrix', exact: true }).click()
     // Exercise the GitHub form and warning gate without relying on the network in browser CI.
     let githubInput

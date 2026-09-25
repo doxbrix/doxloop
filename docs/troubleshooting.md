@@ -50,9 +50,9 @@ packaged version.
 
 ## An external generator cannot build
 
-External generators need their adapter package and native toolchain. Run a
-**Dry run** on the **Deploy** page: it performs the generator's strict build
-without uploading and reports the failing command. Native generators may
+External generators need their adapter package and native toolchain. Choose
+**Preview docs**, or publish: a publish runs the generator's strict build
+first, uploads nothing if it fails, and its log names the failing command. Native generators may
 require Python, Ruby, Hugo, or Node dependencies in addition to the adapter.
 
 ## Validation warns that navigation was not verified
@@ -62,9 +62,8 @@ something Doxloop cannot read statically: a Hugo or Jekyll theme, a MkDocs
 navigation plugin, a Starlight plugin, a VitePress or Starlight sidebar built
 by a function or imported from another file, or a Sphinx `autosummary`
 toctree. It is a warning, not an error, and it replaces the false
-"unnavigated page" errors those sites used to get. Run **Dry run** on the
-Deploy page, which performs the generator's strict build, to confirm every
-page is reachable. To turn the warning into real checks, list the navigation
+"unnavigated page" errors those sites used to get. Publishing performs the
+generator's strict build first, which confirms every page is reachable. To turn the warning into real checks, list the navigation
 in the generator's own configuration file instead of building it in code.
 
 ## The wizard says a generator's tools are missing
@@ -172,7 +171,7 @@ how many automatic resumes a run gets; `0` disables them.
 ## Generation finishes but nothing changed
 
 Generation never edits the documentation directly. Open **Review** to inspect
-the proposal and accept its changes. The **Overview** page shows **Needs your
+the proposal and accept its changes. The **Home** page shows **Needs your
 review** whenever a proposal is waiting.
 
 ## Accepting a change reports a conflict
@@ -214,18 +213,18 @@ repository through its provider, a local folder in place. On macOS, Doxloop
 tests the scheduled job in the real scheduler context when you choose **Save
 and install** and reports whether the background process can find the coding
 assistant. Choose **Check now** to run one cycle immediately; a notice reports
-its result and the full log is under **Recent activity** on the Overview page.
+its result and the full log is under **Recent activity** on the Home page.
 
 A local folder without Git history reports "no sync baseline" until the first
-accepted update records one. Run **Update** once so later checks can compare
+accepted update records one. Run **Plan** once so later checks can compare
 the folder's files against that baseline.
 
 ## Deployment fails
 
 Deployment stops when validation reports errors. Open **Review** to see the
-errors on the affected files, or run **Dry run** on the **Deploy** page for
-the full validation and build output. If sign-in fails, choose **Sign out**
-and **Sign in with browser** again; the Doxbrix API requires HTTPS and does not
+errors on the affected files, or open the failed publish's log on the
+**Publish** page for the full validation and build output. If Doxbrix does not
+accept the saved sign-in, choose **Sign in again**; the Doxbrix API requires HTTPS and does not
 follow redirects. **Deployment history** on the same page keeps the outcome of
 every attempt.
 

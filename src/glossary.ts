@@ -95,8 +95,30 @@ export async function generateGlossaryPage(root: string, raw: unknown): Promise<
   return readGlossary(root)
 }
 
+/**
+ * Plan terminology doubles as a writer style sheet ("use this capitalization",
+ * "use X instead of Y"). Readers need only the defining part, so style clauses
+ * are dropped, and an entry that is nothing but a style note is left out.
+ */
+const STYLE_CLAUSE = /^(use|prefer|avoid|do not|don't|never|always|write|spell|capitali[sz]e|keep)\b|\bcapitali[sz]ation\b|\binstead of\b/i
+export function readerDefinition(definition: string): string {
+  const clauses = definition.trim().split(/;\s+|(?<=\.)\s+/).map((clause) => clause.trim()).filter(Boolean)
+  const kept = clauses.filter((clause) => !STYLE_CLAUSE.test(clause))
+  if (kept.length === 0) return ''
+  const text = kept.join(' ').replace(/[;,]\s*$/, '')
+  return /[.!?]$/.test(text) ? text : `${text}.`
+}
+
+/** "app state" reads as a heading when capitalised; code-like terms ("onChange", "x.y") keep their exact spelling. */
+function headingTerm(term: string): string {
+  return /^[a-z][a-z -]*$/.test(term) ? term[0]!.toUpperCase() + term.slice(1) : term
+}
+
 export function renderGlossary(terms: GlossaryTerm[], format: 'markdown' | 'rst' | 'html', productTitle: string): string {
-  const sorted = [...terms].sort(byTerm)
+  const sorted = [...terms]
+    .map((entry) => ({ term: entry.term, definition: readerDefinition(entry.definition) }))
+    .filter((entry) => entry.definition)
+    .sort(byTerm)
   const description = `Definitions of the terms used across the ${productTitle} documentation.`
   if (format === 'rst') {
     const entries = sorted.map((entry) => `   ${entry.term}\n      ${entry.definition.replace(/\n+/g, ' ')}`).join('\n\n')
@@ -106,8 +128,8 @@ export function renderGlossary(terms: GlossaryTerm[], format: 'markdown' | 'rst'
     const items = sorted.map((entry) => `      <dt id="${slug(entry.term)}">${escapeHtml(entry.term)}</dt>\n      <dd>${escapeHtml(entry.definition)}</dd>`).join('\n')
     return `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8">\n    <title>Glossary</title>\n    <meta name="description" content="${escapeHtml(description)}">\n    <!-- ${GLOSSARY_MARKER} -->\n  </head>\n  <body>\n    <main>\n      <h1>Glossary</h1>\n      <p>${escapeHtml(description)}</p>\n      <dl>\n${items}\n      </dl>\n    </main>\n  </body>\n</html>\n`
   }
-  const sections = sorted.map((entry) => `## ${entry.term}\n\n${entry.definition.trim()}\n`).join('\n')
-  return `---\ntitle: "Glossary"\ndescription: ${JSON.stringify(description)}\nicon: book\n---\n\n<!-- ${GLOSSARY_MARKER} -->\n\n# Glossary\n\n${description} Each entry gives the meaning Doxloop and the product use, so readers and writers share one vocabulary.\n\n${sections}`
+  const sections = sorted.map((entry) => `## ${headingTerm(entry.term)}\n\n${entry.definition.trim()}\n`).join('\n')
+  return `---\ntitle: "Glossary"\ndescription: ${JSON.stringify(description)}\nicon: book\n---\n\n<!-- ${GLOSSARY_MARKER} -->\n\n${description} Each entry gives the meaning used throughout these pages.\n\n${sections}`
 }
 
 async function glossaryLocation(root: string, project: DoxloopProject): Promise<{

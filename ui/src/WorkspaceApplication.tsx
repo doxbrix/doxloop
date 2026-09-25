@@ -16,16 +16,17 @@ import { DocsSiteSourceFields, type DocsSiteInspection } from './DocsSiteSourceF
 import { settledPageEditJobs, settledPlanJobs } from './job-transitions'
 import { stripJobLineStamp } from '../../src/job-events.js'
 import { agentModels, defaultModelForAgent, modelReasoningLevels, preferredReasoningLevel } from './model-options'
-import { countPlanPages, groupPlanPages, isGuidePage, planActionLabel, planApprovalControls, planPrimaryAction, planScreenshotCoverage, retryAgentChoice, type PlanPageFilter } from './plan-review'
+import { countPlanPages, isGuidePage, planActionLabel, planApprovalControls, planPrimaryAction, planScreenshotCoverage, retryAgentChoice, type PlanPageFilter } from './plan-review'
 import { canonicalWorkspacePath, workspacePath, workspaceRoute, type ResolvedWorkspaceRoute, type WorkspaceParams, type WorkspaceRoute } from './routes'
 import { setLocation, useSearchParams } from './url-state'
 import { PollFailureTracker, jobPollDelay } from './polling'
-import { displayLogLines, stripAnsi } from './log-lines'
+import { displayLogLines, stripAnsi, summarizeRunActivity } from './log-lines'
 import { runEstimateText, type ServerRunEstimate } from './run-estimate'
 import { PREVIEW_NOTICE_EVENT, openPreviewTab, type PreviewNotice } from './preview-window'
 import { useSeededForm } from './form-sync'
 import { batchLimitsForScope, screenshotIntentFromChoice } from './setup-plan'
 import { ProjectSwitcher } from './ProjectSwitcher'
+import { CommandPalette, useCommandPaletteShortcut, type PaletteCommand } from './CommandPalette'
 import { AgentCapabilityMatrix } from './agent-capabilities'
 import { ProposalRationaleDrawer, ProposalRenderedDiff, ProposalSourceDiff } from './proposal-diff'
 import { AssetLibrary, AssetPicker, readFileAsBase64 } from './AssetLibrary'
@@ -52,23 +53,29 @@ type ApplicationReadiness = {
   message: string
 }
 
+/**
+ * The sidebar reads as the loop: Home, then Plan → Docs → Review → Publish,
+ * then what you set up once (Sources, Settings). A `null` entry is a divider.
+ */
 const NAV = [
-  ['overview', 'Overview', 'overview'],
-  ['sources', 'Sources', 'sources'],
-  ['authoring', 'Update', 'update'],
-  ['pages', 'Pages', 'file'],
+  ['overview', 'Home', 'home'],
+  null,
+  ['authoring', 'Plan', 'sparkle'],
+  ['pages', 'Docs', 'file'],
   ['proposals', 'Review', 'review'],
-  ['publish', 'Deploy', 'deploy'],
+  ['publish', 'Publish', 'publish'],
+  null,
+  ['sources', 'Sources', 'sources'],
   ['settings', 'Settings', 'settings'],
 ] as const
 
 const PAGE_TITLES: Record<Page, string> = {
-  overview: 'Overview',
+  overview: 'Home',
   sources: 'Sources',
-  authoring: 'Create / Update',
-  pages: 'Pages',
-  proposals: 'Review changes',
-  publish: 'Deploy',
+  authoring: 'Plan',
+  pages: 'Docs',
+  proposals: 'Review',
+  publish: 'Publish',
   settings: 'Settings',
   'not-found': 'Not found',
 }
@@ -318,10 +325,27 @@ export function WorkspaceApplication({
     if (url) void reload()
   }
 
-  const runningJobs = state.jobs.filter((job) => job.status === 'running').length
+  // The local preview server stays up for the whole session; it is not a task the reader waits on.
+  const runningJobs = state.jobs.filter((job) => job.status === 'running' && job.type !== 'preview').length
 
-  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'pages' ? 'pages-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''}`}>
+  const params = useSearchParams()
+  // A single open proposal gets a way back to the list; the sidebar stays.
+  const focusMode = page === 'proposals' && Boolean(params.get('proposal'))
+  const focusBack: { label: string; route: WorkspaceRoute } | null = focusMode ? { label: 'Back to Review', route: 'proposals' } : null
+
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  useCommandPaletteShortcut(() => setPaletteOpen(true))
+  const paletteCommands: PaletteCommand[] = [
+    { id: 'act:plan', group: 'Actions', label: documentationExists(state) ? 'Plan an update' : 'Create documentation', icon: 'sparkle', run: () => navigate('authoring') },
+    { id: 'act:preview', group: 'Actions', label: 'Preview docs', icon: 'external', run: () => void openPreview() },
+    { id: 'act:new', group: 'Actions', label: 'New project', icon: 'plus', run: onNewProject },
+    ...NAV.flatMap((entry) => entry ? [{ id: `go:${entry[0]}`, group: 'Go to' as const, label: entry[1], icon: entry[2], run: () => navigate(entry[0]) }] : []),
+    ...(validationState(state.validation).ok ? (state.validation as Validation).pages : []).map((path) => ({ id: `page:${path}`, group: 'Pages' as const, label: pageTitleFromPath(path), icon: 'file', hint: path, run: () => navigate('pages', { path }) })),
+  ]
+
+  return <div class={`shell ${page === 'proposals' ? 'proposal-shell' : ''} ${page === 'pages' ? 'pages-shell' : ''} ${page === 'sources' ? 'sources-shell' : ''} ${focusMode ? 'focus-mode' : ''}`}>
     {navOpen && <button class="nav-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />}
+    <CommandPalette open={paletteOpen} commands={paletteCommands} onClose={() => setPaletteOpen(false)} />
 
     {readyProposal && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-ready-title">
@@ -335,7 +359,7 @@ export function WorkspaceApplication({
 
     <aside class={`sidebar ${navOpen ? 'open' : ''}`}>
       <div class="sidebar-brand-row">
-        <button class="workspace-brand" type="button" aria-label="Doxloop" onClick={() => navigate('overview')}><img src={DOXLOOP_LOGO} alt="Doxloop" /></button>
+        <button class="workspace-brand" type="button" aria-label="Doxloop" onClick={() => navigate('overview')}><span class="brand-mark" aria-hidden="true">D</span><span class="brand-word">Doxloop</span><img src={DOXLOOP_LOGO} alt="" /></button>
         <button class="sidebar-close" type="button" aria-label="Close navigation" onClick={() => setNavOpen(false)}><Icon name="close" size={16} /></button>
       </div>
       <ProjectSwitcher
@@ -349,29 +373,34 @@ export function WorkspaceApplication({
         }}
       />
       <nav class="reference-sidebar-nav" aria-label="Main navigation">
-        {NAV.map(([id, label, icon]) => <button key={id} type="button" class={`nav-item ${page === id ? 'active' : ''}`} aria-label={`${id === 'authoring' ? authoringNavigationLabel : label}${id === 'proposals' && pendingProposalCount > 0 ? `, ${pendingProposalCount} pending` : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}>
-          <span class="nav-glyph"><Icon name={icon} size={17} /></span>
-          <span class="nav-copy"><span>{id === 'authoring' ? authoringNavigationLabel : label}</span></span>
-          {id === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}
+        {NAV.map((entry, index) => entry === null ? <span key={`divider-${index}`} class="nav-divider" role="separator" /> : <button key={entry[0]} type="button" class={`nav-item ${page === entry[0] ? 'active' : ''}`} aria-label={`${entry[1]}${entry[0] === 'proposals' && pendingProposalCount > 0 ? `, ${pendingProposalCount} pending` : ''}`} aria-current={page === entry[0] ? 'page' : undefined} onClick={() => navigate(entry[0])}>
+          <span class="nav-glyph"><Icon name={entry[2]} size={17} /></span>
+          <span class="nav-copy"><span>{entry[1]}</span></span>
+          {entry[0] === 'proposals' && pendingProposalCount > 0 && <b class="nav-count" aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'}`}>{pendingProposalCount}</b>}
         </button>)}
       </nav>
-      <button type="button" class="new-project-button" aria-label="New documentation project" onClick={onNewProject}>
-        <span class="nav-glyph"><Icon name="plus" size={15} /></span>
-        <span><strong>New documentation project</strong><small>Start new or import existing docs</small></span>
-      </button>
+      <div class="sidebar-foot">
+        <button type="button" class="new-project-button" aria-label="New documentation project" title="Start new or import existing docs" onClick={onNewProject}>
+          <span class="nav-glyph"><Icon name="plus" size={16} /></span>
+          <span><strong>New project</strong><small>Start new or import existing docs</small></span>
+        </button>
+        <a class="sidebar-foot-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer" aria-label="Support (opens GitHub in a new tab)"><span class="nav-glyph"><Icon name="help" size={16} /></span><span>Support</span></a>
+      </div>
     </aside>
 
     <main class="workspace-main">
       <header class="workspace-navbar">
         <button class="workspace-mobile-menu" type="button" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Icon name="menu" size={18} /></button>
-        <div class="workspace-crumbs">
-          <button type="button" class="workspace-crumb" title={project.title} aria-label={`${project.title} overview`} onClick={() => navigate('overview')}>{project.title}</button>
-          <Icon name="chevronRight" size={14} />
-          <strong class="workspace-screen-title">{page === 'authoring' ? `${authoringNavigationLabel} documentation` : PAGE_TITLES[page]}</strong>
-        </div>
+        {focusMode && focusBack
+          ? <button type="button" class="workspace-back-link" onClick={() => page === 'proposals' ? setLocation('proposals', {}, 'push') : navigate(focusBack.route)}><Icon name="chevronLeft" size={16} /><span>{focusBack.label}</span></button>
+          : <div class="workspace-crumbs">
+            <button type="button" class="workspace-crumb" title={project.title} aria-label={`${project.title} overview`} onClick={() => navigate('overview')}>{project.title}</button>
+            <Icon name="chevronRight" size={14} />
+            <strong class="workspace-screen-title">{page === 'authoring' ? `${authoringNavigationLabel} documentation` : PAGE_TITLES[page]}</strong>
+          </div>}
         <span class="workspace-navbar-spacer" />
         {runningJobs > 0 && <button type="button" class="workspace-activity-chip" title="Open running task progress" aria-label={`${runningJobs} task${runningJobs === 1 ? '' : 's'} running. Open progress`} onClick={() => { const job = state.jobs.find((item) => item.status === 'running' && !item.type.includes('preview')); const id = job?.type.match(/^proposal:(?:revise|resume):(.+)$/)?.[1]; if (id) location.assign(`/review?proposal=${encodeURIComponent(id)}`); else { navigate(job?.type.startsWith('page-edit:') ? 'pages' : 'authoring'); } }}><i />{runningJobs === 1 ? '1 task running' : `${runningJobs} tasks running`}</button>}
-        <a class="workspace-support-link" href="https://github.com/doxbrix/doxloop" target="_blank" rel="noreferrer" aria-label="Support (opens GitHub in a new tab)"><Icon name="help" size={15} /><span>Support</span></a>
+        <button type="button" class="workspace-search-button" aria-label="Search or jump to (⌘K)" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /><span>Search or jump to…</span><kbd>⌘K</kbd></button>
         <button type="button" class="workspace-preview-primary" aria-label="Preview docs in a new tab" aria-busy={previewNotice?.state === 'starting'} disabled={previewNotice?.state === 'starting'} onClick={() => void openPreview()}>{previewNotice?.state === 'starting' ? <span class="spinner" /> : <Icon name="preview" size={15} />}<strong>{previewNotice?.state === 'starting' ? 'Starting preview…' : 'Preview docs'}</strong><Icon name="external" size={12} /></button>
       </header>
       <div class="main">
@@ -422,7 +451,7 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
   const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
   const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
   const coverage = discoveredItems > 0 ? Math.round((documentedItems / discoveredItems) * 100) : 0
-  const coverageLabel = !intelligence ? 'Checking evidence' : coverage >= 90 ? 'Strong coverage' : coverage >= 70 ? 'Good foundation' : coverage >= 40 ? 'Gaps remain' : 'Needs attention'
+  const coverageLabel = !intelligence ? 'Checking evidence' : !documentationExists(state) ? 'Not documented yet' : coverage >= 90 ? 'Strong coverage' : coverage >= 70 ? 'Good foundation' : coverage >= 40 ? 'Gaps remain' : 'Needs attention'
   const hasDocs = documentationExists(state)
   const plan = state.documentationPlan
   const deployedSlug = state.effectiveDeployment?.slug ?? project.deployment?.slug
@@ -433,7 +462,7 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
   const added = changed.filter((change) => change.kind === 'added').length
   const modified = changed.filter((change) => change.kind !== 'added' && change.kind !== 'deleted').length
   const recentJobs = state.jobs.slice(0, 5)
-  const running = state.jobs.filter((job) => job.status === 'running').length
+  const running = state.jobs.filter((job) => job.status === 'running' && job.type !== 'preview').length
   const validation = validationState(state.validation)
   const issues = validation.ok ? validation.result.issues : []
   const errors = validation.ok ? validation.result.errors : 0
@@ -449,21 +478,20 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
   const pipeline = [
     { label: 'Sources', sub: `${project.sources.length} connected`, icon: 'sources', route: 'sources' as const, state: project.sources.length ? 'done' : 'idle' },
     { label: 'Plan', sub: plan ? `Version ${plan.version}` : 'Not started', icon: 'list', route: 'authoring' as const, state: plan?.status === 'planning' || plan?.status === 'revising' ? 'active' : plan ? 'done' : 'idle' },
-    { label: 'Write', sub: plan?.status === 'generating' ? 'In progress' : hasDocs ? `${validation.ok ? validation.result.pages.length : planPages} pages ready` : 'Waiting', icon: 'update', route: 'authoring' as const, state: plan?.status === 'generating' ? 'active' : hasDocs ? 'done' : 'idle' },
+    { label: 'Write', sub: plan?.status === 'generating' ? 'In progress' : openProposal && !hasDocs ? `${planPages} pages written` : hasDocs ? `${validation.ok ? validation.result.pages.length : planPages} pages ready` : 'Waiting', icon: 'update', route: 'authoring' as const, state: plan?.status === 'generating' ? 'active' : hasDocs || openProposal ? 'done' : 'idle' },
     { label: 'Review', sub: openProposal ? 'Awaiting you' : 'No pending changes', icon: 'review', route: 'proposals' as const, state: openProposal ? 'active' : hasDocs ? 'done' : 'idle' },
-    { label: 'Deploy', sub: published ? 'Published' : deployedSlug ? 'Not published yet' : 'Not configured', icon: 'deploy', route: 'publish' as const, state: published ? 'done' : 'idle' },
+    { label: 'Publish', sub: published ? 'Published' : deployedSlug ? 'Not published yet' : 'Not configured', icon: 'publish', route: 'publish' as const, state: published ? 'done' : 'idle' },
   ]
   const doneSteps = pipeline.filter((step) => step.state === 'done').length
 
   return <section class="overview-page">
-    <PageHeader title="Your documentation loop" description="Everything between your source code and the published docs, in one pass." />
+    <PageHeader kicker="Home" title="Your documentation loop" description="Everything between your source code and the published docs, in one pass." />
 
     <section class="pipeline-card" aria-label="Documentation workflow">
       <div class="pipeline-track"><i style={{ width: `${Math.max(0, (doneSteps - 1) / (pipeline.length - 1)) * 100}%` }} /></div>
       {pipeline.map((step) => <button type="button" key={step.label} class={step.state} onClick={() => navigate(step.route)}>
-        <span><Icon name={step.state === 'done' ? 'check' : step.icon} size={step.state === 'done' ? 15 : 17} /></span>
-        <strong>{step.label}</strong>
-        <small>{step.sub}</small>
+        <span><Icon name={step.state === 'done' ? 'check' : step.icon} size={step.state === 'done' ? 13 : 17} /></span>
+        <span class="pipeline-copy"><strong>{step.label}</strong><small>{step.sub}</small></span>
       </button>)}
     </section>
 
@@ -492,19 +520,21 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
         <span class="ov-metric-copy"><small>Coverage</small><strong>{coverageLabel}</strong><span>{intelligence ? `${documentedItems} of ${discoveredItems} discovered items documented` : 'Appears after source discovery completes'}</span></span>
         <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
       </button>
-      <button type="button" class={`ov-metric ${errors ? 'bad' : warnings ? 'warn' : 'good'}`} onClick={() => navigate('pages')}>
+      <button type="button" class={`ov-metric ${!hasDocs ? '' : errors ? 'bad' : warnings ? 'warn' : 'good'}`} onClick={() => navigate('pages')}>
         <span class="ov-figure">{pageCount}</span>
-        <span class="ov-metric-copy"><small>Pages</small><strong>{validation.ok ? validationHeadline(validation.result) : 'Validation unavailable'}</strong><span>{validation.ok ? (issues.length ? 'Fix the issues before deploying.' : 'Navigation, metadata, and links look consistent.') : validation.reason}</span></span>
+        {hasDocs
+          ? <span class="ov-metric-copy"><small>Pages</small><strong>{validation.ok ? validationHeadline(validation.result) : 'Validation unavailable'}</strong><span>{validation.ok ? (issues.some((issue) => issue.severity === 'error') ? 'Fix the errors before publishing.' : issues.length ? 'Worth a look. Warnings do not block publishing.' : 'Navigation, metadata, and links look consistent.') : validation.reason}</span></span>
+          : <span class="ov-metric-copy"><small>Pages</small><strong>Starter pages</strong><span>Replaced when you approve your first proposal.</span></span>}
         <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
       </button>
       <button type="button" class={`ov-metric ${published ? 'good' : ''}`} onClick={() => navigate('publish')}>
         <span class="ov-metric-icon"><Icon name={deployedSlug ? 'cloud' : 'publish'} size={20} /></span>
-        <span class="ov-metric-copy"><small>Published site</small><strong>{published ? 'Published successfully' : 'No deployment yet'}</strong><code>{deployedAddress}</code></span>
+        <span class="ov-metric-copy"><small>Published site</small><strong>{published ? 'Published successfully' : 'Not published yet'}</strong><code>{deployedAddress}</code></span>
         <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
       </button>
     </div>
 
-    {issues.length > 0 && <section class="panel ov-issues" aria-label="Validation issues">
+    {hasDocs && issues.length > 0 && <section class="panel ov-issues" aria-label="Validation issues">
       <header class="panel-head">
         <div class="panel-title"><h2>Validation issues</h2><p>{validation.ok ? validationHeadline(validation.result) : ''} across {pageCount} page{pageCount === 1 ? '' : 's'}.</p></div>
         <div class="panel-actions"><Button size="sm" onClick={() => navigate('pages')}>Open pages</Button></div>
@@ -523,7 +553,7 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
       <ol class="ov-activity">
         {recentJobs.length ? recentJobs.map((job) => <li key={job.id} class={job.status}>
           <span class="ov-activity-icon"><Icon name={workflowActivityIcon(job.type)} size={15} /></span>
-          <p><strong>{workflowActivityLabel(job.type)}</strong>{job.status === 'running' ? ' is running' : job.status === 'succeeded' ? ' completed successfully' : job.status === 'failed' ? ` needs attention${jobFailureReason(job) ? `: ${jobFailureReason(job)}` : ''}` : ` was ${job.status}`}</p>
+          <p><strong>{workflowActivityLabel(job.type)}</strong>{jobActivityText(job)}</p>
           <time>{timeText(job.finishedAt ?? job.startedAt)}</time>
           <span class="ov-activity-actions">
             {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), `${workflowActivityLabel(job.type)} stopped`)}>Stop</Button>}
@@ -591,7 +621,6 @@ function RepositoryFolderSelect({ value, directories, loading, connected, onChan
 
 function SourcesReference({ state, act, navigate }: { state: UiState; act: Action; navigate: (page: WorkspaceRoute) => void }) {
   const project = state.project!
-  const [menuOpen, setMenuOpen] = useState(false)
   const [dialog, setDialog] = useState<'source' | 'openapi' | 'docs-site' | null>(null)
   const [docsSiteInspection, setDocsSiteInspection] = useState<DocsSiteInspection>()
   const [docsSiteError, setDocsSiteError] = useState('')
@@ -610,6 +639,8 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
   const [saving, setSaving] = useState(false)
   const [checkingSource, setCheckingSource] = useState('')
   const [coverageMetricId, setCoverageMetricId] = useState<string>()
+  /** The source whose ⋯ menu is open. */
+  const [rowMenu, setRowMenu] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const filtered = project.sources
   const resetAdd = () => {
@@ -624,7 +655,6 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
   }
   const openDialog = (next: 'source' | 'openapi' | 'docs-site') => {
     resetAdd()
-    setMenuOpen(false)
     setDialog(next)
   }
   const loadIntelligence = async () => setIntelligence(await api<SourceIntelligence>('/api/source-intelligence'))
@@ -633,6 +663,17 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
     void api<SourceIntelligence>('/api/source-intelligence').then((report) => { if (active) setIntelligence(report) }).catch(() => undefined)
     return () => { active = false }
   }, [project.sources.map((source) => `${source.name}:${source.path}`).join('|')])
+  useEffect(() => {
+    if (!rowMenu) return
+    const close = (event: MouseEvent) => {
+      const target = event.target as Element | null
+      if (!target?.closest?.('.source-row-actions')) setRowMenu(null)
+    }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setRowMenu(null) }
+    addEventListener('mousedown', close)
+    addEventListener('keydown', escape)
+    return () => { removeEventListener('mousedown', close); removeEventListener('keydown', escape) }
+  }, [rowMenu])
   const closeDialog = () => setDialog(null)
   const connectRepository = async () => {
     if (!add.repository.trim() || connecting) return
@@ -700,77 +741,113 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
       setRecrawling('')
     }
   }
-  const remoteSourceCount = filtered.filter((source) => Boolean(source.remote)).length
-  const openapiSourceCount = filtered.filter((source) => source.kind === 'openapi').length
-  const docsSiteSourceCount = filtered.filter((source) => source.kind === 'docs-site').length
+  const checkSource = (source: Source) => {
+    setRowMenu(null)
+    setCheckingSource(source.name)
+    void act(() => post(`/api/sources/${encodeURIComponent(source.name)}/test`), 'Source connection checked').then(() => loadIntelligence()).finally(() => setCheckingSource(''))
+  }
+  const checkingAll = state.jobs.some((job) => job.type === 'sync' && job.status === 'running')
+  const checkBlocked = authoringJobRunning(state.jobs)
+  /** The "Where is it?" choice folds the source mode and the repository access method into one list. */
+  const whereIs: 'public' | 'private' | 'local' = sourceMode === 'local' ? 'local' : add.authMethod === 'credentials' ? 'private' : 'public'
+  const setWhereIs = (next: 'public' | 'private' | 'local') => {
+    if (next === 'local') { setSourceMode('local'); return }
+    setSourceMode('git')
+    setAdd({ ...add, authMethod: next === 'private' ? 'credentials' : 'automatic' })
+    setHead('')
+    setBranches([])
+    setDirectories([])
+  }
+  const resetConnection = () => { setHead(''); setBranches([]); setDirectories([]) }
   const measuredCoverage = intelligence?.coverage.metrics.filter((metric) => metric.status !== 'unknown') ?? []
   const documentedItems = measuredCoverage.reduce((total, metric) => total + metric.documented, 0)
   const discoveredItems = measuredCoverage.reduce((total, metric) => total + metric.total, 0)
   const overallCoverage = discoveredItems > 0 ? Math.round((documentedItems / discoveredItems) * 100) : null
   const unknownCoverageCount = intelligence?.coverage.metrics.filter((metric) => metric.status === 'unknown').length ?? 0
   const coverageAssessment = overallCoverage === null ? 'Awaiting discovery' : overallCoverage >= 90 ? 'Strong coverage' : overallCoverage >= 70 ? 'Good foundation' : overallCoverage >= 40 ? 'Coverage gaps remain' : 'Needs attention'
+  const totalGaps = intelligence?.coverage.metrics.reduce((total, metric) => total + coverageGapCount(metric), 0) ?? 0
+  const gapMetric = intelligence?.coverage.metrics.filter((metric) => coverageGapCount(metric) > 0).sort((a, b) => coverageGapCount(b) - coverageGapCount(a))[0]
   const selectedCoverageMetric = intelligence?.coverage.metrics.find((metric) => metric.id === coverageMetricId)
+  const addDisabled = dialog === 'docs-site' ? docsSiteInspection?.status !== 'completed' : dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()
   return <div class="sources-reference-page">
-    <PageHeader title="Sources" description="Manage the read-only sources Doxloop uses to create and maintain your documentation." actions={<><Button icon="bell" onClick={() => setMonitoringOpen(true)}>Monitoring</Button><div class="sources-add-wrap"><button type="button" class="sources-add-dropdown-button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icon name="plus" size={16} />Add source<Icon name="chevronDown" size={14} /></button>{menuOpen && <div class="sources-add-menu"><button type="button" onClick={() => openDialog('source')}><span><Icon name="api" size={20} /></span><span><strong>Source code</strong></span></button><button type="button" onClick={() => openDialog('openapi')}><span><Icon name="braces" size={20} /></span><span><strong>OpenAPI spec</strong></span></button><button type="button" onClick={() => openDialog('docs-site')}><span><Icon name="globe" size={20} /></span><span><strong>Existing documentation</strong><small>Rewrite a live docs site</small></span></button></div>}</div></>} />
-    <section class="sources-library">
-      <header class="sources-library-header">
-        <div><h2>Connected sources</h2><p>Evidence Doxloop can read when it creates and updates your documentation.</p></div>
-        <div class="sources-library-summary"><span><strong>{filtered.length}</strong> connected</span><i /><span><strong>{remoteSourceCount}</strong> remote</span><i /><span><strong>{openapiSourceCount}</strong> API</span>{docsSiteSourceCount > 0 && <><i /><span><strong>{docsSiteSourceCount}</strong> existing docs</span></>}</div>
-      </header>
-      {filtered.length ? <div class="sources-library-table" role="table" aria-label="Connected sources">
-        <div class="sources-library-table-head" role="row">
-          <span role="columnheader">Source</span><span role="columnheader">Type</span><span role="columnheader">Details</span><span role="columnheader">Status</span><span role="columnheader"><span class="sr-only">Actions</span></span>
-        </div>
-        <div class="sources-library-table-body" role="rowgroup">{filtered.map((source) => {
+    <PageHeader kicker="Sources" title="Sources" description="What Doxloop reads, how well it is covered, and when it was last checked." actions={<><Button icon="bell" onClick={() => setMonitoringOpen(true)}>Monitoring</Button><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></>} />
+
+    <Panel class="sources-library" title="Connected sources" flush actions={filtered.length > 0 ? <Button size="sm" icon="refresh" busy={checkingAll} disabled={checkingAll || checkBlocked} title={checkBlocked ? 'Available when the running writing task finishes' : undefined} onClick={() => void act(() => post('/api/sync/now'), 'Source check started', false)}>Check now</Button> : undefined}>
+      {filtered.length ? <div class="source-rows" role="table" aria-label="Connected sources">
+        <div class="sr-only" role="row"><span role="columnheader">Source</span><span role="columnheader">Type</span><span role="columnheader">Details</span><span role="columnheader">Status</span><span role="columnheader">Actions</span></div>
+        <div role="rowgroup">{filtered.map((source) => {
           const health = intelligence?.health.find((item) => item.name === source.name)
-          const type = source.kind === 'openapi' ? 'OpenAPI' : source.kind === 'docs-site' ? 'Docs site' : source.remote ? 'Git' : 'Local'
+          const type = source.kind === 'openapi' ? 'OpenAPI' : source.kind === 'docs-site' ? 'Docs site' : source.remote ? gitServiceLabel(source.remote.repository) : 'Local folder'
           const docsSite = health?.docsSite ?? source.site
           const detail = health?.openapi
             ? `v${health.openapi.version} · ${health.openapi.operationCount} operations · ${health.openapi.schemas.length} schemas`
             : source.kind === 'docs-site'
-              ? docsSite ? `${docsSite.pages} pages · ${docsSite.words.toLocaleString()} words${docsSite.generator ? ` · ${docsSite.generator}` : ''} · crawled ${new Date(docsSite.crawledAt).toLocaleDateString()}` : 'Existing documentation'
+              ? docsSite ? `${docsSite.pages} pages · ${docsSite.words.toLocaleString()} words${docsSite.generator ? ` · ${docsSite.generator}` : ''} · crawled ${timeText(docsSite.crawledAt)}` : 'Existing documentation'
             : health?.branch
               ? `${health.branch}${health.subdirectory ? ` / ${health.subdirectory}` : ''}${health.revision ? ` · ${health.revision.slice(0, 10)}` : ''}`
               : source.scope?.routePrefix
                 ? `Owns /${source.scope.routePrefix.replace(/^\//, '')}`
                 : 'Project-wide evidence'
-          const status = health ? health.status === 'healthy' ? 'Available' : health.status === 'warning' ? 'Needs attention' : 'Unavailable' : 'Checking…'
-          return <div class="sources-library-row" role="row" key={source.name}>
-            <div class="sources-library-name" role="cell"><span class={`source-service-icon ${source.kind === 'openapi' ? 'openapi' : source.kind === 'docs-site' ? 'docs-site' : source.remote ? `git ${repositoryProvider(source.remote.repository)}` : 'local'}`}><Icon name={source.kind === 'openapi' ? 'braces' : source.kind === 'docs-site' ? 'globe' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={20} /></span><span><strong>{source.name}</strong><small title={source.site?.url ?? (source.remote ? source.remote.repository : source.path)}>{source.site?.url ?? (source.remote ? source.remote.repository : source.path)}</small></span></div>
-            <div role="cell"><em class={`source-type-pill ${source.kind === 'openapi' ? 'openapi' : source.kind === 'docs-site' ? 'docs-site' : source.remote ? 'git' : 'local'}`}>{type}</em></div>
-            <div class="sources-library-detail" role="cell"><strong>{detail}</strong>{source.scope?.routePrefix && health?.openapi && <small>Owns /{source.scope.routePrefix.replace(/^\//, '')}</small>}{source.kind === 'docs-site' && health?.docsSite && health.docsSite.brokenLinks > 0 && <small>{health.docsSite.brokenLinks} broken internal links on the site</small>}{source.kind === 'docs-site' && health?.status === 'warning' && <small class="source-health-error">{health.summary}</small>}{health?.status === 'error' && <small class="source-health-error">{health.summary}</small>}</div>
-            <div class="sources-library-status" role="cell"><span class={`source-connection-status ${health?.status ?? ''}`} title={health ? `Checked ${new Date(health.checkedAt).toLocaleString()}${health.lastMonitoringAt ? ` · Last monitoring check ${new Date(health.lastMonitoringAt).toLocaleString()}` : ''}` : ''}><i />{status}</span>{health && <small>Checked {new Date(health.checkedAt).toLocaleDateString()}</small>}</div>
-            <span class="source-row-menu" role="cell">{source.kind === 'docs-site' && <button type="button" aria-label={`Re-crawl ${source.name}`} title="Re-crawl the documentation site" disabled={recrawling === source.name} onClick={() => void recrawlSource(source)}><Icon name={recrawling === source.name ? 'clock' : 'globe'} size={18} /></button>}<button type="button" aria-label={`Test ${source.name}`} title="Test connection" disabled={checkingSource === source.name} onClick={() => { setCheckingSource(source.name); void act(() => post(`/api/sources/${encodeURIComponent(source.name)}/test`), 'Source connection checked').then(() => loadIntelligence()).finally(() => setCheckingSource('')) }}><Icon name="refresh" size={18} /></button><button type="button" aria-label={`Configure documentation ownership for ${source.name}`} title="Documentation ownership" onClick={() => setScopeSource(source)}><Icon name="map" size={18} /></button><button type="button" aria-label={`Delete ${source.name}`} title="Delete source" onClick={() => { if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={18} /></button></span>
+          const status = health ? health.status === 'healthy' ? 'Current' : health.status === 'warning' ? 'Needs attention' : 'Unavailable' : 'Checking…'
+          const tone = health ? health.status === 'healthy' ? 'good' : health.status === 'warning' ? 'warn' : 'bad' : 'neutral'
+          const location = source.site?.url ?? (source.remote ? source.remote.repository : source.path)
+          return <div class="source-row" role="row" key={source.name}>
+            <span class="source-row-icon" aria-hidden="true"><Icon name={source.kind === 'openapi' ? 'braces' : source.kind === 'docs-site' ? 'globe' : source.remote ? repositoryProviderIcon(source.remote.repository) : 'folder'} size={16} /></span>
+            <div class="source-row-copy" role="presentation">
+              <div class="source-row-name" role="cell" title={location}>{source.name}</div>
+              <p class="source-row-meta" role="presentation">
+                <span role="cell">{type}</span>
+                <span role="cell" class="source-row-detail" title={health ? `Checked ${timeText(health.checkedAt)}${health.lastMonitoringAt ? ` · Last monitoring check ${timeText(health.lastMonitoringAt)}` : ''}` : location}>
+                  {detail}
+                  {source.scope?.routePrefix && health?.openapi && <> · owns /{source.scope.routePrefix.replace(/^\//, '')}</>}
+                  {health && <> · checked {timeText(health.checkedAt)}</>}
+                  {source.kind === 'docs-site' && health?.docsSite && health.docsSite.brokenLinks > 0 && <small>{health.docsSite.brokenLinks} broken internal links on the site</small>}
+                  {source.kind === 'docs-site' && health?.status === 'warning' && <small class="source-health-error">{health.summary}</small>}
+                  {health?.status === 'error' && <small class="source-health-error">{health.summary}</small>}
+                </span>
+              </p>
+            </div>
+            <div class="source-row-status" role="cell"><Badge tone={tone}>{checkingSource === source.name ? 'Checking…' : status}</Badge></div>
+            <div class="source-row-actions" role="cell">
+              <button type="button" class="ops-icon-button" aria-label={`Source options for ${source.name}`} aria-haspopup="menu" aria-expanded={rowMenu === source.name} onClick={() => setRowMenu(rowMenu === source.name ? null : source.name)}><MoreGlyph /></button>
+              {rowMenu === source.name && <div class="ops-menu" role="menu" aria-label={`${source.name} options`}>
+                {source.kind === 'docs-site' && <button type="button" role="menuitem" aria-label={`Re-crawl ${source.name}`} disabled={recrawling === source.name} onClick={() => { setRowMenu(null); void recrawlSource(source) }}><Icon name={recrawling === source.name ? 'clock' : 'globe'} size={15} />Re-crawl the site</button>}
+                <button type="button" role="menuitem" aria-label={`Test ${source.name}`} disabled={checkingSource === source.name} onClick={() => checkSource(source)}><Icon name="refresh" size={15} />Test connection</button>
+                <button type="button" role="menuitem" aria-label={`Configure documentation ownership for ${source.name}`} onClick={() => { setRowMenu(null); setScopeSource(source) }}><Icon name="map" size={15} />Documentation ownership</button>
+                <button type="button" role="menuitem" class="danger" aria-label={`Delete ${source.name}`} onClick={() => { setRowMenu(null); if (confirm(`Remove ${source.name}?`)) void act(() => remove(`/api/sources/${encodeURIComponent(source.name)}`), 'Source removed') }}><Icon name="trash" size={15} />Remove source</button>
+              </div>}
+            </div>
           </div>
         })}</div>
-      </div> : <div class="sources-table-empty"><Icon name="sources" size={28} /><strong>No sources yet</strong><small>Add a source to start creating documentation.</small><Button tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button></div>}
-    </section>
-    {filtered.length > 0 && <DocumentationFreshness value={state.drift} navigate={navigate} />}
-    {intelligence && <section class="source-intelligence-panel">
-      <header><div><h2>Documentation coverage</h2><p>See which discovered product surfaces are supported by documentation evidence.</p></div><span class={intelligence.evidenceDiagnostics.length ? 'attention' : 'precise'}>{intelligence.evidenceDiagnostics.length ? `${intelligence.evidenceDiagnostics.length} evidence notes` : 'Evidence looks precise'}</span></header>
-      <div class="coverage-overview">
-        <aside class="coverage-summary-card">
-          <div class="coverage-score" style={{ '--coverage': `${overallCoverage ?? 0}%` }} aria-label={overallCoverage === null ? 'Coverage unavailable' : `${overallCoverage}% overall documentation coverage`}><span><strong>{overallCoverage === null ? '—' : `${overallCoverage}%`}</strong><small>overall</small></span></div>
-          <div class="coverage-summary-copy"><span class={`coverage-assessment ${overallCoverage !== null && overallCoverage < 70 ? 'attention' : ''}`}>{coverageAssessment}</span><h3>{documentedItems} of {discoveredItems} discovered items are documented</h3><p>Coverage measures traceable evidence across all connected sources.</p></div>
-          <dl class="coverage-summary-stats"><div><dt>Documented</dt><dd>{documentedItems}</dd></div><div><dt>Not covered</dt><dd>{Math.max(discoveredItems - documentedItems, 0)}</dd></div><div><dt>No items found</dt><dd>{unknownCoverageCount}</dd></div></dl>
-          <p class="source-coverage-disclaimer">{intelligence.coverage.disclaimer}</p>
-        </aside>
-        <div class="coverage-breakdown">
-          <div class="coverage-breakdown-heading"><div><h3>Coverage by surface</h3><p>Each percentage is based on items found during source discovery.</p></div><span>{measuredCoverage.length} measured</span></div>
-          <div class="source-coverage-list">{intelligence.coverage.metrics.map((metric) => {
-            const measured = metric.status !== 'unknown'
-            const discoveryTitle = 'Discovery completed, but no items in this category were found in the connected sources.'
-            const gaps = metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human' || item.state === 'planned' || item.state === 'stale').length
-            return <div class={`source-coverage-row ${measured ? '' : 'unknown'}`} key={metric.id} title={measured ? metric.denominator : `${discoveryTitle} ${metric.denominator}`}>
-              <div class="source-coverage-row-heading"><span>{metric.label}</span>{measured ? <span><strong>{metric.percent}%</strong><small>{metric.documented} of {metric.total}</small></span> : <em>No items discovered</em>}</div>
-              <div class="source-coverage-track" role="progressbar" aria-label={`${metric.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={measured ? metric.percent : undefined}><i style={{ width: measured ? `${metric.percent}%` : '0%' }} /></div>
-              {(gaps > 0 || metric.excluded > 0) && <button type="button" class="coverage-review-action" onClick={() => setCoverageMetricId(metric.id)}>{gaps > 0 ? `Review ${gaps} ${gaps === 1 ? 'gap' : 'gaps'}` : `Review ${metric.excluded} excluded`}</button>}
-            </div>
-          })}</div>
+      </div> : <div class="ops-empty-wrap"><Empty icon="sources" title="No sources yet" detail="Connect a repository, an OpenAPI spec, or a live docs site." action={<Button size="sm" tone="primary" icon="plus" onClick={() => openDialog('source')}>Add source</Button>} /></div>}
+    </Panel>
+
+    {intelligence && <Panel class="coverage-panel" title="Documentation coverage" flush actions={<>
+      {intelligence.evidenceDiagnostics.length > 0 && <Badge tone="warn">{intelligence.evidenceDiagnostics.length} evidence note{intelligence.evidenceDiagnostics.length === 1 ? '' : 's'}</Badge>}
+      {gapMetric && <Button size="sm" onClick={() => setCoverageMetricId(gapMetric.id)}>Review {totalGaps} {totalGaps === 1 ? 'gap' : 'gaps'}</Button>}
+    </>}>
+      <div class="coverage-summary" title={intelligence.coverage.disclaimer}>
+        <strong class={`coverage-figure ${overallCoverage === null ? '' : overallCoverage >= 70 ? 'good' : overallCoverage >= 40 ? 'warn' : 'bad'}`} aria-label={overallCoverage === null ? 'Coverage unavailable' : `${overallCoverage}% overall documentation coverage`}>{overallCoverage === null ? '—' : `${overallCoverage}%`}</strong>
+        <div class="coverage-summary-copy">
+          <span class={`coverage-assessment ${overallCoverage !== null && overallCoverage < 70 ? 'attention' : ''}`}>{coverageAssessment}</span>
+          <span class="coverage-summary-detail">{documentedItems} of {discoveredItems} discovered items are documented{totalGaps > 0 && <> · {totalGaps} {totalGaps === 1 ? 'gap' : 'gaps'}</>}{unknownCoverageCount > 0 && <> · {unknownCoverageCount} {unknownCoverageCount === 1 ? 'surface' : 'surfaces'} without items</>}</span>
         </div>
       </div>
+      <div class="coverage-rows">{intelligence.coverage.metrics.map((metric) => {
+        const measured = metric.status !== 'unknown'
+        const gaps = coverageGapCount(metric)
+        return <div class={`coverage-row ${measured ? '' : 'unknown'}`} key={metric.id} title={measured ? metric.denominator : `Discovery completed, but no items in this category were found in the connected sources. ${metric.denominator}`}>
+          <span class="coverage-row-label">{metric.label}</span>
+          <div class={`progress ${measured ? metric.percent >= 90 ? 'good' : metric.percent >= 70 ? '' : 'warn' : ''}`} role="progressbar" aria-label={`${metric.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={measured ? metric.percent : undefined}><i style={{ width: measured ? `${metric.percent}%` : '0%' }} /></div>
+          {measured ? <span class="coverage-row-percent" title={`${metric.documented} of ${metric.total}`}>{metric.percent}%</span> : <em class="coverage-row-percent">No items discovered</em>}
+          {(gaps > 0 || metric.excluded > 0) && <button type="button" class="coverage-review-action" onClick={() => setCoverageMetricId(metric.id)}>{gaps > 0 ? `${gaps} ${gaps === 1 ? 'gap' : 'gaps'}` : `${metric.excluded} excluded`}</button>}
+        </div>
+      })}</div>
       {intelligence.evidenceDiagnostics.length > 0 && <details class="source-evidence-notes"><summary>Review evidence precision</summary>{intelligence.evidenceDiagnostics.slice(0, 8).map((item) => <div key={`${item.code}:${item.page}:${item.identifier}`}><strong>{item.page}</strong><p>{item.message}</p><small>{item.suggestion}</small></div>)}</details>}
-    </section>}
+    </Panel>}
+
+    {filtered.length > 0 && <DocumentationFreshness value={state.drift} navigate={navigate} sync={project.sync} onConfigure={() => setMonitoringOpen(true)} />}
+
     {monitoringOpen && <MonitoringDialog state={state} act={act} onClose={() => setMonitoringOpen(false)} />}
     {selectedCoverageMetric && <CoverageResolutionDialog
       metric={selectedCoverageMetric}
@@ -791,12 +868,75 @@ function SourcesReference({ state, act, navigate }: { state: UiState; act: Actio
       }}
     />}
     {scopeSource && <SourceScopeDialog source={scopeSource} act={act} onClose={() => setScopeSource(null)} />}
-    {dialog && <div class="sources-modal-scrim" onClick={closeDialog}><section class={`sources-reference-dialog ${dialog}`} role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-      <header>{dialog === 'openapi' && <span class="sources-dialog-icon"><Icon name="file" size={24} /></span>}{dialog === 'docs-site' && <span class="sources-dialog-icon"><Icon name="globe" size={24} /></span>}<div><h2>{dialog === 'source' ? 'Add source code' : dialog === 'docs-site' ? 'Add existing documentation' : 'Add OpenAPI spec'}</h2><p>{dialog === 'source' ? 'Choose how you want to connect your source code.' : dialog === 'docs-site' ? 'Point Doxloop at the documentation you have today. The agent audits it, verifies it against your other sources, and rewrites it as a new documentation set.' : 'Import your OpenAPI specification from a local file or a public URL.'}</p></div><button type="button" aria-label="Close" onClick={closeDialog}><Icon name="close" size={17} /></button></header>
-      {dialog === 'docs-site' ? <div class="sources-dialog-body"><DocsSiteSourceFields url={add.path} onUrl={(value) => { setAdd({ ...add, path: value }); setDocsSiteError('') }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={docsSiteError} onError={setDocsSiteError} /></div> : dialog === 'source' ? <div class="sources-dialog-body"><span class="dialog-section-label">Source type</span><div class="source-mode-grid"><button type="button" class={sourceMode === 'git' ? 'selected' : ''} onClick={() => setSourceMode('git')}><span><Icon name="api" size={22} /></span><i /><strong>Git repository</strong><small>Connect a GitHub, GitLab, Azure DevOps or other Git service.</small></button><button type="button" class={sourceMode === 'local' ? 'selected' : ''} onClick={() => setSourceMode('local')}><span><Icon name="folder" size={22} /></span><i /><strong>Local folder</strong><small>Use a folder on your computer or network.</small></button></div>{sourceMode === 'git' ? <div class="source-code-fields"><Field label="Repository access"><Select value={add.authMethod} onChange={(event) => { setAdd({ ...add, authMethod: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }}><option value="automatic">Public repository</option><option value="credentials">Private repository</option></Select></Field><Field label="Repository URL"><div class="repository-connect-input"><Input value={add.repository} onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>{add.authMethod === 'credentials' && <div class="private-git-fields"><Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field><Field label="Personal Access Token (PAT)"><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); setHead(''); setBranches([]); setDirectories([]) }} /></Field></div>}<div class="source-branch-grid"><Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field><Field label="Folder (optional)"><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field></div></div> : <Field label="Local folder"><div class="source-folder-input"><Input value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}</div> : <div class="sources-dialog-body openapi-body"><div class="openapi-tabs"><button type="button" class={openapiMode === 'file' ? 'active' : ''} onClick={() => setOpenapiMode('file')}><Icon name="publish" size={18} />Upload file</button><button type="button" class={openapiMode === 'url' ? 'active' : ''} onClick={() => setOpenapiMode('url')}><Icon name="external" size={18} />From URL</button></div>{openapiMode === 'file' ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={28} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong>{!add.fileName && <small>or</small>}<Button onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button><em>Accepted formats: .yaml, .yml, .json</em></div> : <Field label="OpenAPI spec URL"><Input value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /><small>We support public URLs and standard OpenAPI formats.</small></Field>}</div>}
+
+    {dialog && <OpsSheet class={`add-source-sheet ${dialog}`} title="Add source" onClose={closeDialog} footer={<><Button tone="ghost" onClick={closeDialog}>Cancel</Button><Button tone="primary" icon="plus" busy={saving} disabled={addDisabled} onClick={() => void addSource()}>Add source</Button></>}>
+      <div class="field ops-choice">
+        <span class="field-label">What are you adding?</span>
+        <RadioRows label="What are you adding?" value={dialog} onChange={openDialog} items={[
+          { id: 'source', label: 'Source code', detail: 'A Git repository or local folder' },
+          { id: 'openapi', label: 'OpenAPI spec', detail: 'From a URL or an uploaded file' },
+          { id: 'docs-site', label: 'Rewrite a live docs site', detail: 'Crawl an existing site to audit and rewrite' },
+        ]} />
+      </div>
+      {dialog === 'source' && <>
+        <div class="field ops-choice">
+          <span class="field-label">Where is it?</span>
+          <RadioRows label="Where is it?" value={whereIs} onChange={setWhereIs} items={[
+            { id: 'public', label: 'Public repository' },
+            { id: 'private', label: 'Private repository', detail: 'Needs a personal access token' },
+            { id: 'local', label: 'Local folder' },
+          ]} />
+        </div>
+        {sourceMode === 'git' ? <>
+          {add.authMethod === 'credentials' && <>
+            <Field label="Username"><Input value={add.gitUsername} autocomplete="username" onInput={(event) => { setAdd({ ...add, gitUsername: event.currentTarget.value }); resetConnection() }} /></Field>
+            <Field label="Personal access token" hint="A token with read access to the repository. It is used to connect and is stored outside the project."><Input type="password" value={add.gitSecret} autocomplete="off" onInput={(event) => { setAdd({ ...add, gitSecret: event.currentTarget.value }); resetConnection() }} /></Field>
+          </>}
+          <Field label="Repository URL" hint="A GitHub, GitLab, Azure DevOps or other Git URL. Connect to load its branches and folders."><div class="repository-connect-input"><Input class="mono-input" value={add.repository} placeholder="https://github.com/org/repository" onInput={(event) => { setAdd({ ...add, repository: event.currentTarget.value }); resetConnection() }} /><RepositoryConnectButton connected={Boolean(head)} busy={connecting} disabled={!add.repository.trim() || (add.authMethod === 'credentials' && (!add.gitUsername.trim() || !add.gitSecret.trim()))} onClick={() => void connectRepository()} /></div></Field>
+          <Field label="Branch"><Select value={add.branch} disabled={!head || connecting} onChange={(event) => void selectBranch(event.currentTarget.value)}>{branches.length ? branches.map((branch) => <option key={branch}>{branch}</option>) : <option>{connecting ? 'Connecting...' : 'Connect repository first'}</option>}</Select></Field>
+          <Field label="Folder (optional)" hint="Limit the source to one folder of the repository."><Select value={add.subdirectory} disabled={!head || foldersLoading} onChange={(event) => setAdd({ ...add, subdirectory: event.currentTarget.value })}><option value="">/</option>{directories.map((directory) => <option key={directory}>{directory}</option>)}</Select></Field>
+        </> : <Field label="Local folder"><div class="source-folder-input"><Input class="mono-input" value={add.path} onInput={(event) => setAdd({ ...add, path: event.currentTarget.value })} /><Button icon="folder" onClick={() => void post<{ path: string | null }>('/api/setup/browse-directory').then((result) => result.path && setAdd({ ...add, path: result.path }))}>Browse</Button></div></Field>}
+      </>}
+      {dialog === 'openapi' && <>
+        <div class="field ops-choice">
+          <span class="field-label">Where is it?</span>
+          <RadioRows label="Where is it?" value={openapiMode} onChange={setOpenapiMode} items={[
+            { id: 'file', label: 'Upload a file', detail: '.yaml, .yml or .json' },
+            { id: 'url', label: 'From a URL', detail: 'A public address' },
+          ]} />
+        </div>
+        {openapiMode === 'file'
+          ? <div class={`openapi-dropzone ${add.fileName ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void readSpecification(event.dataTransfer?.files[0]) }}><input ref={fileInput} type="file" accept=".yaml,.yml,.json,application/json,text/yaml" onChange={(event) => void readSpecification(event.currentTarget.files?.[0])} /><span><Icon name={add.fileName ? 'check' : 'publish'} size={22} /></span><strong>{add.fileName || 'Drag and drop your OpenAPI file here'}</strong><Button size="sm" onClick={() => fileInput.current?.click()}>{add.fileName ? 'Choose another file' : 'Browse file'}</Button></div>
+          : <Field label="OpenAPI spec URL" hint="Public URLs in standard OpenAPI formats are supported."><Input class="mono-input" value={add.path} placeholder="https://example.com/openapi.yaml" onInput={(event) => setAdd({ ...add, path: event.currentTarget.value, specContent: '', fileName: '' })} /></Field>}
+      </>}
+      {dialog === 'docs-site' && <DocsSiteSourceFields url={add.path} onUrl={(value) => { setAdd({ ...add, path: value }); setDocsSiteError('') }} inspection={docsSiteInspection} onInspection={setDocsSiteInspection} error={docsSiteError} onError={setDocsSiteError} />}
       <details class="source-scope-fields"><summary>Documentation ownership (optional)</summary><div><Field label="Route prefix"><Input value={add.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setAdd({ ...add, routePrefix: event.currentTarget.value })} /></Field><Field label="Navigation group"><Input value={add.navigationGroup} placeholder="API reference" onInput={(event) => setAdd({ ...add, navigationGroup: event.currentTarget.value })} /></Field><Field label="Space"><Input value={add.space} placeholder="Developers" onInput={(event) => setAdd({ ...add, space: event.currentTarget.value })} /></Field><Field label="Shared pages" hint="Comma-separated page paths or globs"><Input value={add.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setAdd({ ...add, sharedPages: event.currentTarget.value })} /></Field></div></details>
-      <footer><Button onClick={closeDialog}>Cancel</Button><Button tone="primary" busy={saving} disabled={dialog === 'docs-site' ? docsSiteInspection?.status !== 'completed' : dialog === 'source' ? sourceMode === 'git' ? !head || foldersLoading : !add.path.trim() : openapiMode === 'file' ? !add.specContent.trim() : !add.path.trim()} onClick={() => void addSource()}>Add source</Button></footer>
-    </section></div>}
+    </OpsSheet>}
+  </div>
+}
+
+/** Items in a coverage metric that still need documentation or a decision. */
+function coverageGapCount(metric: SourceIntelligence['coverage']['metrics'][number]): number {
+  return metric.items.filter((item) => item.state === 'uncovered' || item.state === 'needs-human' || item.state === 'planned' || item.state === 'stale').length
+}
+
+/** The ⋯ glyph for row menus; the icon set has no "more" mark. */
+function MoreGlyph() {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></svg>
+}
+
+/** A choice list: one bordered column of radio rows, never a tile grid. */
+function RadioRows<T extends string>({ label, value, onChange, items }: {
+  label: string
+  value: T
+  onChange: (value: T) => void
+  items: ReadonlyArray<{ id: T; label: string; detail?: string; trailing?: import('preact').ComponentChildren; disabled?: boolean }>
+}) {
+  return <div class="radio-rows" role="radiogroup" aria-label={label}>
+    {items.map((item) => <button key={item.id} type="button" role="radio" aria-checked={value === item.id} class={value === item.id ? 'selected' : ''} disabled={item.disabled} onClick={() => onChange(item.id)}>
+      <span><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</span>
+      {item.trailing}
+    </button>)}
   </div>
 }
 
@@ -837,9 +977,20 @@ function ExistingDocumentationAudit({ assessments, pages }: { assessments: NonNu
  * fell behind their sources and why, so "stale" is something a reader can act
  * on rather than a word in the sync status.
  */
-function DocumentationFreshness({ value, navigate }: { value: UiState['drift']; navigate: (page: WorkspaceRoute) => void }) {
+function DocumentationFreshness({ value, navigate, sync, onConfigure }: { value: UiState['drift']; navigate: (page: WorkspaceRoute) => void; sync: SyncConfig; onConfigure: () => void }) {
   const drift = driftState(value)
-  if (!drift.ok) return <section class="source-freshness unknown" aria-label="Documentation freshness"><header><span class="source-freshness-icon"><Icon name="info" size={16} /></span><div><h2>Documentation freshness</h2><p>{drift.reason}</p></div></header></section>
+  const monitoringRow = <div class="vrow">
+    <span class="vrow-label">Monitoring</span>
+    <span class="vrow-value">{sync.on.length ? monitoringSummary(sync) : 'Not configured'}<Button tone="link" onClick={onConfigure}>Configure</Button></span>
+  </div>
+  if (!drift.ok) {
+    return <Panel class="freshness-panel unknown" title="Freshness" flush>
+      <div class="vrows">
+        <div class="vrow"><span class="vrow-label">Documentation freshness<small>{drift.reason}</small></span></div>
+        {monitoringRow}
+      </div>
+    </Panel>
+  }
   const { status, pages, sources = [], trackedPages, notes = [] } = drift.drift
   const changedSources = sources.filter((source) => source.changedPaths.length > 0 || source.filteredPaths > 0)
   const headline = status === 'stale'
@@ -852,26 +1003,38 @@ function DocumentationFreshness({ value, navigate }: { value: UiState['drift']; 
     : status === 'current'
       ? `${trackedPages ?? pages.length} tracked page${(trackedPages ?? pages.length) === 1 ? '' : 's'} have evidence that still matches the connected sources.`
       : notes[0] ?? 'Pages gain freshness tracking once an accepted update records their evidence.'
-  return <section class={`source-freshness ${status}`} aria-label="Documentation freshness">
-    <header>
-      <span class="source-freshness-icon"><Icon name={status === 'stale' ? 'alert' : status === 'current' ? 'check' : 'clock'} size={16} /></span>
-      <div><h2>Documentation freshness</h2><p><strong>{headline}.</strong> {detail}</p></div>
-      <Badge tone={status === 'stale' ? 'warn' : status === 'current' ? 'good' : 'neutral'}>{status === 'stale' ? `${pages.length} stale` : status === 'current' ? 'Up to date' : 'Not tracked'}</Badge>
-      {status === 'stale' && <Button size="sm" tone="primary" icon="update" onClick={() => navigate('authoring')}>Plan an update</Button>}
-    </header>
-    {status === 'stale' && pages.length > 0 && <ul class="source-freshness-pages">
-      {pages.slice(0, 8).map((page) => <li key={page.page}>
-        <code>{page.page}</code>
-        <span>{(page.reasons ?? []).map((reason) => reason.kind === 'max-age'
+  return <Panel class={`freshness-panel ${status}`} title="Freshness" flush>
+    <div class="vrows">
+      <div class="vrow">
+        <span class="vrow-label">{headline}<small>{detail}</small></span>
+        <span class="vrow-value">
+          <Badge tone={status === 'stale' ? 'warn' : status === 'current' ? 'good' : 'neutral'}>{status === 'stale' ? `${pages.length} stale` : status === 'current' ? 'Up to date' : 'Not tracked'}</Badge>
+          {status === 'stale' && <Button tone="link" onClick={() => navigate('authoring')}>Plan an update</Button>}
+        </span>
+      </div>
+      {status === 'stale' && pages.slice(0, 8).map((page) => <div class="vrow freshness-page" key={page.page}>
+        <span class="vrow-label"><code>{page.page}</code></span>
+        <span class="vrow-value">{(page.reasons ?? []).map((reason) => reason.kind === 'max-age'
           ? `evidence older than ${reason.ageDays ?? '?'} days`
           : `${reason.source}: ${reason.paths?.length ?? 0} changed path${(reason.paths?.length ?? 0) === 1 ? '' : 's'}`).join(' · ') || 'Sources changed'}</span>
-      </li>)}
-      {pages.length > 8 && <li class="more">and {pages.length - 8} more</li>}
-    </ul>}
-    {changedSources.length > 0 && <ul class="source-freshness-sources">
-      {changedSources.map((source) => <li key={source.name}><Icon name="sources" size={13} /><span>{`${source.name}: ${source.changedPaths.length} changed`}</span>{source.filteredPaths > 0 && <small>{source.filteredPaths} filtered by watch rules</small>}</li>)}
-    </ul>}
-  </section>
+      </div>)}
+      {status === 'stale' && pages.length > 8 && <div class="vrow"><span class="vrow-label faint">and {pages.length - 8} more</span></div>}
+      {changedSources.map((source) => <div class="vrow" key={source.name}>
+        <span class="vrow-label">{source.name}<small>Source changed since the last update</small></span>
+        <span class="vrow-value">{source.changedPaths.length} changed{source.filteredPaths > 0 && <> · {source.filteredPaths} filtered by watch rules</>}</span>
+      </div>)}
+      {monitoringRow}
+    </div>
+  </Panel>
+}
+
+/** One line for the monitoring row: the schedule, then any budget caps. */
+function monitoringSummary(sync: SyncConfig): string {
+  const parts = [scheduleSummary(scheduleForm(sync.on))]
+  if (sync.budget?.maxUsd) parts.push(`$${sync.budget.maxUsd.toFixed(2)} cap per run`)
+  if (sync.budget?.maxRunsPerDay) parts.push(`${sync.budget.maxRunsPerDay} run${sync.budget.maxRunsPerDay === 1 ? '' : 's'} per day`)
+  if (sync.budget?.maxMinutes) parts.push(`${sync.budget.maxMinutes} min limit`)
+  return parts.join(' · ')
 }
 
 function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCreateUpdate }: {
@@ -901,6 +1064,22 @@ function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCre
   const toggleSelected = (item: CoverageItem, selected: boolean) => {
     setSelectedIds((current) => selected ? [...new Set([...current, item.id])] : current.filter((id) => id !== item.id))
   }
+  // Marking several gaps internal at once: a whole folder of admin-only or
+  // generated code is one decision, not one reason typed per row.
+  const [internalReason, setInternalReason] = useState('')
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const markSelectedInternal = async () => {
+    const reason = internalReason.trim()
+    if (!reason || !selectedItems.length) return
+    let latest: SourceIntelligence | undefined
+    for (const item of selectedItems) {
+      latest = await post<SourceIntelligence>('/api/coverage/resolve', { id: item.id, action: 'exclude', reason }).catch(() => latest)
+    }
+    if (latest) onReport(latest)
+    setSelectedIds([])
+    setBulkOpen(false)
+    setInternalReason('')
+  }
   const createPlan = async () => {
     if (!selectedItems.length) return
     setPlanning(true)
@@ -917,7 +1096,9 @@ function CoverageResolutionDialog({ metric, pages, act, onClose, onReport, onCre
         {attentionItems.length > 0 ? <section class="coverage-gap-section" aria-label="Gaps needing attention"><div class="coverage-list-heading"><strong>Needs attention</strong><small>Select gaps to add to this update</small></div>{attentionItems.map((item) => <CoverageResolutionItem key={item.id} item={item} pages={pages} selected={selectedIds.includes(item.id)} onSelectedChange={(selected) => toggleSelected(item, selected)} onResolve={resolve} />)}</section> : <div class="coverage-gaps-empty"><Icon name="check" size={22} /><strong>Everything is resolved</strong><small>There are no documentation gaps in this category.</small></div>}
         {resolvedItems.length > 0 && <details class="coverage-resolved-items"><summary>{resolvedItems.length} already resolved</summary><div>{resolvedItems.map((item) => <CoverageResolutionItem key={item.id} item={item} pages={pages} selected={false} onSelectedChange={() => undefined} onResolve={resolve} />)}</div></details>}
       </div>
-      <footer><div class="coverage-plan-summary"><strong>{selectedItems.length ? `${selectedItems.length} ${selectedItems.length === 1 ? 'gap' : 'gaps'} ready to plan` : 'No gaps selected'}</strong><small>{selectedItems.length ? 'One plan will cover your full selection.' : 'Select one or more gaps to continue.'}</small></div><div><Button onClick={onClose}>Close</Button><Button tone="primary" busy={planning} disabled={!selectedItems.length} onClick={() => void createPlan()}>Create update plan{selectedItems.length ? ` (${selectedItems.length})` : ''}</Button></div></footer>
+      <footer><div class="coverage-plan-summary"><strong>{selectedItems.length ? `${selectedItems.length} ${selectedItems.length === 1 ? 'gap' : 'gaps'} ready to plan` : 'No gaps selected'}</strong><small>{selectedItems.length ? 'One plan will cover your full selection.' : 'Select one or more gaps to continue.'}</small></div><div>{bulkOpen
+        ? <span class="coverage-bulk-internal"><Input value={internalReason} aria-label="Why these are not part of the public documentation" placeholder="Why are these internal?" onInput={(event) => setInternalReason(event.currentTarget.value)} /><Button size="sm" tone="ghost" onClick={() => setBulkOpen(false)}>Cancel</Button><Button size="sm" disabled={!internalReason.trim()} onClick={() => void markSelectedInternal()}>Mark internal</Button></span>
+        : <><Button onClick={onClose}>Close</Button><Button disabled={!selectedItems.length} onClick={() => setBulkOpen(true)}>Mark internal{selectedItems.length ? ` (${selectedItems.length})` : ''}</Button><Button tone="primary" busy={planning} disabled={!selectedItems.length} onClick={() => void createPlan()}>Create update plan{selectedItems.length ? ` (${selectedItems.length})` : ''}</Button></>}</div></footer>
     </section>
   </div>
 }
@@ -962,7 +1143,18 @@ function SourceScopeDialog({ source, act, onClose }: { source: Source; act: Acti
       if (result !== undefined) onClose()
     } finally { setSaving(false) }
   }
-  return <div class="sources-modal-scrim" onClick={onClose}><section class="sources-reference-dialog source-scope-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}><header><span class="sources-dialog-icon"><Icon name="map" size={23} /></span><div><h2>Documentation ownership</h2><p>Keep changes from <strong>{source.name}</strong> inside a clear documentation boundary.</p></div><button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button></header><div class="sources-dialog-body"><div class="form-grid"><Field label="Route prefix" hint="Pages grounded in this source stay below this route."><Input value={scope.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setScope({ ...scope, routePrefix: event.currentTarget.value })} /></Field><Field label="Navigation group"><Input value={scope.navigationGroup} placeholder="API reference" onInput={(event) => setScope({ ...scope, navigationGroup: event.currentTarget.value })} /></Field><Field label="Space"><Input value={scope.space} placeholder="Developers" onInput={(event) => setScope({ ...scope, space: event.currentTarget.value })} /></Field><Field label="Shared pages" hint="Comma-separated paths or globs allowed outside the route."><Input value={scope.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setScope({ ...scope, sharedPages: event.currentTarget.value })} /></Field></div><Note>Overlapping route prefixes are rejected. Shared pages must be listed explicitly so one source cannot silently rewrite another source’s section.</Note></div><footer><Button onClick={onClose}>Cancel</Button><Button tone="primary" busy={saving} onClick={() => void save()}>Save ownership</Button></footer></section></div>
+  return <div class="sources-modal-scrim ops-dialog-scrim" onClick={onClose}>
+    <section class="sources-reference-dialog source-scope-dialog ops-dialog" role="dialog" aria-modal="true" aria-labelledby="source-scope-title" onClick={(event) => event.stopPropagation()}>
+      <header class="ops-dialog-head"><div><h2 id="source-scope-title">Documentation ownership</h2><p>Keep changes from <strong>{source.name}</strong> inside a clear documentation boundary.</p></div><button type="button" class="ops-icon-button" aria-label="Close" onClick={onClose}><Icon name="close" size={16} /></button></header>
+      <div class="sources-dialog-body ops-dialog-body">
+        <Field label="Route prefix" hint="Pages grounded in this source stay below this route."><Input value={scope.routePrefix} placeholder="api or integrations/payments" onInput={(event) => setScope({ ...scope, routePrefix: event.currentTarget.value })} /></Field>
+        <Field label="Navigation group"><Input value={scope.navigationGroup} placeholder="API reference" onInput={(event) => setScope({ ...scope, navigationGroup: event.currentTarget.value })} /></Field>
+        <Field label="Space"><Input value={scope.space} placeholder="Developers" onInput={(event) => setScope({ ...scope, space: event.currentTarget.value })} /></Field>
+        <Field label="Shared pages" hint="Comma-separated paths or globs allowed outside the route. Overlapping route prefixes are rejected, and shared pages must be listed explicitly so one source cannot silently rewrite another source's section."><Input value={scope.sharedPages} placeholder="docs/overview.mdx" onInput={(event) => setScope({ ...scope, sharedPages: event.currentTarget.value })} /></Field>
+      </div>
+      <footer class="ops-dialog-foot"><Button tone="ghost" onClick={onClose}>Cancel</Button><Button tone="primary" busy={saving} onClick={() => void save()}>Save ownership</Button></footer>
+    </section>
+  </div>
 }
 
 function Authoring({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
@@ -977,6 +1169,8 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
   const [form, setForm] = useState({ request: '', scope: 'starter', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 }, targetPages: '', clarificationMode: 'review', agent: defaultAgent, model: defaultModel, reasoning: defaultAgent === 'codex' ? defaultReasoning : '', effort: defaultAgent === 'claude' ? defaultReasoning : '', screenshots: 'disabled' as 'auto' | 'enabled' | 'disabled' })
   const [showNewPlan, setShowNewPlan] = useState(() => shouldShowAuthoringForm(state))
   const [agentConfigOpen, setAgentConfigOpen] = useState(false)
+  const [scopeOpen, setScopeOpen] = useState(false)
+  const [limitsOpen, setLimitsOpen] = useState(false)
   const availableAuthorModels = agentModels(form.agent)
   const supportedAuthorReasoning = modelReasoningLevels(form.agent, form.model)
   const [activityOpen, setActivityOpen] = useState(false)
@@ -1084,93 +1278,104 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
     }
   }
 
-  return <div class="authoring-page">
-    <PageHeader
+  const scopeOptions = [
+    ['starter', 'Starter', 'First success path and essential reference'],
+    ['standard', 'Standard', 'Primary journeys, concepts, troubleshooting, and reference'],
+    ['comprehensive', 'Comprehensive', 'Complete evidence-supported public surface'],
+  ] as const
+  const scopeName = scopeOptions.find(([value]) => value === form.scope)?.[1] ?? 'Custom'
+  const agentChipLabel = [form.agent ? agentLabel(form.agent) : 'Automatically detect', form.model, form.agent === 'codex' ? form.reasoning : form.agent === 'claude' ? form.effort : ''].filter(Boolean).join(' · ')
+  const setScreenshotChoice = (value: 'yes' | 'no') => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? (form.limits.maxScreenshots || batchLimitsForScope(form.scope as 'starter' | 'standard' | 'comprehensive' | 'custom', 'auto').maxScreenshots) : 0 } })
+  const reviewing = Boolean(visiblePlan && visiblePlan.status !== 'generated')
+  const promptQuestion = contentType === 'release-notes' ? 'Anything the release notes must call out?' : 'What should readers be able to do?'
+  const promptPlaceholder = contentType === 'release-notes'
+    ? 'Optional. For example: Lead with the new billing API and mark the removed legacy mode as breaking.'
+    : mode === 'create'
+      ? 'For example: Help developers install the SDK, authenticate, and complete their first successful API request.'
+      : 'For example: Document API key rotation and update the authentication journey with a TypeScript example.'
+  const captureReady = captureReadiness?.status === 'ready'
+
+  return <div class="authoring-page pl-page">
+    {!reviewing && <PageHeader
+      kicker="Plan"
       title={visiblePlan?.status === 'generated' ? 'Documentation plan' : mode === 'create' ? 'Create documentation' : 'Update documentation'}
-      description={visiblePlan?.status === 'generated' ? 'Shape and approve the documentation plan before the agent writes any pages.' : 'Describe the outcome. The agent researches evidence, proposes a plan, and writes nothing until you approve.'}
-    />
-    {hasCompletedRun && pendingSources.length > 0 && <div class="source-sync-banner">
-      <span class="source-sync-icon"><Icon name="sources" size={18} /></span>
-      <div>
-        <strong>{pendingSources.length === 1 ? `New source “${pendingSources[0]}” was added` : `${pendingSources.length} new sources were added`}</strong>
-        <p>The planning agent will inspect {pendingSources.length === 1 ? 'this source' : 'these sources'} and show where the documentation should change.</p>
-      </div>
-    </div>}
+      description={visiblePlan?.status === 'generated' ? 'The approved plan was generated. Review the proposal before anything reaches readers.' : 'Ask for what readers should be able to do. Doxloop researches, plans, and waits for your approval.'}
+      actions={!visiblePlan && state.documentationPlan && state.documentationPlan.status !== 'cancelled' ? <Button icon="file" onClick={() => setShowNewPlan(false)}>Open plan v{state.documentationPlan.version}</Button> : undefined}
+    />}
+    {hasCompletedRun && pendingSources.length > 0 && <Note tone="info">{pendingSources.length === 1 ? `New source “${pendingSources[0]}” was added.` : `${pendingSources.length} new sources were added.`} The planning agent will inspect {pendingSources.length === 1 ? 'it' : 'them'} and show where the documentation should change.</Note>}
 
     {visiblePlan
       ? <DocumentationPlanReview plan={visiblePlan} act={act} busy={runBusy} agents={state.agents ?? []} defaultAgent={defaultAgent} onStartAnother={() => setShowNewPlan(true)} />
       : <div class="authoring-workbench">
-        <Panel class="authoring-request">
-          <fieldset class="authoring-fields" disabled={runBusy}>
-            {gitSources.length > 0 && <div class="authoring-content-type"><strong>What should the agent write?</strong><Segmented value={contentType} onChange={setContentType} items={[['documentation', 'Documentation'], ['release-notes', 'Release notes']] as const} /></div>}
-            <div class="authoring-prompt-block">
-              <div class="authoring-prompt-title"><span><Icon name="chat" size={18} /></span><div><h2>{contentType === 'release-notes' ? 'Anything the release notes must call out?' : 'What should readers be able to do?'}</h2><p>{contentType === 'release-notes' ? 'Optional. The commit range and changelog below are the evidence; add emphasis, audience, or exclusions here.' : 'Describe the outcome or product change. The agent will research the evidence and propose the documentation shape first.'}</p></div></div>
-              <span class="authoring-textarea-wrap"><Textarea rows={contentType === 'release-notes' ? 3 : 6} maxlength={2000} value={form.request} placeholder={contentType === 'release-notes' ? 'For example: Lead with the new billing API and mark the removed legacy mode as breaking.' : mode === 'create' ? 'For example: Help developers install the SDK, authenticate, and complete their first successful API request.' : 'For example: Document API key rotation and update the authentication journey with a TypeScript example.'} onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} /></span>
-              {contentType === 'release-notes' && <ReleaseTemplateFields sources={gitSources} value={release} onChange={setRelease} disabled={runBusy} />}
-            </div>
+        <section class="panel authoring-request pl-composer">
+          <fieldset class="authoring-fields pl-composer-prompt" disabled={runBusy}>
+            {gitSources.length > 0 && <div class="pl-composer-type"><Segmented value={contentType} onChange={setContentType} items={[['documentation', 'Documentation'], ['release-notes', 'Release notes']] as const} /></div>}
+            <label class="pl-composer-field">
+              <span class="sr-only">{promptQuestion}</span>
+              <Textarea rows={3} maxlength={2000} value={form.request} placeholder={promptPlaceholder} onInput={(event) => setForm({ ...form, request: event.currentTarget.value })} />
+            </label>
+            {contentType === 'release-notes' && <ReleaseTemplateFields sources={gitSources} value={release} onChange={setRelease} disabled={runBusy} />}
           </fieldset>
-          {mode === 'create' && <section class="plan-scope-section" aria-label="Documentation scope">
-            <header><span><Icon name="map" size={17} /></span><div><h2>Choose a starting scope</h2><p>You can add, remove, reorder, or defer individual pages after research.</p></div></header>
-            <div class="plan-scope-options">
-              {([
-                ['starter', 'Starter', 'First success path and essential reference'],
-                ['standard', 'Standard', 'Primary journeys, concepts, troubleshooting, and reference'],
-                ['comprehensive', 'Comprehensive', 'Complete evidence-supported public surface'],
-              ] as const).map(([value, label, detail]) => {
+          <div class="pl-composer-row">
+            <div class="pl-composer-chips">
+              {mode === 'create' && <button type="button" class="chip" aria-expanded={scopeOpen} disabled={runBusy} onClick={() => setScopeOpen(!scopeOpen)}><Icon name="layers" size={14} />{scopeName} scope<Icon name="chevronDown" size={13} class={`pl-chevron ${scopeOpen ? 'open' : ''}`} /></button>}
+              <button type="button" class="chip" aria-expanded={agentConfigOpen} disabled={runBusy} onClick={() => setAgentConfigOpen(!agentConfigOpen)}><Icon name="bot" size={14} /><span class="sr-only">Agent: </span>{agentChipLabel}<Icon name="chevronDown" size={13} class={`pl-chevron ${agentConfigOpen ? 'open' : ''}`} /></button>
+              <button type="button" class="chip" aria-pressed={form.screenshots !== 'disabled'} disabled={runBusy} onClick={() => setScreenshotChoice(form.screenshots === 'disabled' ? 'yes' : 'no')}><Icon name="camera" size={14} />Screenshots {form.screenshots === 'disabled' ? 'off' : 'on'}</button>
+              <button type="button" class="chip" aria-expanded={limitsOpen} disabled={runBusy} onClick={() => setLimitsOpen(!limitsOpen)}><Icon name="file" size={14} />Up to {form.limits.maxPages} pages<Icon name="chevronDown" size={13} class={`pl-chevron ${limitsOpen ? 'open' : ''}`} /></button>
+            </div>
+            <Button disabled={runBusy} busy={submitting || checkingCapture} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button>
+          </div>
+          {scopeOpen && mode === 'create' && <section class="pl-composer-expand" aria-label="Documentation scope">
+            <div class="radio-rows">
+              {scopeOptions.map(([value, label, detail]) => {
                 const estimate = discovery?.suggestedPages[value]
-                return <button type="button" key={value} class={form.scope === value ? 'active' : ''} aria-pressed={form.scope === value} onClick={() => setForm({ ...form, scope: value, limits: batchLimitsForScope(value, form.screenshots) })}><span><strong>{label}</strong><small>{detail}</small></span><b>{estimate ? `About ${estimate} pages` : 'Estimating…'}</b></button>
+                return <button type="button" key={value} class={form.scope === value ? 'selected' : ''} aria-pressed={form.scope === value} disabled={runBusy} onClick={() => setForm({ ...form, scope: value, limits: batchLimitsForScope(value, form.screenshots) })}><span><strong>{label}</strong><small>{detail}</small></span><b>{estimate ? `About ${estimate} pages` : 'Estimating…'}</b></button>
               })}
             </div>
-            {discovery && <small class="plan-scope-evidence">Based on {discovery.publicSignals} public source signal{discovery.publicSignals === 1 ? '' : 's'}. Small products stay small; unsupported topics are never added as filler.</small>}
-            <div class="plan-target-pages">
-              <Field label="Minimum pages to write (optional)" hint="Leave empty to let the evidence decide. The batch maximum below limits what can be approved for this run."><Input type="number" min="1" max="500" value={form.targetPages} placeholder={discovery ? String(discovery.suggestedPages[form.scope as 'starter' | 'standard' | 'comprehensive']) : 'For example: 40'} onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
-            </div>
+            {discovery && <small class="pl-composer-hint">Based on {discovery.publicSignals} public source signal{discovery.publicSignals === 1 ? '' : 's'}. Small products stay small; unsupported topics are never added as filler.</small>}
           </section>}
-          {mode === 'update' && <section class="plan-scope-section" aria-label="Documentation size">
-            <div class="plan-target-pages">
-              <Field label="Minimum pages to write (optional)" hint="Ask for a larger update when the existing documentation is thin; the planner adds distinct evidence-backed pages rather than filler."><Input type="number" min="1" max="500" value={form.targetPages} placeholder="For example: 25" onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
-            </div>
+          {agentConfigOpen && <fieldset class="authoring-options pl-composer-expand" disabled={runBusy}>
+            <Field label="Agent"><Select value={form.agent} onChange={(event) => {
+              const agent = event.currentTarget.value
+              const model = defaultModelForAgent(agent)
+              const level = preferredReasoningLevel(agent, model)
+              setForm({ ...form, agent, model, reasoning: agent === 'codex' ? level : '', effort: agent === 'claude' ? level : '' })
+            }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+            <Field label="Model"><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Default model" onValueChange={(value) => setForm({ ...form, model: value })} /></Field>
+            <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Default" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></Field>
+            <Field label="Planner questions" hint="What the planner does when it needs a decision from you."><Select value={form.clarificationMode} onChange={(event) => setForm({ ...form, clarificationMode: event.currentTarget.value })}><option value="review">Ask in review</option><option value="defaults">Use recommendations</option><option value="stop">Always wait for answers</option></Select></Field>
+          </fieldset>}
+          {form.screenshots !== 'disabled' && <section class="pl-composer-expand pl-composer-capture" aria-label="Application screenshot behavior">
+            {captureReadiness
+              ? <small class={`capture-readiness ${captureReady ? 'ready' : 'missing'}`}><Icon name={captureReady ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}{captureReadiness.configured && !captureReady && <> <button type="button" disabled={checkingCapture} onClick={() => void refreshCaptureReadiness()}>{checkingCapture ? 'Checking…' : 'Check again'}</button></>}</small>
+              : <small class="capture-readiness">Checking the application…</small>}
+            {form.screenshots === 'enabled' && !captureReady && <small class="pl-composer-hint">Screenshots are required for this run. Planning checks the application again when you start; start or configure it first.</small>}
           </section>}
-          <section class="authoring-run-config">
-            <button type="button" class="agent-config-summary" aria-expanded={agentConfigOpen} onClick={() => setAgentConfigOpen(!agentConfigOpen)}>
-              <Icon name="bot" size={16} />
-              <span>Agent: <b>{form.agent ? agentLabel(form.agent) : 'Automatically detect'}{form.model ? ` · ${form.model}` : ''}{form.agent === 'codex' && form.reasoning ? ` · ${form.reasoning} reasoning` : form.agent === 'claude' && form.effort ? ` · ${form.effort} effort` : ''}</b></span>
-              <strong>{agentConfigOpen ? 'Hide options' : 'Change'}</strong>
-            </button>
-            {agentConfigOpen && <fieldset class="authoring-options" disabled={runBusy}>
-              <Field label="Agent"><span class="authoring-control-icon agent"><Icon name="bot" size={16} /><Select value={form.agent} onChange={(event) => {
-                const agent = event.currentTarget.value
-                const model = defaultModelForAgent(agent)
-                const level = preferredReasoningLevel(agent, model)
-                setForm({ ...form, agent, model, reasoning: agent === 'codex' ? level : '', effort: agent === 'claude' ? level : '' })
-              }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></span></Field>
-              <Field label="Model"><span class="authoring-control-icon model"><Icon name="sparkle" size={17} /><Combo value={form.model} options={availableAuthorModels.map((model) => [model.id, model.label] as const)} disabled={!form.agent} placeholder="Default model" onValueChange={(value) => setForm({ ...form, model: value })} /></span></Field>
-              <Field label={form.agent === 'claude' ? 'Effort' : 'Reasoning'}><span class="authoring-control-icon reasoning"><Icon name="brain" size={17} /><Combo value={form.agent === 'claude' ? form.effort : form.reasoning} options={supportedAuthorReasoning.map((value) => [value, value] as const)} disabled={!form.agent} placeholder="Default" onValueChange={(value) => setForm({ ...form, [form.agent === 'claude' ? 'effort' : 'reasoning']: value })} /></span></Field>
-              <Field label="Planner questions"><Select value={form.clarificationMode} onChange={(event) => setForm({ ...form, clarificationMode: event.currentTarget.value })}><option value="review">Ask in review</option><option value="defaults">Use recommendations</option><option value="stop">Always wait for answers</option></Select></Field>
-            </fieldset>}
-            <section class="screenshot-run-choice" aria-label="Application screenshot behavior">
-              <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
-              <div><strong>Add product screenshots?</strong><small>Optional. If you choose Yes, Doxloop must capture and verify the planned images before it can finish.</small></div>
-              <Segmented value={form.screenshots === 'disabled' ? 'no' : 'yes'} onChange={(value) => setForm({ ...form, screenshots: screenshotIntentFromChoice(value), limits: { ...form.limits, maxScreenshots: value === 'yes' ? (form.limits.maxScreenshots || batchLimitsForScope(form.scope as 'starter' | 'standard' | 'comprehensive' | 'custom', 'auto').maxScreenshots) : 0 } })} items={[['no', 'No'], ['yes', 'Yes']] as const} />
-              {form.screenshots !== 'disabled' && captureReadiness && <small class={`capture-readiness ${captureReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={captureReadiness.status === 'ready' ? 'check' : 'info'} size={13} />{captureReadiness.message}{!captureReadiness.configured && <> Configure it in <button type="button" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Settings</button>.</>}{captureReadiness.configured && captureReadiness.status !== 'ready' && <> <button type="button" disabled={checkingCapture} onClick={() => void refreshCaptureReadiness()}>{checkingCapture ? 'Checking…' : 'Check again'}</button></>}</small>}
-            </section>
-            <details class="batch-limits-control"><summary>Run limits: {form.limits.maxPages} pages · {form.limits.maxScreenshots} screenshots · {form.limits.maxMinutes} minutes</summary><div class="batch-limits-fields"><label>Batch page limit<input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label><Button onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button>{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}</div><RunEstimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /></details>
-            <footer><Button disabled={runBusy} busy={submitting || checkingCapture} tone="primary" icon="sparkle" onClick={() => void startPlan()}>{mode === 'create' ? 'Create documentation plan' : 'Plan documentation update'}</Button><small>{form.screenshots === 'enabled' && captureReadiness?.status !== 'ready' ? 'Screenshots are required for this run. Planning checks the application again when you start; start or configure it first.' : 'This first run is read-only. It researches sources and existing docs, but cannot write documentation.'}</small></footer>
-          </section>
-        </Panel>
+          {limitsOpen && <section class="pl-composer-expand pl-composer-limits" aria-label="Run limits">
+            <Field label="Minimum pages to write" hint={mode === 'create' ? 'Optional. Leave empty to let the evidence decide; the batch maximum limits what can be approved for this run.' : 'Optional. Ask for a larger update when the existing documentation is thin; the planner adds distinct evidence-backed pages rather than filler.'}><Input type="number" min="1" max="500" value={form.targetPages} placeholder={mode === 'create' ? (discovery ? String(discovery.suggestedPages[form.scope as 'starter' | 'standard' | 'comprehensive']) : 'For example: 40') : 'For example: 25'} onInput={(event) => setForm({ ...form, targetPages: event.currentTarget.value })} /></Field>
+            <label class="field"><span class="field-label">Batch page limit</span><input aria-label="Batch page limit" type="range" min="1" max="50" value={Math.min(50, form.limits.maxPages)} onInput={(event) => setForm({ ...form, limits: { ...form.limits, maxPages: Number(event.currentTarget.value) } })} /></label>
+            {(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field key={key} label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input type="number" min={key === 'maxScreenshots' ? 0 : 1} value={form.limits[key]} onInput={(event) => setForm({ ...form, limits: { ...form.limits, [key]: Number(event.currentTarget.value) } })} /></Field>)}
+            <div class="pl-composer-limit-foot"><RunEstimate pages={form.limits.maxPages} agent={form.agent} model={form.model} /><Button size="sm" onClick={() => setForm({ ...form, scope: 'starter', targetPages: '', screenshots: 'disabled', limits: { maxPages: 5, maxScreenshots: 0, maxMinutes: 15 } })}>Small first batch</Button></div>
+          </section>}
+        </section>
       </div>}
 
-    {(currentRun || submitting) && <section class={`authoring-action-card activity-card live-activity-card ${activityOpen ? 'open' : ''}`}>
-      <button type="button" class="authoring-action-card-head" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
-        <span class="action-card-icon activity"><Icon name="record" size={19} /></span>
-        <span class="action-card-copy"><strong>Live activity</strong><small>{activeRun ? `${streamConnected ? 'Live · ' : ''}${workflowActivityLabel(activeRun.type)}` : submitting ? 'Starting planning agent…' : 'Show the latest workflow log'}</small></span>
-        {activeRun && <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>}
-        <Icon name="chevronDown" size={17} />
-      </button>
-      {activityOpen && currentRun && <AuthoringLiveLog job={currentRun} act={act} />}
+    {(currentRun || submitting) && <section class={`panel pl-live ${activityOpen ? 'open' : ''}`}>
+      <header class="panel-head pl-live-head">
+        <button type="button" class="pl-live-toggle" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}>
+          <Icon name="zap" size={16} />
+          <span class="pl-live-title"><strong>Live activity</strong><small>{activeRun ? `${workflowActivityLabel(activeRun.type)} · started ${timeText(activeRun.startedAt)}` : submitting ? 'Starting planning agent…' : currentRun ? `${workflowActivityLabel(currentRun.type)} · ${statusLabel(currentRun.status)} ${timeText(currentRun.finishedAt ?? currentRun.startedAt)}` : 'Show the latest workflow log'}</small></span>
+          <Icon name="chevronDown" size={16} class={`pl-chevron ${activityOpen ? 'open' : ''}`} />
+        </button>
+        <div class="panel-actions">
+          {activeRun && <Badge tone={streamConnected ? 'good' : 'warn'}>{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>}
+          {activeRun && <Button size="sm" tone="danger" icon="stop" aria-label="Stop update" onClick={() => void act(() => post(`/api/jobs/${activeRun.id}/cancel`), 'Update stopped')}>Stop</Button>}
+        </div>
+      </header>
+      {activityOpen && currentRun && <div class="panel-body flush"><AuthoringLiveLog job={currentRun} act={act} hideStop /></div>}
       {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the planning agent…</div>}
     </section>}
-    <Panel class="history-panel" title="Update history" description="A clear record of each documentation action and the instruction behind it.">
+    <Panel class="history-panel pl-history" title="Update history" flush>
       <RequestHistory jobs={state.jobs} onError={onError} />
     </Panel>
   </div>
@@ -1197,6 +1402,9 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
   const [captureCheckNonce, setCaptureCheckNonce] = useState(0)
   const [retryAgent, setRetryAgent] = useState('')
   const [coverageDismissed, setCoverageDismissed] = useState('')
+  const [limitsOpen, setLimitsOpen] = useState(false)
+  const [captureDetailsOpen, setCaptureDetailsOpen] = useState(false)
+  const [ownAnswers, setOwnAnswers] = useState<Record<string, boolean>>({})
   // A background refresh (a job finishing, a poll) delivers a newer plan. If
   // the reviewer has unsaved edits, hold the new version behind a prompt
   // instead of discarding what they typed.
@@ -1221,6 +1429,8 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
     return () => { active = false }
   }, [plan.id, plan.version, plan.updatedAt])
   const locked = busy || ['planning', 'revising', 'generating'].includes(plan.status)
+  // While the generation job runs the plan can still read "approved".
+  const writing = plan.status === 'generating' || (busy && plan.status === 'approved')
   const editable = !locked && !['generated', 'cancelled'].includes(plan.status)
   const stale = plan.status === 'stale'
   const changed = editable && planEditableJson(draft) !== planEditableJson(plan)
@@ -1279,7 +1489,6 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
     hasVisualPages: visualPages.length > 0,
     captureReady,
   })
-  const groupedPages = groupPlanPages(pages, pageFilter)
   const selectedIndex = selectedPageId ? pages.findIndex((page) => page.id === selectedPageId) : -1
   const selectedPage = selectedIndex >= 0 ? pages[selectedIndex] : undefined
   const generationTarget = counts.pagesToWrite > 0
@@ -1321,6 +1530,14 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
     setDraft({ ...draft, scope: 'custom', pages: [...pages, page] })
     setSelectedPageId(page.id)
   }
+  // The structure editor places the page in a section itself, so this only
+  // adds the page to the draft; the navigation change arrives through onChange.
+  const createPage = () => {
+    const page = newPlanPage(draft.pages.length)
+    setDraft((current) => ({ ...current, scope: 'custom', pages: [...current.pages, page] }))
+    setSelectedPageId(page.id)
+    return page
+  }
   const removePage = (index: number) => {
     const removed = pages[index]
     const capabilities = removed ? draft.capabilities.map((capability) => {
@@ -1347,7 +1564,7 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
   const save = async () => {
     setSaving(true)
     try {
-      const updated = await act(() => patch<DocumentationPlan>(`/api/plans/${plan.id}`, planEditablePayload(draft)), 'Plan changes saved')
+      const updated = await act(() => patch<DocumentationPlan>(`/api/plans/${plan.id}`, planEditablePayload({ ...draft, navigation: { ...draft.navigation, sections: draft.navigation.sections.filter((section) => section.pageIds.length > 0) } })), 'Plan changes saved')
       if (updated) setDraft(updated)
     } finally { setSaving(false) }
   }
@@ -1402,54 +1619,67 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
     addEventListener('keydown', close)
     return () => removeEventListener('keydown', close)
   }, [selectedPageId])
-  if (plan.status === 'generated') return <Panel class="plan-complete-panel">
-    <div class="plan-complete"><span><Icon name="check" size={24} /></span><div><h2>Documentation proposal is ready</h2><p>The approved plan was generated in an isolated workspace. Reader-facing files are still unchanged until you review and accept them.</p></div></div>
+  if (plan.status === 'generated') return <Panel class="plan-complete-panel pl-complete">
+    <div class="plan-complete"><span><Icon name="check" size={22} /></span><div><h2>Documentation proposal is ready</h2><p>The approved plan was generated in an isolated workspace. Reader-facing files stay unchanged until you review and accept them.</p></div></div>
     <div class="plan-complete-actions"><Button onClick={onStartAnother}>Plan another update</Button><Button tone="primary" icon="proposals" onClick={() => setLocation('proposals', plan.proposalId ? { proposal: plan.proposalId } : {}, 'push')}>Review generated files</Button></div>
   </Panel>
-  return <div class="documentation-plan-review">
-    <section class="plan-review-header">
-      <div class="plan-review-heading">
-        <span class="plan-review-summary-icon"><Icon name="map" size={18} /></span>
-        <div class="plan-review-heading-copy">
-          <small>Documentation plan · Version {plan.version}</small>
-          <h2>{planningFailedEmpty ? 'No pages proposed yet' : 'Review documentation structure'}</h2>
-          <div class="plan-review-change-summary" aria-label="Documentation changes">
-            {counts.create > 0 && <span class="create"><i />{counts.create} new</span>}
-            {counts.update > 0 && <span class="update"><i />{counts.update} updated</span>}
-            {counts.remove > 0 && <span class="remove"><i />{counts.remove} deleted</span>}
-            {counts.preserve > 0 && <span class="preserve"><i />{counts.preserve} unchanged</span>}
-            {plannedCaptures > 0 && <span class="visual"><Icon name="camera" size={12} />{plannedCaptures} screenshot{plannedCaptures === 1 ? '' : 's'}</span>}
-          </div>
-        </div>
+  const scopeText = plan.scope === 'custom' ? 'Custom scope' : plan.scope.charAt(0).toUpperCase() + plan.scope.slice(1)
+  const agentText = draft.execution.agent ? `${agentLabel(draft.execution.agent)}${draft.execution.model ? ` · ${draft.execution.model}` : ''}` : ''
+  const limits = draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }
+  const captureBadge: [string, string] | undefined = screenshotIntent === 'disabled'
+    ? undefined
+    : captureCheck === 'checking'
+      ? ['neutral', 'Checking…']
+      : captureReadiness?.reachable
+        ? [captureReadiness.status === 'authentication-required' ? 'warn' : 'good', captureReadiness.status === 'authentication-required' ? 'Sign-in needed' : 'Reachable']
+        : ['warn', 'Not reachable']
+  const actionTone = (action: DocumentationPlanPage['action']) => action === 'create' ? 'good' : action === 'update' ? 'info' : action === 'remove' ? 'bad' : 'neutral'
+  const pageMatchesFilter = (page: DocumentationPlanPage) => pageFilter === 'all' || (pageFilter === 'changes' ? page.action !== 'preserve' : page.action === pageFilter)
+  const priorityBadge = (page: DocumentationPlanPage) => <span class={`badge no-dot ${page.priority === 'must-have' ? 'teal' : 'neutral'}`}>{page.priority === 'must-have' ? 'Essential' : 'Recommended'}</span>
+  const pageRowMeta = (page: DocumentationPlanPage) => <>
+    <span class="pl-page-purpose">{page.purpose}</span>
+    <span class={`pl-page-camera ${page.visuals && page.visuals.mode !== 'none' && screenshotIntent !== 'disabled' ? 'on' : ''}`} title={page.visuals && page.visuals.mode !== 'none' ? `${page.visuals.estimatedCaptures} planned screenshot${page.visuals.estimatedCaptures === 1 ? '' : 's'}` : 'No screenshots planned'}><Icon name="camera" size={15} /></span>
+    {(plan.mode === 'update' || page.action !== 'create') && <span class={`badge no-dot ${actionTone(page.action)}`}>{planActionLabel(page.action)}</span>}
+    {priorityBadge(page)}
+    <button type="button" class="pl-icon-btn" aria-label={`Page options: ${page.title}`} onClick={(event) => { event.stopPropagation(); setSelectedPageId(page.id) }}><Icon name="chevronRight" size={16} /></button>
+  </>
+  return <div class="documentation-plan-review pl-review">
+    <section class="pl-review-head">
+      <div class="pl-review-heading">
+        <span class="kicker">Plan version {plan.version} · {writing ? 'approved' : plan.status === 'planning' || plan.status === 'revising' ? 'started' : 'proposed'} {timeText(writing ? plan.updatedAt : plan.createdAt)}</span>
+        <h1>{writing ? 'Writing your documentation' : plan.status === 'planning' ? 'Researching your documentation plan' : plan.status === 'revising' ? 'Revising your documentation plan' : planningFailedEmpty ? 'No pages proposed yet' : 'Review your documentation plan'}</h1>
       </div>
-      <div class="plan-review-actions"><Badge tone={statusTone(plan.status)}>{statusLabel(plan.status)}</Badge>{editable && <Button size="sm" tone="ghost" onClick={() => setBriefOpen(!briefOpen)}>{briefOpen ? 'Close details' : 'Plan details'}</Button>}</div>
+      <div class="pl-review-actions">
+        <div class="pl-review-buttons">
+          {plan.status !== 'ready-for-review' && (writing ? <Badge tone="info">Writing</Badge> : <Badge tone={statusTone(plan.status)}>{statusLabel(plan.status)}</Badge>)}
+          {approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}
+          {!locked && !planningFailed && <Button icon="sparkle" disabled={busy} onClick={() => { revisionInput.current?.focus(); revisionInput.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }}>Ask the agent to revise</Button>}
+          {!locked && (primaryAction === 'retry-planning'
+            ? <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
+            : <Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : primaryAction === 'generate' ? `Generate ${generationTarget}` : primaryAction === 'retry-generating' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button>)}
+        </div>
+        {!locked && <small class="pl-review-hint"><Icon name={approvalBlocker ? 'help' : 'lock'} size={13} />{approvalBlocker ?? (unresolvedCapabilities > 0 ? `${unresolvedCapabilities} coverage ${unresolvedCapabilities === 1 ? 'item needs' : 'items need'} a decision; you can save and continue if intentionally deferred.` : 'Nothing is written until you approve this exact plan.')}</small>}
+      </div>
     </section>
-    {pendingPlan && <div class="plan-pending-refresh" role="status">
+    {pendingPlan && <div class="plan-pending-refresh pl-pending" role="status">
       <Icon name="info" size={15} />
       <span><strong>A newer version of this plan arrived while you were editing.</strong> Keep your unsaved edits, or load the new version and lose them.</span>
       <span class="plan-pending-actions"><Button size="sm" onClick={() => setPendingPlan(null)}>Keep my edits</Button><Button size="sm" tone="primary" onClick={() => loadPlan(pendingPlan)}>Load new version</Button></span>
     </div>}
-    {stale && <Panel class="plan-stale-panel" title="Sources changed since this plan was proposed" description="The plan itself is unchanged and can be approved as it is; generation reads the current sources when it writes each page. Ask the agent to revise only if the change should alter which pages are written.">
-      <footer class="plan-stale-actions"><Button size="sm" icon="refresh" busy={resuming} disabled={busy} onClick={() => void resume()}>Clear this notice</Button><Button size="sm" icon="wand" disabled={busy} onClick={() => revisionInput.current?.focus()}>Ask the agent to revise</Button></footer>
+    {stale && <Panel class="plan-stale-panel" title="Sources changed since this plan was proposed" description="The plan itself is unchanged and can be approved as it is; generation reads the current sources when it writes each page. Ask the agent to revise only if the change should alter which pages are written." actions={<><Button size="sm" icon="refresh" busy={resuming} disabled={busy} onClick={() => void resume()}>Clear this notice</Button><Button size="sm" icon="wand" disabled={busy} onClick={() => revisionInput.current?.focus()}>Ask the agent to revise</Button></>}>
+      <p class="pl-stale-copy">Approve to generate from the current sources, or ask the agent to revise the plan first.</p>
     </Panel>}
-    {planningFailed && <Panel class="plan-failed-panel">
-      <div class="plan-failed-head">
-        <span class="plan-failed-icon"><Icon name="alert" size={20} /></span>
-        <div><h2>Planning did not finish</h2><p>{planAgentSignedOut
-          ? `${agentLabel(planAgentName)} is signed out on this computer, so it could not research your sources. Retry with a signed-in assistant, or sign ${agentLabel(planAgentName)} in again first.`
-          : 'The planning agent stopped before it proposed any pages. Nothing in your project changed.'}</p></div>
-      </div>
-      {plan.error && <pre class="plan-failed-error">{stripAnsi(plan.error)}</pre>}
-      {installedAgents.length > 0 && <div class="plan-retry-row">
-        <Field label="Retry with"><Select aria-label="Assistant to retry planning with" value={chosenRetryAgent} disabled={busy} onChange={(event) => setRetryAgent(event.currentTarget.value)}>{installedAgents.map((agent) => <option key={agent.name} value={agent.name}>{`${agentLabel(agent.name)} · ${retryStatusLabel(agent.authentication.status)}`}</option>)}</Select></Field>
-        <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
-      </div>}
-      {installedAgents.length === 0 && <footer class="plan-retry-row"><Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button></footer>}
+    {planningFailed && <Panel class="plan-failed-panel pl-failed" icon="alert" title="Planning did not finish" description={planAgentSignedOut
+      ? `${agentLabel(planAgentName)} is signed out on this computer, so it could not research your sources. Retry with a signed-in assistant, or sign ${agentLabel(planAgentName)} in again first.`
+      : 'The planning agent stopped before it proposed any pages. Nothing in your project changed.'}>
+      {plan.error && <pre class="plan-failed-error pl-error">{stripAnsi(plan.error)}</pre>}
+      {installedAgents.length > 0 && <Field label="Retry with"><Select aria-label="Assistant to retry planning with" value={chosenRetryAgent} disabled={busy} onChange={(event) => setRetryAgent(event.currentTarget.value)}>{installedAgents.map((agent) => <option key={agent.name} value={agent.name}>{`${agentLabel(agent.name)} · ${retryStatusLabel(agent.authentication.status)}`}</option>)}</Select></Field>}
+      <div class="pl-inline-actions"><Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button></div>
       {chosenRetrySignedOut && <Note tone="warn">{agentLabel(chosenRetryAgent)} is signed out. {agentSignInHint(chosenRetryAgent)}</Note>}
     </Panel>}
     {plan.error && !stale && !planningFailed && <Note tone="bad">{plan.error}</Note>}
-    {plan.status === 'failed' && plan.failure && (plan.failure.resumable || plan.failure.ignorable) && <Panel class="plan-recovery-panel" title="Continue without starting over" description={plan.failure.stage === 'generate'
-      ? 'The pages and screenshots the agent already produced are preserved in this run\u2019s workspace. Continue from there instead of paying for another full run.'
+    {plan.status === 'failed' && plan.failure && (plan.failure.resumable || plan.failure.ignorable) && <Panel class="plan-recovery-panel pl-recovery" title="Continue without starting over" description={plan.failure.stage === 'generate'
+      ? 'The pages and screenshots the agent already produced are preserved in this run’s workspace. Continue from there instead of paying for another full run.'
       : 'The planner proposed a plan but could not meet every planning gate. You can review and edit that plan yourself instead of running the planner again.'}>
       <ul class="plan-recovery-options">
         {plan.failure.stage === 'generate' && plan.failure.resumable && <li><strong>Resume the run</strong><span>Starts the agent again in the same workspace with a brief of what is finished. Verified screenshots and completed pages are kept; only the unfinished or rejected parts are redone.</span></li>}
@@ -1461,26 +1691,37 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
         <p>These images are kept by both choices below. Resume recaptures only the states that are still missing.</p>
         <CaptureGallery live={false} run={plan.failure.proposalId} />
       </section>}
-      <footer class="plan-recovery-actions">
+      <footer class="plan-recovery-actions pl-inline-actions">
         {plan.failure.stage === 'generate' && plan.failure.resumable && <Button tone="primary" icon="play" busy={continuing === 'resume'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('resume')}>Resume generation</Button>}
         {plan.failure.stage === 'generate' && plan.failure.ignorable && <Button icon="check" busy={continuing === 'ignore-errors'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('ignore-errors')}>Ignore problems & continue</Button>}
         {plan.failure.stage !== 'generate' && plan.failure.ignorable && <Button tone="primary" icon="check" busy={continuing === 'ignore-errors'} disabled={busy || Boolean(continuing)} onClick={() => void continueFailed('ignore-errors')}>Review this plan anyway</Button>}
-        <small>{plan.failure.stage === 'generate' ? `“Retry generating” below starts a new run from the approved plan${plan.failure.resumable ? ' only if this workspace can no longer be reused' : ''}.` : 'Or ask the agent to revise the plan below, which runs the planner again.'}</small>
+        <small>{plan.failure.stage === 'generate' ? `“Retry generating” above starts a new run from the approved plan${plan.failure.resumable ? ' only if this workspace can no longer be reused' : ''}.` : 'Or ask the agent to revise the plan below, which runs the planner again.'}</small>
       </footer>
     </Panel>}
-    {locked && <Panel class="plan-progress-panel"><div class="plan-progress"><span class="spinner" /><div><strong>{plan.status === 'generating' ? 'Generating the approved documentation' : plan.status === 'revising' ? 'Revising the documentation plan' : 'Researching sources and existing documentation'}</strong><p>You can follow the activity log below. The documentation project remains unchanged during planning.</p></div></div></Panel>}
+    {locked && <Panel class="plan-progress-panel pl-progress"><div class="plan-progress"><span class="spinner" /><div><strong>{writing ? 'Writing the approved documentation' : plan.status === 'revising' ? 'Revising the documentation plan' : 'Researching sources and existing documentation'}</strong><p>{writing ? 'Pages are written in batches. The proposal opens in Review when writing finishes; your current documentation stays unchanged until you apply it.' : 'Follow the activity log below. The documentation project stays unchanged during planning.'}</p></div></div></Panel>}
     {!locked && <>
-      {draft.questions.length > 0 && <Panel class="plan-questions" title={`Needs your decision (${draft.questions.length})`} description="Resolve these choices before approving the plan.">
-        {draft.questions.map((question) => <article key={question.id}><span><Icon name="help" size={16} /></span><div><strong>{question.question}</strong><p>{question.whyItMatters}</p>{question.recommendation && <small>Recommended: {question.recommendation}</small>}<Input value={clarificationAnswers[question.id] ?? ''} placeholder={question.recommendation ?? 'Enter your decision'} onInput={(event) => setClarificationAnswers({ ...clarificationAnswers, [question.id]: event.currentTarget.value })} /></div>{question.recommendation && (clarificationAnswers[question.id]?.trim() === question.recommendation.trim()
-          ? <Button size="sm" tone="ghost" icon="check" disabled>Recommendation applied</Button>
-          : <Button size="sm" tone="ghost" onClick={() => setClarificationAnswers({ ...clarificationAnswers, [question.id]: question.recommendation! })}>Use recommendation</Button>)}</article>)}
-        <footer><Button size="sm" disabled={busy || !draft.questions.every((question) => question.recommendation)} onClick={() => void continueWithClarifications(true)}>Use all recommendations</Button><Button size="sm" tone="primary" busy={revising} disabled={busy || !draft.questions.every((question) => clarificationAnswers[question.id]?.trim())} onClick={() => void continueWithClarifications()}>Continue planning</Button></footer>
-      </Panel>}
-      {briefOpen && <Panel class="plan-brief-panel" title="Documentation brief" description="These choices guide every page. Technical guidance stays here instead of crowding the page outline.">
-        <div class="plan-brief-summary"><strong>Agent summary</strong><p>{plan.summary || 'No additional summary was provided.'}</p></div>
-        <section class="plan-coverage-summary"><header><div><strong>Evidence coverage</strong><small>{draft.discovery.publicSignals} deterministic public signals inspected</small></div><span>{draft.capabilities.filter((capability) => capability.disposition === 'planned' || capability.disposition === 'existing').length} mapped</span></header>{draft.capabilities.length > 0 ? <ul>{draft.capabilities.map((capability, index) => <li key={capability.id}><span><b>{capability.title}</b><small>{capability.kind}</small></span>{editable ? <Select aria-label={`Coverage decision for ${capability.title}`} value={capability.disposition} onChange={(event) => setDraft({ ...draft, scope: 'custom', capabilities: draft.capabilities.map((candidate, item) => item === index ? { ...candidate, disposition: event.currentTarget.value as typeof candidate.disposition } : candidate) })}><option value="planned">Document</option><option value="existing">Existing documentation</option><option value="excluded">Exclude as internal</option><option value="needs-human">Decide later</option></Select> : <em class={capability.disposition}>{capability.disposition === 'needs-human' ? 'Needs decision' : capability.disposition}</em>}</li>)}</ul> : <p>No capability map was returned for this plan.</p>}</section>
-        {versionChanges && <section class="plan-version-summary"><header><strong>Changed since version {previousVersion!.version}</strong><small>Version {plan.version}</small></header><div>{versionChanges.added.length > 0 && <span class="create">+ {versionChanges.added.length} page{versionChanges.added.length === 1 ? '' : 's'}</span>}{versionChanges.changed.length > 0 && <span class="update">{versionChanges.changed.length} edited</span>}{versionChanges.removed.length > 0 && <span class="remove">− {versionChanges.removed.length} removed</span>}{versionChanges.briefChanged && <span>Brief updated</span>}</div><details><summary>See version changes</summary><ul>{versionChanges.added.map((title) => <li key={`add-${title}`}>Added “{title}”</li>)}{versionChanges.changed.map((title) => <li key={`change-${title}`}>Changed “{title}”</li>)}{versionChanges.removed.map((title) => <li key={`remove-${title}`}>Removed “{title}”</li>)}</ul></details></section>}
-        <div class="form-grid">
+      <Panel class="pl-brief" title="Documentation brief" actions={(editable || briefOpen) ? <Button tone="link" onClick={() => setBriefOpen(!briefOpen)}>{briefOpen ? 'Close brief' : editable ? 'Edit brief' : 'Show details'}</Button> : undefined}>
+        {plan.productProfile && <p class="pl-brief-text">{plan.productProfile}</p>}
+        <p class="pl-brief-text">{plan.summary || 'No additional summary was provided.'}</p>
+        <div class="pl-brief-badges">
+          {(() => {
+            // Pages kept exactly as they are are not written, so the badge
+            // agrees with the "Approve & generate N pages" button.
+            const kept = pages.filter((page) => page.action === 'preserve').length
+            const written = pages.length - kept
+            return <span class="badge no-dot">{written} page{written === 1 ? '' : 's'} to write{kept > 0 ? ` · ${kept} kept as is` : ''}</span>
+          })()}
+          <span class="badge no-dot">{draft.navigation.sections.length} section{draft.navigation.sections.length === 1 ? '' : 's'}</span>
+          {plannedCaptures > 0 && screenshotIntent !== 'disabled' && <span class="badge no-dot">{plannedCaptures} screenshot{plannedCaptures === 1 ? '' : 's'}</span>}
+          <span class="badge no-dot teal">{scopeText}</span>
+          {agentText && <span class="badge no-dot">{agentText}</span>}
+          {plan.mode === 'update' && counts.create > 0 && <span class="badge no-dot good">{counts.create} new</span>}
+          {plan.mode === 'update' && counts.update > 0 && <span class="badge no-dot info">{counts.update} updated</span>}
+          {plan.mode === 'update' && counts.remove > 0 && <span class="badge no-dot bad">{counts.remove} deleted</span>}
+          {plan.mode === 'update' && counts.preserve > 0 && <span class="badge no-dot">{counts.preserve} unchanged</span>}
+        </div>
+        {briefOpen && <div class="pl-brief-editor">
+          <section class="plan-coverage-summary pl-coverage-summary"><header><div><strong>Evidence coverage</strong><small>{draft.discovery.publicSignals} deterministic public signals inspected</small></div><span>{draft.capabilities.filter((capability) => capability.disposition === 'planned' || capability.disposition === 'existing').length} mapped</span></header>{draft.capabilities.length > 0 ? <ul>{draft.capabilities.map((capability, index) => <li key={capability.id}><span><b>{capability.title}</b><small>{capability.kind}</small></span>{editable ? <Select aria-label={`Coverage decision for ${capability.title}`} value={capability.disposition} onChange={(event) => setDraft({ ...draft, scope: 'custom', capabilities: draft.capabilities.map((candidate, item) => item === index ? { ...candidate, disposition: event.currentTarget.value as typeof candidate.disposition } : candidate) })}><option value="planned">Document</option><option value="existing">Existing documentation</option><option value="excluded">Exclude as internal</option><option value="needs-human">Decide later</option></Select> : <em class={capability.disposition}>{capability.disposition === 'needs-human' ? 'Needs decision' : capability.disposition}</em>}</li>)}</ul> : <p>No capability map was returned for this plan.</p>}</section>
           <Field label="Audiences" hint="Comma-separated"><Input disabled={!editable} value={draft.audiences.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', audiences: splitComma(event.currentTarget.value) })} /></Field>
           <Field label="Reader outcomes" hint="Comma-separated"><Input disabled={!editable} value={draft.outcomes.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', outcomes: splitComma(event.currentTarget.value) })} /></Field>
           <Field label="Reader experience"><Select disabled={!editable} value={draft.experienceLevel} onChange={(event) => setDraft({ ...draft, scope: 'custom', experienceLevel: event.currentTarget.value as DocumentationPlan['experienceLevel'] })}><option value="beginner">New to the product</option><option value="intermediate">Some experience</option><option value="advanced">Experienced</option><option value="mixed">Mixed audience</option></Select></Field>
@@ -1490,123 +1731,156 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
           <Field label="Style guide"><Input disabled={!editable} value={draft.styleGuide} onInput={(event) => setDraft({ ...draft, scope: 'custom', styleGuide: event.currentTarget.value })} /></Field>
           <Field label="Terminology" hint="One preferred term = guidance per line"><Textarea disabled={!editable} rows={3} value={termText(draft.terminology)} onInput={(event) => setDraft({ ...draft, scope: 'custom', terminology: parseTerms(event.currentTarget.value) })} /></Field>
           <Field label="Exclusions" hint="Comma-separated"><Textarea disabled={!editable} rows={3} value={draft.exclusions.join(', ')} onInput={(event) => setDraft({ ...draft, scope: 'custom', exclusions: splitComma(event.currentTarget.value) })} /></Field>
-        </div>
-        <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
+          <Field label="Plan-wide instructions"><Textarea disabled={!editable} rows={3} value={draft.instructions} onInput={(event) => setDraft({ ...draft, scope: 'custom', instructions: event.currentTarget.value })} /></Field>
+        </div>}
+      </Panel>
+      {draft.questions.length > 0 && <Panel class="pl-questions" icon="alert" title="Needs your decision" actions={<Badge tone="warn">{draft.questions.length} open question{draft.questions.length === 1 ? '' : 's'}</Badge>}>
+        {draft.questions.map((question) => {
+          const answer = clarificationAnswers[question.id] ?? ''
+          const recommended = Boolean(question.recommendation) && answer.trim() === question.recommendation!.trim()
+          const writing = !question.recommendation || ownAnswers[question.id] || (answer.trim() !== '' && !recommended)
+          return <article key={question.id} class="pl-question">
+            <strong>{question.question}</strong>
+            {question.whyItMatters && <p>{question.whyItMatters}</p>}
+            {question.recommendation && <div class="pl-recommendation"><Icon name="sparkle" size={16} /><div><strong>Recommendation</strong><span>{question.recommendation}</span></div></div>}
+            <div class="pl-question-actions">
+              {question.recommendation && (recommended
+                ? <Button size="sm" tone="ghost" icon="check" disabled>Recommendation applied</Button>
+                : <Button size="sm" tone="primary" onClick={() => { setClarificationAnswers({ ...clarificationAnswers, [question.id]: question.recommendation! }); setOwnAnswers({ ...ownAnswers, [question.id]: false }) }}>Use recommendation</Button>)}
+              {question.recommendation && !writing && <Button size="sm" tone="ghost" onClick={() => setOwnAnswers({ ...ownAnswers, [question.id]: true })}>Write my own answer</Button>}
+            </div>
+            {writing && <Input aria-label={`Your answer: ${question.question}`} value={answer} placeholder={question.recommendation ?? 'Enter your decision'} onInput={(event) => setClarificationAnswers({ ...clarificationAnswers, [question.id]: event.currentTarget.value })} />}
+          </article>
+        })}
+        <footer class="pl-question-foot"><Button size="sm" disabled={busy || !draft.questions.every((question) => question.recommendation)} onClick={() => void continueWithClarifications(true)}>Use all recommendations</Button><Button size="sm" tone="primary" busy={revising} disabled={busy || !draft.questions.every((question) => clarificationAnswers[question.id]?.trim())} onClick={() => void continueWithClarifications()}>Continue planning</Button></footer>
       </Panel>}
-      {!planningFailedEmpty && <Panel title="Batch limits" description="Approval and proposal validation enforce these maxima. Mark extra pages Later to keep them out of this run."><div class="form-grid">{(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 })[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...(draft.execution.limits ?? { maxPages: 50, maxScreenshots: 20, maxMinutes: 30 }), [key]: Number(event.currentTarget.value) } } })} /></Field>)}</div></Panel>}
+      {!planningFailedEmpty && <section class="pl-structure" aria-label="Documentation structure">
+        <h2>Review documentation structure</h2>
+        <div class="pl-structure-tools">
+          <Segmented value={pageFilter} onChange={setPageFilter} items={[['all', 'All pages'], ['changes', 'Changes'], ['create', 'New'], ['update', 'Updated'], ['preserve', 'Unchanged'], ...(counts.remove > 0 ? [['remove', 'Deleted'] as const] : [])] as ReadonlyArray<readonly [PlanPageFilter, string]>} />
+          {editable && <Button size="sm" icon="plus" onClick={addPage}>Add page</Button>}
+        </div>
+        <PlanNavigationEditor
+          plan={draft}
+          editable={editable}
+          onChange={(navigation) => setDraft((current) => ({ ...current, scope: 'custom', navigation }))}
+          pageClass={(page) => `plan-tree-page ${page.action} ${page.priority} ${pageMatchesFilter(page) ? '' : 'pl-filtered-out'}`}
+          renderPage={pageRowMeta}
+          onOpenPage={(page) => setSelectedPageId(page.id)}
+          {...(editable ? { onCreatePage: createPage } : {})}
+        />
+        {pages.some((page) => page.action === 'remove' && pageMatchesFilter(page)) && <div class="pl-removed" role="list" aria-label="Pages to delete">
+          <header><Icon name="trash" size={15} /><strong>Pages to delete</strong><span>{pages.filter((page) => page.action === 'remove').length} page{pages.filter((page) => page.action === 'remove').length === 1 ? '' : 's'}</span></header>
+          {pages.flatMap((page, index) => page.action === 'remove' && pageMatchesFilter(page) ? [<div key={page.id} class={`pl-removed-row plan-tree-page ${page.action} ${page.priority}`} role="listitem"><button type="button" class="pl-removed-title" title={page.path} onClick={() => setSelectedPageId(page.id)}><strong>{page.title}</strong></button>{pageRowMeta(pages[index]!)}</div>] : [])}
+        </div>}
+        <small class="pl-structure-hint">Drag pages between sections, or focus a row and use Alt with the arrow keys. Open a page to edit its purpose, priority, and screenshots.</small>
+      </section>}
+      {!planningFailedEmpty && <Panel class="pl-facts" flush>
+        <div class="vrows">
+          <div class="vrow">
+            <span class="vrow-label">Application screenshots<small>{plannedCaptures > 0 ? `${plannedCaptures} planned across ${visualPages.length} page${visualPages.length === 1 ? '' : 's'}` : 'No application screenshots planned'}{captureReadiness?.status === 'authentication-required' && screenshotIntent !== 'disabled' ? ' · needs sign-in' : ''}</small></span>
+            <span class="vrow-value">
+              {captureBadge && <Badge tone={captureBadge[0]}>{captureBadge[1]}</Badge>}
+              <Select aria-label="Screenshot policy" disabled={!editable} value={screenshotIntent} onChange={(event) => { const screenshots = event.currentTarget.value as 'auto' | 'enabled' | 'disabled'; setDraft({ ...draft, execution: { ...draft.execution, screenshots }, pages: draft.pages.map((page) => !page.visuals || page.visuals.mode === 'none' ? page : { ...page, visuals: { ...page.visuals, mode: screenshots === 'enabled' ? 'required' as const : screenshots === 'auto' ? 'recommended' as const : page.visuals.mode } }) }) }}><option value="auto">Automatic</option><option value="enabled">Require screenshots</option><option value="disabled">No screenshots</option></Select>
+            </span>
+          </div>
+          {screenshotIntent !== 'disabled' && <div class="pl-fact-detail">
+            <div class={`plan-capture-readiness pl-readiness ${captureReadiness?.reachable ? 'ready' : 'missing'}`}>
+              <Icon name={captureReadiness?.reachable ? 'check' : 'info'} size={15} />
+              <span>
+                <strong>{captureCheck === 'checking' ? 'Checking the application…' : !captureReadiness ? 'Application check did not complete' : captureReadiness.status === 'authentication-required' ? 'Sign-in may be required during capture' : captureReadiness.reachable ? 'Application reachable' : 'Application setup needed'}</strong>
+                <small>{captureReadiness?.message ?? (captureCheck === 'checking' ? 'Confirming the configured application answers before capture.' : 'Doxloop could not reach the readiness check. Start the application, then check again.')}</small>
+              </span>
+              {captureReadiness?.configured === false
+                ? <Button size="sm" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Configure application</Button>
+                : <Button size="sm" icon="refresh" busy={captureCheck === 'checking'} onClick={() => setCaptureCheckNonce((value) => value + 1)}>Check again</Button>}
+            </div>
+            {visualPages.length > 0 && <button type="button" class="btn link" aria-expanded={captureDetailsOpen} onClick={() => setCaptureDetailsOpen(!captureDetailsOpen)}>{captureDetailsOpen ? 'Hide planned screenshots' : `Show planned screenshots for ${visualPages.length} page${visualPages.length === 1 ? '' : 's'}`}</button>}
+            {captureDetailsOpen && visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span class="plan-screenshot-page-icon"><Icon name="camera" size={14} /></span><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? <code>{page.visuals.startPath}</code> : <em>Starting route needed</em>}{page.visuals?.rationale && <> · {page.visuals.rationale}</>}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : (page.visuals?.estimatedCaptures ?? 0) === 1 ? 'candidate' : 'candidates'}</b></li>)}</ul>}
+            {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
+            {plan.advisories?.filter((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))).map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
+            {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
+          </div>}
+          <div class="vrow">
+            <span class="vrow-label">Batch limits<small>Approval and proposal validation enforce these maxima.</small></span>
+            <span class="vrow-value">{limits.maxPages} pages · {limits.maxScreenshots} screenshots · {limits.maxMinutes} minutes per batch{editable && <button type="button" class="pl-icon-btn" aria-label="Edit batch limits" aria-expanded={limitsOpen} onClick={() => setLimitsOpen(!limitsOpen)}><Icon name={limitsOpen ? 'chevronUp' : 'chevronRight'} size={16} /></button>}</span>
+          </div>
+          {limitsOpen && editable && <div class="pl-fact-detail">
+            {(['maxPages', 'maxScreenshots', 'maxMinutes'] as const).map((key) => <Field key={key} label={key === 'maxPages' ? 'Maximum pages' : key === 'maxScreenshots' ? 'Maximum screenshots' : 'Maximum minutes'}><Input disabled={!editable} type="number" min={key === 'maxScreenshots' ? 0 : 1} value={limits[key]} onInput={(event) => setDraft({ ...draft, execution: { ...draft.execution, limits: { ...limits, [key]: Number(event.currentTarget.value) } } })} /></Field>)}
+          </div>}
+          <div class="vrow">
+            <span class="vrow-label">Sources changed since this plan</span>
+            <span class="vrow-value">{stale ? 'Sources changed' : 'None'}<Badge tone={stale ? 'warn' : 'good'}>{stale ? 'Review advised' : 'Current'}</Badge></span>
+          </div>
+          <div class="vrow">
+            <span class="vrow-label">Estimated run</span>
+            <span class="vrow-value"><RunEstimate pages={counts.pagesToWrite || pages.length} agent={draft.execution.agent} model={draft.execution.model} /></span>
+          </div>
+        </div>
+      </Panel>}
       {plan.existingDocumentation && plan.existingDocumentation.length > 0 && <Panel class="plan-existing-docs-panel" title="Existing documentation audit" description="What the agent found in the documentation being rewritten, and where every existing page lands in this plan.">
         <ExistingDocumentationAudit assessments={plan.existingDocumentation} pages={draft.pages} />
       </Panel>}
-      {!planningFailedEmpty && <Panel class="plan-screenshot-panel" title="Application screenshots" description="Review what the agent will capture before any application is opened.">
-        <div class="plan-screenshot-summary">
-          <span class="screenshot-camera"><Icon name="camera" size={18} /></span>
-          <div><strong>{plannedCaptures > 0 ? `${plannedCaptures} meaningful screenshot candidate${plannedCaptures === 1 ? '' : 's'} across ${visualPages.length} guide${visualPages.length === 1 ? '' : 's'}` : 'No application screenshots planned'}</strong><small>{plannedCaptures > 0 ? 'Doxloop supplies the capture browser. Automatic mode captures the useful states it can verify; required mode enforces every approved image.' : 'API, CLI, reference, and conceptual pages remain text-first.'}</small></div>
-          <Select disabled={!editable} value={screenshotIntent} onChange={(event) => { const screenshots = event.currentTarget.value as 'auto' | 'enabled' | 'disabled'; setDraft({ ...draft, execution: { ...draft.execution, screenshots }, pages: draft.pages.map((page) => !page.visuals || page.visuals.mode === 'none' ? page : { ...page, visuals: { ...page.visuals, mode: screenshots === 'enabled' ? 'required' as const : screenshots === 'auto' ? 'recommended' as const : page.visuals.mode } }) }) }}><option value="auto">Automatic</option><option value="enabled">Require screenshots</option><option value="disabled">No screenshots</option></Select>
-        </div>
-        {screenshotIntent !== 'disabled' && <div class={`plan-capture-readiness ${captureReadiness?.reachable ? 'ready' : 'missing'}`}>
-          <Icon name={captureReadiness?.reachable ? 'check' : 'info'} size={15} />
-          <span>
-            <strong>{captureCheck === 'checking' ? 'Checking the application…' : !captureReadiness ? 'Application check did not complete' : captureReadiness.status === 'authentication-required' ? 'Sign-in may be required during capture' : captureReadiness.reachable ? 'Application reachable' : 'Application setup needed'}</strong>
-            <small>{captureReadiness?.message ?? (captureCheck === 'checking' ? 'Confirming the configured application answers before capture.' : 'Doxloop could not reach the readiness check. Start the application, then check again.')}</small>
-          </span>
-          {captureReadiness?.configured === false
-            ? <Button size="sm" onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>Configure application</Button>
-            : <Button size="sm" icon="refresh" busy={captureCheck === 'checking'} onClick={() => setCaptureCheckNonce((value) => value + 1)}>Check again</Button>}
-        </div>}
-        {visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span class="plan-screenshot-page-icon"><Icon name="camera" size={14} /></span><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? <code>{page.visuals.startPath}</code> : <em>Starting route needed</em>}{page.visuals?.rationale && <> · {page.visuals.rationale}</>}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : (page.visuals?.estimatedCaptures ?? 0) === 1 ? 'candidate' : 'candidates'}</b></li>)}</ul>}
-        {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
-        {plan.advisories?.filter((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))).map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
-        {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
+      {versionChanges && <Panel class="pl-version" title={`Changed since version ${previousVersion!.version}`} actions={<span class="badge no-dot">Version {plan.version}</span>}>
+        <div class="pl-brief-badges">{versionChanges.added.length > 0 && <span class="badge no-dot good">+ {versionChanges.added.length} page{versionChanges.added.length === 1 ? '' : 's'}</span>}{versionChanges.changed.length > 0 && <span class="badge no-dot info">{versionChanges.changed.length} edited</span>}{versionChanges.removed.length > 0 && <span class="badge no-dot bad">− {versionChanges.removed.length} removed</span>}{versionChanges.briefChanged && <span class="badge no-dot">Brief updated</span>}</div>
+        <details class="pl-version-details"><summary>See version changes</summary><ul>{versionChanges.added.map((title) => <li key={`add-${title}`}>Added “{title}”</li>)}{versionChanges.changed.map((title) => <li key={`change-${title}`}>Changed “{title}”</li>)}{versionChanges.removed.map((title) => <li key={`remove-${title}`}>Removed “{title}”</li>)}</ul></details>
       </Panel>}
-      {!planningFailedEmpty && <><Panel class="plan-navigation-panel" title="Navigation" description="Sections and page order for the sidebar. Drag pages between sections or add a section.">
-        <PlanNavigationEditor plan={draft} editable={editable} onChange={(navigation) => setDraft({ ...draft, scope: 'custom', navigation })} />
-      </Panel>
-      <Panel class="plan-pages-panel" title="Documentation structure" description={`${pages.length} pages · ${counts.activeChanges} changed`} actions={editable && <Button size="sm" icon="plus" onClick={addPage}>Add page</Button>}>
-        <div class="plan-page-filters" role="tablist" aria-label="Filter documentation pages">
-          <button type="button" role="tab" aria-selected={pageFilter === 'all'} class={pageFilter === 'all' ? 'active' : ''} onClick={() => setPageFilter('all')}>All pages</button>
-          <button type="button" role="tab" aria-selected={pageFilter === 'changes'} class={pageFilter === 'changes' ? 'active' : ''} onClick={() => setPageFilter('changes')}>Changes</button>
-          <button type="button" role="tab" aria-selected={pageFilter === 'create'} class={pageFilter === 'create' ? 'active' : ''} onClick={() => setPageFilter('create')}>New</button>
-          <button type="button" role="tab" aria-selected={pageFilter === 'update'} class={pageFilter === 'update' ? 'active' : ''} onClick={() => setPageFilter('update')}>Updated</button>
-          <button type="button" role="tab" aria-selected={pageFilter === 'preserve'} class={pageFilter === 'preserve' ? 'active' : ''} onClick={() => setPageFilter('preserve')}>Unchanged</button>
-          {counts.remove > 0 && <button type="button" role="tab" aria-selected={pageFilter === 'remove'} class={pageFilter === 'remove' ? 'active' : ''} onClick={() => setPageFilter('remove')}>Deleted</button>}
-        </div>
-        <div class="plan-page-outline">
-          {groupedPages.length > 0 && <div class="plan-tree-sections">{groupedPages.map((group) => <section class="plan-tree-section" key={group.id}>
-            <header><span class="plan-tree-folder"><Icon name="folder" size={16} /></span><div><strong>{group.title}</strong><small>{group.pages.length} page{group.pages.length === 1 ? '' : 's'}</small></div></header>
-            <div class="plan-tree-pages">{group.pages.map(({ page, index }) => <button type="button" class={`plan-tree-page ${page.action} ${page.priority}`} key={page.id} title={page.path} onClick={() => setSelectedPageId(page.id)}>
-              <span class="plan-tree-file"><Icon name="file" size={15} /></span>
-              <span class="plan-page-copy"><span class="plan-page-title-line"><strong>{page.title}</strong><span class={`plan-page-action ${page.action}`}>{planActionLabel(page.action)}</span></span></span>
-              <Icon name="chevronRight" size={15} />
-            </button>)}</div>
-          </section>)}</div>}
-          {groupedPages.length === 0 && <div class="plan-page-empty"><Icon name="file" size={20} /><strong>No pages in this view</strong><p>Choose another filter or add a page to the plan.</p></div>}
-        </div>
-      </Panel>
-      <Panel class="plan-revision-panel" title="Want to change the plan?" description="Tell the agent what you want in normal language. The revised plan will return as a new version.">
-        <Textarea ref={revisionInput} disabled={busy} rows={3} maxlength={1500} value={revision} placeholder="For example: Combine the two example pages, focus the quickstart on beginners, and add a migration guide." onInput={(event) => setRevision(event.currentTarget.value)} />
-        <div class="plan-revision-actions">{changed && <small>Save your direct edits before asking the agent to revise the plan.</small>}<Button disabled={!revision.trim() || busy || changed} busy={revising} icon="wand" onClick={() => void revise()}>Update plan</Button></div>
-      </Panel>
-      {screenshotCoverage && coverageDismissed !== coverageKey && <section class="plan-coverage-warning" role="status" aria-label="Screenshot coverage">
+      {screenshotCoverage && coverageDismissed !== coverageKey && <section class="plan-coverage-warning pl-coverage-warning" role="status" aria-label="Screenshot coverage">
         <span class="plan-coverage-warning-icon"><Icon name="camera" size={18} /></span>
         <div>
-          <strong>{screenshotCoverage.withScreenshots === 0 ? `None of the ${screenshotCoverage.guides} guides will have screenshots.` : `Only ${screenshotCoverage.withScreenshots} of ${screenshotCoverage.guides} guides will have screenshots.`}</strong>
+          <strong>{screenshotCoverage.withScreenshots === 0 ? `None of the ${screenshotCoverage.guides} how-to guides has a planned screenshot.` : `Only ${screenshotCoverage.withScreenshots} of ${screenshotCoverage.guides} how-to guides have a planned screenshot.`}{screenshotCoverage.explained > 0 ? (screenshotCoverage.explained === screenshotCoverage.guides - screenshotCoverage.withScreenshots ? ' The planner gave a reason for every text-only guide; open a page to read it.' : ` The planner gave a reason for ${screenshotCoverage.explained} text-only guide${screenshotCoverage.explained === 1 ? '' : 's'}; open a page to read it.`) : ''}</strong>
           <p>{screenshotCoverage.reason === 'sign-in'
-            ? 'Doxloop could not get past the sign-in page of your app. Sign in under Settings → Visual evidence, then ask the agent to update the plan.'
+            ? 'Doxloop could not get past the sign-in page of your app. Sign in under Settings → Screenshots, then ask the agent to update the plan.'
             : screenshotCoverage.reason === 'unreachable'
-              ? 'Doxloop could not reach your app while planning. Start it and check Settings → Visual evidence, then ask the agent to update the plan.'
-              : 'Most guides will be text-only. Check Settings → Visual evidence, or open a guide and choose “Capture when ready”.'}</p>
+              ? 'Doxloop could not reach your app while planning. Start it and check Settings → Screenshots, then ask the agent to update the plan.'
+              : 'Your app is reachable, so the plan can include more. Ask the agent to add screenshots to the guides that walk through the app.'}</p>
         </div>
         <div class="plan-coverage-warning-actions">
-          <Button tone="primary" icon={screenshotCoverage.reason === 'sign-in' ? 'key' : 'settings'} onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>{screenshotCoverage.reason === 'sign-in' ? 'Sign in to your app' : 'Open Visual evidence'}</Button>
+          {screenshotCoverage.reason === 'unknown'
+            ? <Button icon="sparkle" onClick={() => { setRevision('Add screenshots to every guide that walks through the app, with one screenshot for each step that changes the screen.'); revisionInput.current?.focus() }}>Ask for more screenshots</Button>
+            : <Button icon={screenshotCoverage.reason === 'sign-in' ? 'key' : 'settings'} onClick={() => setLocation('settings', { section: 'capture' }, 'push')}>{screenshotCoverage.reason === 'sign-in' ? 'Sign in to your app' : 'Open screenshot settings'}</Button>}
           <Button tone="ghost" onClick={() => setCoverageDismissed(coverageKey)}>Continue without</Button>
         </div>
       </section>}
-      <RunEstimate pages={counts.pagesToWrite || pages.length} agent={draft.execution.agent} model={draft.execution.model} />
-      <footer class="plan-approval-bar">
-        <span><Icon name={approvalBlocker ? 'help' : 'lock'} size={16} /><small>{approvalBlocker ?? (unresolvedCapabilities > 0 ? `${unresolvedCapabilities} coverage ${unresolvedCapabilities === 1 ? 'item needs' : 'items need'} a decision; you can save and continue if intentionally deferred.` : 'Nothing will be written until you approve this exact plan.')}</small></span>
-        <div>{approvalControls.showSave && <Button busy={saving} onClick={() => void save()}>Save changes</Button>}{primaryAction === 'retry-planning'
-          ? <Button tone="primary" icon="refresh" busy={retryingPlanning} disabled={busy} onClick={() => void retryPlanning()}>Retry planning</Button>
-          : <Button tone="primary" icon={changed ? 'lock' : 'play'} busy={approving || generating} disabled={approvalControls.approveDisabled} onClick={() => void approveAndGenerate()}>{changed ? 'Save changes before approval' : primaryAction === 'generate' ? `Generate ${generationTarget}` : primaryAction === 'retry-generating' ? `Retry generating ${generationTarget}` : `Approve & generate ${generationTarget}`}</Button>}</div>
-      </footer></>}
+      <div class="plan-revision-panel pl-revise">
+        <span class="pl-revise-icon"><Icon name="sparkle" size={16} /></span>
+        <Textarea ref={revisionInput} aria-label="Want to change the plan?" disabled={busy} rows={1} maxlength={1500} value={revision} placeholder="Want to change the plan? Tell the agent what to revise…" onInput={(event) => setRevision(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void revise() } }} />
+        <Button disabled={!revision.trim() || busy || changed} busy={revising} onClick={() => void revise()}>Send</Button>
+      </div>
+      {changed && <small class="pl-revise-hint">Save your direct edits before asking the agent to revise the plan.</small>}
       {selectedPage && <div class="plan-page-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelectedPageId(undefined) }}>
-        <aside class="plan-page-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-page-drawer-title">
-          <header><div><small>Page {selectedIndex + 1} of {pages.length}</small><h2 id="plan-page-drawer-title">Page details</h2></div><button type="button" aria-label="Close page details" onClick={() => setSelectedPageId(undefined)}><Icon name="close" size={18} /></button></header>
+        <aside class="plan-page-drawer pl-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-page-drawer-title">
+          <header><div><span class="kicker">Page {selectedIndex + 1} of {pages.length}</span><h2 id="plan-page-drawer-title">Page details</h2></div><button type="button" aria-label="Close page details" onClick={() => setSelectedPageId(undefined)}><Icon name="close" size={18} /></button></header>
           <div class="plan-page-drawer-body">
-            <div class="plan-page-drawer-name"><Input disabled={!editable} value={selectedPage.title} aria-label="Page title" onInput={(event) => setPage(selectedIndex, { ...selectedPage, title: event.currentTarget.value })} /><span class={`plan-page-action ${selectedPage.action}`}>{planActionLabel(selectedPage.action)}</span></div>
+            <div class="plan-page-drawer-name"><Input disabled={!editable} value={selectedPage.title} aria-label="Page title" onInput={(event) => setPage(selectedIndex, { ...selectedPage, title: event.currentTarget.value })} /><span class={`badge no-dot ${actionTone(selectedPage.action)}`}>{planActionLabel(selectedPage.action)}</span></div>
             <Field label="Purpose"><Textarea disabled={!editable} rows={4} value={selectedPage.purpose} onInput={(event) => setPage(selectedIndex, { ...selectedPage, purpose: event.currentTarget.value })} /></Field>
-            <div class="plan-page-drawer-grid">
-              <Field label="What should happen"><Select disabled={!editable} value={selectedPage.action} onChange={(event) => setPage(selectedIndex, { ...selectedPage, action: event.currentTarget.value as DocumentationPlanPage['action'] })}><option value="create">Create this page</option><option value="update">Update this page</option><option value="preserve">Leave unchanged</option><option value="remove">Delete existing page</option></Select></Field>
-              <Field label="Priority in this generation"><Select disabled={!editable} value={selectedPage.priority} onChange={(event) => setPage(selectedIndex, { ...selectedPage, priority: event.currentTarget.value as DocumentationPlanPage['priority'] })}><option value="must-have">Essential</option><option value="next">Recommended</option></Select></Field>
-            </div>
-            <Field label="Documentation section"><Input disabled={!editable} value={selectedPage.type} onInput={(event) => setPage(selectedIndex, { ...selectedPage, type: event.currentTarget.value })} /></Field>
-            <section class="plan-page-visuals">
+            <Field label="What should happen"><Select disabled={!editable} value={selectedPage.action} onChange={(event) => setPage(selectedIndex, { ...selectedPage, action: event.currentTarget.value as DocumentationPlanPage['action'] })}><option value="create">Create this page</option><option value="update">Update this page</option><option value="preserve">Leave unchanged</option><option value="remove">Delete existing page</option></Select></Field>
+            <Field label="Priority in this generation"><Select disabled={!editable} value={selectedPage.priority} onChange={(event) => setPage(selectedIndex, { ...selectedPage, priority: event.currentTarget.value as DocumentationPlanPage['priority'] })}><option value="must-have">Essential</option><option value="next">Recommended</option></Select></Field>
+            <Field label="Documentation section" hint="The page type the generator files this page under, such as how-to or reference."><Input disabled={!editable} value={selectedPage.type} onInput={(event) => setPage(selectedIndex, { ...selectedPage, type: event.currentTarget.value })} /></Field>
+            <Field label="Diagram" hint="Concept pages default to a required Mermaid diagram; the writer must include one and the editor previews it."><Select disabled={!editable} value={selectedPage.diagram ?? (selectedPage.type === 'concept' ? 'required' : 'none')} onChange={(event) => setPage(selectedIndex, { ...selectedPage, diagram: event.currentTarget.value === 'required' ? 'required' : 'none' })}><option value="required">Required</option><option value="none">Not needed</option></Select></Field>
+            <section class="plan-page-visuals pl-drawer-section">
               <h3>Application screenshots</h3>
-              <div class="plan-page-drawer-grid">
-                <Field label="Visual treatment"><Select disabled={!editable || screenshotIntent === 'disabled'} value={selectedPage.visuals?.mode ?? 'none'} onChange={(event) => {
-                  const mode = event.currentTarget.value as 'none' | 'recommended' | 'required'
-                  const enabling = mode !== 'none' && (selectedPage.visuals?.mode ?? 'none') === 'none'
-                  const estimatedCaptures = mode === 'none' ? 0 : Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), selectedPage.visuals?.estimatedCaptures ?? 0)
-                  setPage(selectedIndex, { ...selectedPage, visuals: {
-                    mode,
-                    rationale: enabling ? '' : selectedPage.visuals?.rationale ?? '',
-                    estimatedCaptures,
-                    ...(mode !== 'none' && selectedPage.visuals?.startPath ? { startPath: selectedPage.visuals.startPath } : {}),
-                    ...(mode !== 'none' && selectedPage.visuals?.workflow ? { workflow: selectedPage.visuals.workflow } : {}),
-                    ...(mode !== 'none' && selectedPage.visuals?.captureSequence ? { captureSequence: selectedPage.visuals.captureSequence, captureIds: selectedPage.visuals.captureIds } : {}),
-                  } })
-                }}><option value="none">Text only</option><option value="recommended">Capture when ready</option><option value="required">Require screenshots</option></Select></Field>
-                <Field label={selectedPage.visuals?.mode === 'required' || screenshotIntent === 'enabled' ? 'Required captures' : 'Planned captures'}><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} type="number" min={minimumUiPlannedCaptures(selectedPage.type, selectedPage.visuals?.mode ?? 'recommended')} max="20" value={selectedPage.visuals?.estimatedCaptures ?? 0} onInput={(event) => { const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), Math.min(20, Number(event.currentTarget.value) || 1)) } }) }} /></Field>
-              </div>
+              <Field label="Visual treatment"><Select disabled={!editable || screenshotIntent === 'disabled'} value={selectedPage.visuals?.mode ?? 'none'} onChange={(event) => {
+                const mode = event.currentTarget.value as 'none' | 'recommended' | 'required'
+                const enabling = mode !== 'none' && (selectedPage.visuals?.mode ?? 'none') === 'none'
+                const estimatedCaptures = mode === 'none' ? 0 : Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), selectedPage.visuals?.estimatedCaptures ?? 0)
+                setPage(selectedIndex, { ...selectedPage, visuals: {
+                  mode,
+                  rationale: enabling ? '' : selectedPage.visuals?.rationale ?? '',
+                  estimatedCaptures,
+                  ...(mode !== 'none' && selectedPage.visuals?.startPath ? { startPath: selectedPage.visuals.startPath } : {}),
+                  ...(mode !== 'none' && selectedPage.visuals?.workflow ? { workflow: selectedPage.visuals.workflow } : {}),
+                  ...(mode !== 'none' && selectedPage.visuals?.captureSequence ? { captureSequence: selectedPage.visuals.captureSequence, captureIds: selectedPage.visuals.captureIds } : {}),
+                } })
+              }}><option value="none">Text only</option><option value="recommended">Capture when ready</option><option value="required">Require screenshots</option></Select></Field>
+              <Field label={selectedPage.visuals?.mode === 'required' || screenshotIntent === 'enabled' ? 'Required captures' : 'Planned captures'}><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} type="number" min={minimumUiPlannedCaptures(selectedPage.type, selectedPage.visuals?.mode ?? 'recommended')} max="20" value={selectedPage.visuals?.estimatedCaptures ?? 0} onInput={(event) => { const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), Math.min(20, Number(event.currentTarget.value) || 1)) } }) }} /></Field>
               <Field label="Starting route" hint="Relative to the configured application URL"><Input disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} value={selectedPage.visuals?.startPath ?? ''} placeholder="/settings/team" onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), startPath: event.currentTarget.value, captureIds: [] } })} /></Field>
               <Field label="Capture workflow" hint="Include the safe test state and ordered actions"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={4} value={selectedPage.visuals?.workflow ?? ''} placeholder="Use the demo workspace. Open Team settings, invite a synthetic member, and verify the invitation state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), workflow: event.currentTarget.value, captureIds: [] } })} /></Field>
               <Field label="Capture sequence" hint="One screenshot per line: action — visible state — why it helps"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={Math.max(4, Math.min(8, selectedPage.visuals?.estimatedCaptures ?? 4))} value={(selectedPage.visuals?.captureSequence ?? []).join('\n')} placeholder={'Open Team settings — Team settings heading and navigation are visible — orients the reader\nSelect Invite member — the empty invitation form is open — confirms where data is entered\nSubmit the demo invitation — success confirmation is visible — proves completion'} onInput={(event) => { const captureSequence = event.currentTarget.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean); const mode = selectedPage.visuals?.mode ?? 'recommended'; setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode, rationale: selectedPage.visuals?.rationale ?? '', estimatedCaptures: Math.max(minimumUiPlannedCaptures(selectedPage.type, mode), captureSequence.length), captureSequence, captureIds: captureSequence.map((item) => { const index = selectedPage.visuals?.captureSequence?.indexOf(item) ?? -1; return index >= 0 ? selectedPage.visuals?.captureIds?.[index] ?? '' : '' }) } }) }} /></Field>
               <Field label="Why images help"><Textarea disabled={!editable || screenshotIntent === 'disabled' || (selectedPage.visuals?.mode ?? 'none') === 'none'} rows={3} value={selectedPage.visuals?.rationale ?? ''} placeholder="Show the complete invitation journey so readers can verify each meaningful state." onInput={(event) => setPage(selectedIndex, { ...selectedPage, visuals: { ...selectedPage.visuals, mode: selectedPage.visuals?.mode ?? 'recommended', estimatedCaptures: Math.max(1, selectedPage.visuals?.estimatedCaptures ?? 1), rationale: event.currentTarget.value } })} /></Field>
             </section>
-            <section class="plan-page-reason"><h3>Why the agent recommends this page</h3><p>{selectedPage.rationale || 'No rationale was provided for this page.'}</p>{selectedPage.evidenceDetails.length > 0 ? <details><summary>View {selectedPage.evidenceDetails.length} supporting source{selectedPage.evidenceDetails.length === 1 ? '' : 's'}</summary><div class="plan-evidence-list">{selectedPage.evidenceDetails.map((item, index) => <article key={`${item.source}-${item.path}-${index}`}><span>{item.source}</span><div><code>{item.path}{item.line ? `:${item.line}` : ''}</code>{(item.label || item.kind) && <small>{item.label ?? item.kind}</small>}</div></article>)}</div></details> : selectedPage.evidence.length > 0 && <details><summary>View {selectedPage.evidence.length} supporting source{selectedPage.evidence.length === 1 ? '' : 's'}</summary><ul>{selectedPage.evidence.map((item) => <li key={item}><code>{item}</code></li>)}</ul></details>}</section>
-            <details class="plan-page-advanced"><summary>Advanced settings</summary><div><Field label="File path"><Input disabled={!editable} class="mono" value={selectedPage.path} onInput={(event) => setPage(selectedIndex, { ...selectedPage, path: event.currentTarget.value })} /></Field><small>The documentation section and file path are primarily used by the generator.</small></div></details>
-          </div>
-          <div class="plan-page-diagram">
-            <Field label="Diagram" hint="Concept pages default to a required Mermaid diagram; the writer must include one and the editor previews it."><Select disabled={!editable} value={selectedPage.diagram ?? (selectedPage.type === 'concept' ? 'required' : 'none')} onChange={(event) => setPage(selectedIndex, { ...selectedPage, diagram: event.currentTarget.value === 'required' ? 'required' : 'none' })}><option value="required">Required</option><option value="none">Not needed</option></Select></Field>
+            <section class="plan-page-reason pl-drawer-reason"><h3>Why the agent recommends this page</h3><p>{selectedPage.rationale || 'No rationale was provided for this page.'}</p>{selectedPage.evidenceDetails.length > 0 ? <details><summary>View {selectedPage.evidenceDetails.length} supporting source{selectedPage.evidenceDetails.length === 1 ? '' : 's'}</summary><div class="plan-evidence-list">{selectedPage.evidenceDetails.map((item, index) => <article key={`${item.source}-${item.path}-${index}`}><span>{item.source}</span><div><code>{item.path}{item.line ? `:${item.line}` : ''}</code>{(item.label || item.kind) && <small>{item.label ?? item.kind}</small>}</div></article>)}</div></details> : selectedPage.evidence.length > 0 && <details><summary>View {selectedPage.evidence.length} supporting source{selectedPage.evidence.length === 1 ? '' : 's'}</summary><ul>{selectedPage.evidence.map((item) => <li key={item}><code>{item}</code></li>)}</ul></details>}</section>
+            <details class="plan-page-advanced pl-drawer-advanced"><summary>Advanced settings</summary><div><Field label="File path" hint="Used by the generator to place the file."><Input disabled={!editable} class="mono" value={selectedPage.path} onInput={(event) => setPage(selectedIndex, { ...selectedPage, path: event.currentTarget.value })} /></Field></div></details>
           </div>
           <footer><div class="plan-page-move"><Button size="sm" disabled={!editable || selectedIndex === 0} onClick={() => movePage(selectedIndex, -1)}>Move up</Button><Button size="sm" disabled={!editable || selectedIndex === pages.length - 1} onClick={() => movePage(selectedIndex, 1)}>Move down</Button></div>{editable && <Button size="sm" tone="danger" icon="trash" onClick={() => removePage(selectedIndex)}>Remove page</Button>}<Button size="sm" tone="primary" onClick={() => setSelectedPageId(undefined)}>Done</Button></footer>
         </aside>
@@ -1677,6 +1951,13 @@ export interface SyncNotice {
   proposalId?: string
 }
 
+/** Jobs that hold the project's authoring lock, so a source check started now would only be skipped. */
+export function authoringJobRunning(jobs: UiJob[]): boolean {
+  return jobs.some((job) => job.status === 'running' && (
+    job.type.startsWith('page-edit:') || job.type === 'plan:generate' || job.type === 'plan:continue' ||
+    job.type.startsWith('proposal:revise:') || job.type.startsWith('proposal:resume:')))
+}
+
 /** Turn a settled source check into the one-line answer the reader was waiting for. */
 export function syncOutcomeNotice(job: UiJob): SyncNotice {
   const outcome = job.outcome
@@ -1689,10 +1970,16 @@ export function syncOutcomeNotice(job: UiJob): SyncNotice {
   const pages = outcome.pages ?? 0
   const stale = `${pages} page${pages === 1 ? '' : 's'} stale`
   switch (outcome.status) {
-    case 'current': return { tone: 'good', title: 'No change', detail: outcome.message }
+    case 'current': return { tone: 'good', title: 'Sources checked · docs are current', detail: outcome.message }
     case 'stale': return { tone: 'warn', title: stale, detail: outcome.message }
     case 'proposal': return { tone: 'good', title: outcome.proposalId ? 'Proposal ready for review' : stale, detail: outcome.message, ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}) }
-    case 'skipped': return { tone: 'warn', title: `${stale} · update skipped`, detail: outcome.message }
+    // No page count means the check never ran (another task held the project);
+    // a count of zero means nothing was held back.
+    case 'skipped':
+      if (outcome.pages === undefined) return { tone: 'info', title: 'Source check postponed', detail: 'Another task is running for this project. Choose Check now again when it finishes.' }
+      return pages === 0
+        ? { tone: 'good', title: 'Sources checked · docs are current', detail: 'No page depends on a changed source file.' }
+        : { tone: 'warn', title: `${stale} · update skipped`, detail: outcome.message }
     case 'failed': return { tone: 'bad', title: 'Proposal failed', detail: outcome.message, ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}) }
     default: return { tone: 'info', title: 'Freshness unknown', detail: outcome.message }
   }
@@ -1734,9 +2021,24 @@ function workflowActivityIcon(type: string): string {
 export function jobFailureReason(job: Pick<UiJob, 'lines' | 'status'>): string | undefined {
   if (job.status !== 'failed') return undefined
   const lines = job.lines.map((line) => stripAnsi(stripJobLineStamp(line))).reverse()
+  // A rejected token is the most common deploy failure; name the fix, not the HTTP status.
+  if (lines.some(isSignInFailure)) return 'Doxbrix did not accept the saved sign-in. Sign in again from Publish.'
   const reported = lines.find((line) => line.startsWith('doxloop: '))
   const line = reported ?? lines.find((candidate) => candidate.trim() && !candidate.startsWith('DOXLOOP_EVENT '))
   return line?.replace(/^doxloop: /, '').trim() || undefined
+}
+
+/** The status half of a Recent activity sentence ("… completed successfully"). */
+export function jobActivityText(job: Pick<UiJob, 'lines' | 'status' | 'type' | 'outcome'>): string {
+  if (job.status === 'running') return ' is running'
+  if (job.status === 'succeeded') return ' completed successfully'
+  // A check that could not take the project lock never ran; it did not fail.
+  if (job.type === 'sync' && job.outcome?.status === 'skipped' && job.outcome.pages === undefined) return ' was postponed because another task was running'
+  if (job.status === 'failed') {
+    const reason = jobFailureReason(job)
+    return ` needs attention${reason ? `: ${reason}` : ''}`
+  }
+  return ` was ${job.status}`
 }
 
 /**
@@ -1771,7 +2073,7 @@ interface RunCapture {
  * Captured screenshots for the current run. Polled while the run is live so
  * images appear as they land, then left alone once the run finishes.
  */
-function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
+function CaptureGallery({ live, run, plan }: { live: boolean; run?: string; plan?: string | undefined }) {
   const [captures, setCaptures] = useState<RunCapture[]>([])
   const [loaded, setLoaded] = useState(false)
   const [replaceError, setReplaceError] = useState('')
@@ -1790,7 +2092,7 @@ function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
     let cancelled = false
     const load = async () => {
       try {
-        const result = await api<{ captures: RunCapture[] }>(run ? `/api/captures?run=${encodeURIComponent(run)}` : '/api/captures')
+        const result = await api<{ captures: RunCapture[] }>(plan ? `/api/captures?plan=${encodeURIComponent(plan)}` : run ? `/api/captures?run=${encodeURIComponent(run)}` : '/api/captures')
         if (!cancelled) setCaptures(result.captures)
       } catch {
         // A run without a workspace yet simply has nothing to show.
@@ -1802,7 +2104,7 @@ function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
     if (!live) return () => { cancelled = true }
     const timer = setInterval(() => void load(), 4000)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [live, run])
+  }, [live, run, plan])
 
   const duplicates = captures.filter((capture) => capture.duplicateOf).length
   if (loaded && captures.length === 0) {
@@ -1818,38 +2120,85 @@ function CaptureGallery({ live, run }: { live: boolean; run?: string }) {
         <figcaption>
           <strong>{capture.guide ? `${capture.guide} · ${capture.step ?? ''}` : capture.file.split('/').slice(-1)[0]}</strong>
           <small>{capture.duplicateOf ? `Identical to ${capture.duplicateOf.split('/').slice(-1)[0]}` : capture.alt ?? capture.file}</small>
-          {!live && <button type="button" class="capture-replace" onClick={() => { setReplacing(capture); replaceInput.current?.click() }}><Icon name="refresh" size={12} />Replace screenshot</button>}
+          {!live && !plan && <button type="button" class="capture-replace" onClick={() => { setReplacing(capture); replaceInput.current?.click() }}><Icon name="refresh" size={12} />Replace screenshot</button>}
         </figcaption>
       </figure>)}
     </div>
   </div>
 }
 
-function AuthoringLiveLog({ job, act, stopLabel = 'Stop update' }: { job: UiJob; act: Action; stopLabel?: string }) {
+/** Overall progress of a job from its stages, or undefined when there is nothing to measure yet. */
+/**
+ * Stages are announced as a run reaches them, so the total is unknown up
+ * front and a stage-count percentage jumps backwards. Only a stage that
+ * reports its own counts ("2 of 5 sessions") gives a real percentage;
+ * otherwise the bar is indeterminate (undefined here, `null` = no bar).
+ */
+function jobProgressPercent(job: Pick<UiJob, 'status' | 'stages'>): number | undefined | null {
+  if (job.status === 'succeeded') return 100
+  if (job.status !== 'running') return null
+  const counted = [...job.stages].reverse().find((stage) => stage.status === 'running' && stage.progress?.total)
+  if (counted?.progress?.total) return Math.min(100, Math.round((counted.progress.done / counted.progress.total) * 100))
+  return undefined
+}
+
+function elapsedText(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000))
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  return seconds % 60 ? `${minutes} min ${seconds % 60} s` : `${minutes} min`
+}
+
+/** The trailing detail on a stage row: a counter when the stage reports one, otherwise its timing. */
+function stageDetailText(stage: UiJob['stages'][number]): string {
+  if (stage.progress && (stage.progress.total !== undefined || stage.progress.done > 0)) return stage.progress.total !== undefined ? `${stage.progress.done} of ${stage.progress.total}` : String(stage.progress.done)
+  const started = stage.startedAt ? Date.parse(stage.startedAt) : Number.NaN
+  if (Number.isNaN(started)) return ''
+  if (stage.status === 'running') return `running for ${elapsedText(Date.now() - started)}`
+  const finished = stage.finishedAt ? Date.parse(stage.finishedAt) : Number.NaN
+  return Number.isNaN(finished) ? '' : elapsedText(finished - started)
+}
+
+function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = false }: { job: UiJob; act: Action; stopLabel?: string; hideStop?: boolean }) {
   const log = useRef<HTMLPreElement>(null)
   const agent = job.agent ? agentLabel(job.agent) : 'Agent'
   const [tab, setTab] = useState<'log' | 'captures'>('log')
+  const percent = jobProgressPercent(job)
   useEffect(() => {
     if (log.current) log.current.scrollTop = log.current.scrollHeight
   }, [job.lines.length, tab])
-  return <div class="authoring-live-log">
-    {job.stages.length > 0 && <ol class="workflow-stages" aria-label="Documentation workflow stages">
-      {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span>{stage.status === 'completed' ? <Icon name="check" size={11} /> : stage.status === 'failed' ? <Icon name="alert" size={11} /> : <i />}</span><strong>{stage.label}</strong>{stage.progress && (stage.progress.total !== undefined || stage.progress.done > 0) && <small>{stage.progress.total !== undefined ? `${stage.progress.done} of ${stage.progress.total}` : String(stage.progress.done)}</small>}</li>)}
+  return <div class="authoring-live-log pl-livelog">
+    {percent !== null && <div class={`pl-live-progress ${job.status}`}><div class={`progress ${job.status === 'succeeded' ? 'good' : 'info'} ${percent === undefined ? 'indeterminate' : ''}`} role="progressbar" aria-label="Run progress" {...(percent === undefined ? {} : { 'aria-valuenow': percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}><i style={percent === undefined ? undefined : `width:${percent}%`} /></div>{percent !== undefined && <span>{percent}%</span>}</div>}
+    {job.stages.length > 0 && <ol class="workflow-stages pl-stages" aria-label="Documentation workflow stages">
+      {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span class="pl-stage-mark">{stage.status === 'completed' ? <Icon name="check" size={12} /> : stage.status === 'failed' ? <Icon name="alert" size={12} /> : stage.status === 'running' ? <i /> : null}</span><strong>{stage.label}</strong><small>{stageDetailText(stage)}</small></li>)}
     </ol>}
-    <div class="live-job-meta" aria-live="polite">
-      <span><Icon name="bot" size={14} />{agent}</span>
-      <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
-      <span><Icon name="file" size={14} />{job.lines.length} recent line{job.lines.length === 1 ? '' : 's'}</span>
-      <span class="authoring-live-actions">
-        <a href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="external" size={12} /></a>
-        {job.status === 'running' && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>{stopLabel}</Button>}
-        {job.status !== 'running' && job.retryable && <Button size="sm" icon="refresh" onClick={() => void act(() => post(`/api/jobs/${job.id}/retry`), 'Workflow restarted')}>Retry stage</Button>}
-      </span>
+    {(() => {
+      const activity = summarizeRunActivity(job.lines)
+      if (!activity.sessions.length && !activity.screenshots && !activity.sourceReads) return null
+      return <div class="pl-activity-summary" aria-live="polite">
+        {activity.latestNote && <p><strong>{activity.latestNote.session}</strong><span>{activity.latestNote.text.length > 240 ? `${activity.latestNote.text.slice(0, 237)}…` : activity.latestNote.text}</span></p>}
+        <ul>
+          {activity.sessions.length > 0 && <li><Icon name="bot" size={14} />{activity.sessions.join(' · ')}</li>}
+          <li><Icon name="camera" size={14} />{activity.screenshots} screenshot{activity.screenshots === 1 ? '' : 's'} captured</li>
+          <li><Icon name="file" size={14} />{activity.sourceReads} source read{activity.sourceReads === 1 ? '' : 's'}</li>
+        </ul>
+      </div>
+    })()}
+    <div class="pl-log">
+      <div class="live-job-meta pl-log-meta" aria-live="polite">
+        <span><Icon name="bot" size={14} />{agent}</span>
+        <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
+        <span class="authoring-live-actions">
+          <Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} />
+          {job.status === 'running' && !hideStop && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>{stopLabel}</Button>}
+          {job.status !== 'running' && job.retryable && <Button size="sm" icon="refresh" onClick={() => void act(() => post(`/api/jobs/${job.id}/retry`), 'Workflow restarted')}>Retry stage</Button>}
+        </span>
+      </div>
+      {tab === 'log'
+        ? <pre ref={log} class="terminal live-terminal pl-log-lines" aria-live="polite">{job.lines.length > 0 ? displayLogLines(job.lines).join('\n') : `Starting ${agent}…`}</pre>
+        : <div class="pl-log-captures"><CaptureGallery live={job.status === 'running'} plan={job.type === 'plan:propose' || job.type === 'plan:revise' ? job.planId : undefined} /></div>}
+      <div class="pl-log-foot"><a class="btn link" href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="arrowRight" size={14} /></a></div>
     </div>
-    <div class="live-log-tabs"><Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} /></div>
-    {tab === 'log'
-      ? <pre ref={log} class="terminal live-terminal" aria-live="polite">{job.lines.length > 0 ? displayLogLines(job.lines).join('\n') : `Starting ${agent}…`}</pre>
-      : <CaptureGallery live={job.status === 'running'} />}
   </div>
 }
 
@@ -1898,6 +2247,15 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   useEffect(() => { let current = true; if (!query) { setMatches([]); return } api<typeof matches>(`/api/pages/search?q=${encodeURIComponent(query)}`).then((value) => { if (current) setMatches(value) }).catch((cause) => { if (current) onError(cause.message) }); return () => { current = false } }, [query, state.runs])
   const [selectedPaths, setSelectedPaths] = useState<string[]>(() => initial.get('path') ? [initial.get('path')!] : [])
   const [runId, setRunId] = useState(initial.get('run') ?? '')
+  // Navigation and validation name pages by slug ("glossary"); the page list
+  // names files ("glossary.mdx"). Resolve a slug to its file once pages load.
+  useEffect(() => {
+    if (pages.length === 0) return
+    const known = new Set(pages.map((page) => page.path))
+    const resolved = selectedPaths.map((path) => known.has(path) ? path
+      : [`${path}.mdx`, `${path}.md`, `${path}/index.mdx`, `${path}/index.md`].find((candidate) => known.has(candidate)) ?? path)
+    if (resolved.some((path, index) => path !== selectedPaths[index])) setSelectedPaths(resolved)
+  }, [pages, selectedPaths])
   const [instruction, setInstruction] = useState('')
   const [allowRelated, setAllowRelated] = useState(false)
   const [screenshots, setScreenshots] = useState(false)
@@ -1910,7 +2268,21 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const [effort, setEffort] = useState(defaultAgent === 'claude' ? initialReasoning : '')
   const [agentOpen, setAgentOpen] = useState(false)
   const [agentPanelOpen, setAgentPanelOpen] = useState(Boolean(initial.get('run')))
+  // Opening the agent panel moves the reader to it and puts the cursor in the
+  // instruction box; it opens at the foot of a long page otherwise.
+  useEffect(() => {
+    if (!agentPanelOpen) return
+    requestAnimationFrame(() => {
+      const panel = document.querySelector<HTMLElement>('.page-agent-panel')
+      panel?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      panel?.querySelector<HTMLInputElement | HTMLTextAreaElement>('input:not([type=checkbox]), textarea')?.focus({ preventScroll: true })
+    })
+  }, [agentPanelOpen])
   const [editingContent, setEditingContent] = useState(Boolean(initial.get('edit') || initial.get('line')))
+  // The editor's Content / Source mode is lifted here so the tab row above the
+  // page can show and switch it; the editor keeps its own default rules.
+  const nativeEditor = state.project?.generator === 'doxbrix'
+  const [editorMode, setEditorMode] = useState<'visual' | 'source'>(nativeEditor && !focusLine ? 'visual' : 'source')
   const [contentDirty, setContentDirty] = useState(false)
   const [contentBusy, setContentBusy] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
@@ -1971,6 +2343,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const collectionPages = collectionFilter ? pages.filter((page) => `${page.version ?? 'current'} / ${page.locale ?? 'default'}` === collectionFilter) : pages
   const filteredPages = normalizedQuery ? collectionPages.filter((page) => (`${page.title} ${page.path}`.toLocaleLowerCase().includes(normalizedQuery) || matches.some((match) => match.path === page.path))) : collectionPages
   const groups = groupPageSummaries(filteredPages)
+  const needsReview = pages.filter((page) => page.evidence === 'needs-review').length
   const proposalPaths = proposal?.editRequest?.paths ?? []
   const viewingProposalPage = Boolean(activePage && proposalPaths.includes(activePage.path))
   const otherPageWhileRunning = Boolean(activeJob && activePage && !activePaths.includes(activePage.path))
@@ -1982,17 +2355,26 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
   const composerLabel = selected.length > 1 ? `What should change on these ${selected.length} pages?` : 'What should change on this page?'
 
   useEffect(() => { if (activeJob || reviewable || failed) setAgentPanelOpen(true) }, [activeJob?.id, reviewable, failed])
-  useEffect(() => { setContentDirty(false); setContentBusy(false); setPageOptionsOpen(false) }, [activePage?.path])
+  useEffect(() => { setContentDirty(false); setContentBusy(false); setPageOptionsOpen(false); setEditorMode(nativeEditor && !focusLine ? 'visual' : 'source') }, [activePage?.path])
   useEffect(() => {
     const guard = (event: Event) => { if (contentLocked || navigationDirty || navigationBusy) { event.preventDefault(); if (!canLeaveContent()) return; canLeaveNavigation() } }
     addEventListener('doxloop:before-navigation', guard)
     return () => removeEventListener('doxloop:before-navigation', guard)
   }, [contentLocked, navigationDirty, navigationBusy])
 
-  const refreshPages = async () => {
-    try { setPages(await api<PageSummary[]>('/api/pages')) }
-    catch (cause) { onError(message(cause)) }
-    finally { setLoadingPages(false) }
+  const [pagesError, setPagesError] = useState('')
+  // The page list is small and fast; a request that stalls behind a busy
+  // server is retried once, then shown as an error with a Retry button
+  // instead of a spinner that never ends.
+  const refreshPages = async (attempt = 0): Promise<void> => {
+    try {
+      setPages(await api<PageSummary[]>('/api/pages', { signal: AbortSignal.timeout(20_000) }))
+      setPagesError('')
+    } catch (cause) {
+      if (attempt === 0) { await new Promise((resolve) => setTimeout(resolve, 1500)); return await refreshPages(1) }
+      setPagesError(message(cause))
+    }
+    setLoadingPages(false)
   }
   useEffect(() => { void refreshPages() }, [])
   useEffect(() => {
@@ -2231,7 +2613,8 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
       </div>}
   </div>
 
-  return <div class={`pages-page preview-first-pages ${agentPanelOpen ? 'agent-panel-open' : ''} ${pageListOpen || !activePage ? 'page-list-open' : ''} navigation-open`}>
+  const reviewingHere = Boolean(!activeJob && reviewable && proposal && viewingProposalPage)
+  return <div class={`pages-page preview-first-pages ${agentPanelOpen ? 'agent-panel-open' : ''} ${pageListOpen || !activePage ? 'page-list-open' : ''} navigation-open ${reviewingHere ? 'reviewing' : ''} ${activeJob ? 'running' : ''}`}>
     {rationale && <ProposalRationaleDrawer change={rationale} onClose={() => setRationale(null)} />}
     {assetPicker && <AssetPicker act={act} title="Insert an image" onClose={() => setAssetPicker(false)} onPick={(asset) => { setAssetPicker(false); insertIntent(`Insert the image ${asset.publicPath} with descriptive alt text where it best supports the text.`) }} />}
     {toast && <div class="page-updated-toast" role="status">
@@ -2240,7 +2623,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
       <Button size="sm" onClick={() => void undo(toast)}>Undo</Button>
       <button type="button" class="toast-close" aria-label="Dismiss" onClick={() => setToast(null)}><Icon name="close" size={14} /></button>
     </div>}
-    <PageHeader title="Pages" description={view === 'assets' ? 'Images and files the documentation embeds. Upload, replace, and describe them.' : 'Edit pages and navigation, or ask the agent.'} actions={<div class="pages-view-actions"><Button size="sm" icon="settings" disabled={contentBusy} onClick={() => { if (canLeaveContent() && canLeaveNavigation()) setToolsOpen(!toolsOpen) }}>Workspace tools</Button><Segmented value={view} onChange={setView} items={[['pages', 'Pages'], ['assets', 'Images & files']] as const} /></div>} />
+    <PageHeader kicker="Docs" title="Docs" actions={<div class="pages-view-actions"><Segmented value={view} onChange={setView} items={[['pages', 'Pages'], ['assets', 'Images & files']] as const} /><Button icon="settings" disabled={contentBusy} aria-pressed={toolsOpen} onClick={() => { if (canLeaveContent() && canLeaveNavigation()) setToolsOpen(!toolsOpen) }}>Workspace tools</Button></div>} />
     {toolsOpen && <section class="pages-workspace-tools" aria-label="Workspace tools">
     {view === 'pages' && <PageTools root={state.root ?? state.cwd} contentDir={state.project?.contentDir ?? ''} {...(activePage ? { path: activePage.path } : {})} onChanged={async (path) => { const next = await api<PageSummary[]>('/api/pages'); setPages(next); const selected = path ?? next.find((page) => page.path === activePage?.path)?.path ?? next[0]?.path; setSelectedPaths(selected ? [selected] : []); updateUrl(selected ? [selected] : []); setPreviewNonce((value) => value + 1); await act(async () => true) }} />}
     <Collections onChanged={async () => { await refreshPages(); await act(async () => true) }} onTranslate={async (paths, locale) => { await submit({ paths, instruction: `Translate these documentation pages to ${locale}. Preserve code, API names, navigation routes, source associations, and links. Re-verify factual claims. Change only the selected translation pages.`, allowRelated: false }) }} />
@@ -2310,20 +2693,38 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                 </section>)}
         </div>
         </>}
+        {pagesError && <Note tone="bad"><span>The page list did not load: {pagesError}</span><Button size="sm" onClick={() => { setLoadingPages(true); setPagesError(''); void refreshPages(1) }}>Retry</Button></Note>}
+        <div class="page-list-foot">
+          <span>{loadingPages ? 'Loading pages…' : `${pages.length} page${pages.length === 1 ? '' : 's'}${needsReview > 0 ? ` · ${needsReview} need${needsReview === 1 ? 's' : ''} review` : ''}`}</span>
+          <Button tone="link" aria-label="Open images &amp; files" onClick={() => setView('assets')}>Images &amp; files</Button>
+        </div>
       </aside>
 
       <section class="page-detail-pane">
         {!activePage ? <div class="page-detail-empty"><Empty icon="file" title="Choose a page" detail="Select a page to preview it, edit its content, or ask the agent." /></div> : <>
           <header class="page-detail-header">
-            <div class="page-detail-copy"><Button size="sm" icon="menu" class="page-outline-toggle" onClick={() => setPageListOpen(!pageListOpen)}>Pages</Button><Icon name="file" size={17} /><h2>{activePage.title}</h2></div>
+            <div class="page-detail-copy">
+              <Button size="sm" icon="menu" class="page-outline-toggle" onClick={() => setPageListOpen(!pageListOpen)}>Pages</Button>
+              <div class="page-detail-title"><h2>{activePage.title}</h2><Badge tone={PAGE_EVIDENCE[activePage.evidence][1]}>{PAGE_EVIDENCE[activePage.evidence][0]}</Badge></div>
+              <code class="page-detail-path">{activePage.path}</code>
+            </div>
             <div class="page-detail-actions">
-              <button type="button" class={`page-content-toggle ${editingContent ? 'active' : ''}`} aria-pressed={editingContent} disabled={Boolean(contentBusy || activeJob || (reviewable && viewingProposalPage))} onClick={() => { if (canLeaveContent()) setEditingContent(!editingContent) }}><Icon name="update" size={15} />Edit content<span class="page-mode-switch" aria-hidden="true" /></button>
-              <button type="button" class={`page-agent-toggle ${agentPanelOpen ? 'active' : ''}`} aria-label="Instruct agent" title="Instruct agent" aria-expanded={agentPanelOpen} onClick={() => setAgentPanelOpen(!agentPanelOpen)}><Icon name="bot" size={19} />{(activeJob || reviewable) && <i />}</button>
-              <button type="button" class="page-options-toggle" disabled={contentBusy} aria-label="Page options" title="Page options" aria-expanded={pageOptionsOpen} onClick={() => { if (canLeaveContent()) setPageOptionsOpen(!pageOptionsOpen) }}><Icon name="settings" size={17} /></button>
+              <Button size="sm" tone="ghost" icon="clock" aria-pressed={Boolean(historyEntries)} onClick={() => void openHistory()}>History</Button>
+              <Button size="sm" icon="external" onClick={() => void openInPreview(activePage.route)}>Open in preview</Button>
+              <button type="button" class={`page-agent-toggle ${agentPanelOpen ? 'active' : ''}`} aria-label="Instruct agent" title="Instruct agent" aria-expanded={agentPanelOpen} onClick={() => setAgentPanelOpen(!agentPanelOpen)}><Icon name="sparkles" size={14} />Instruct agent{(activeJob || reviewable) && <i />}</button>
+              <button type="button" class="page-options-toggle" disabled={contentBusy} aria-label="Page options" title="Page options" aria-expanded={pageOptionsOpen} onClick={() => { if (canLeaveContent()) setPageOptionsOpen(!pageOptionsOpen) }}><EllipsisGlyph /></button>
             </div>
           </header>
+          <div class="page-detail-tabs" role="tablist" aria-label="Page views">
+            <button type="button" role="tab" aria-selected={!pageOptionsOpen && (!editingContent || editorMode === 'visual')} class={!pageOptionsOpen && (!editingContent || editorMode === 'visual') ? 'active' : ''} onClick={() => { setPageOptionsOpen(false); if (editingContent) setEditorMode('visual') }}>Content</button>
+            <button type="button" role="tab" aria-selected={!pageOptionsOpen && editingContent && editorMode === 'source'} class={!pageOptionsOpen && editingContent && editorMode === 'source' ? 'active' : ''} disabled={Boolean(contentBusy || activeJob || (reviewable && viewingProposalPage))} onClick={() => { setPageOptionsOpen(false); if (!editingContent) { if (!canLeaveContent()) return; setEditingContent(true) } setEditorMode('source') }}>Source</button>
+            <button type="button" role="tab" aria-selected={pageOptionsOpen} class={pageOptionsOpen ? 'active' : ''} disabled={contentBusy} onClick={() => { if (canLeaveContent()) setPageOptionsOpen(!pageOptionsOpen) }}>Evidence</button>
+            <span class="page-detail-tabs-side">
+              {activePage.updatedAt && !editingContent && <small>Updated {timeText(activePage.updatedAt)}</small>}
+              <button type="button" class={`page-content-toggle ${editingContent ? 'active' : ''}`} aria-pressed={editingContent} disabled={Boolean(contentBusy || activeJob || (reviewable && viewingProposalPage))} onClick={() => { if (canLeaveContent()) setEditingContent(!editingContent) }}><Icon name="update" size={14} />Edit content</button>
+            </span>
+          </div>
           {pageOptionsOpen && <section class="page-options-panel" aria-label="Page options">
-            <div class="page-options-actions"><code>{activePage.path}</code><Badge tone={PAGE_EVIDENCE[activePage.evidence][1]}>{PAGE_EVIDENCE[activePage.evidence][0]}</Badge><Button size="sm" icon="clock" onClick={() => void openHistory()}>Page history</Button><Button size="sm" icon="external" onClick={() => void openInPreview(activePage.route)}>Open in preview</Button></div>
             <Comments key={`comments:${activePage.path}`} path={activePage.path} onRequest={async text => { await submit({ paths: [activePage.path], instruction: `Address this reviewer comment on ${activePage.path}: ${text}` }) }} />
             {!activeJob && !(reviewable && viewingProposalPage) && <PageMetadataForm path={activePage.path} act={act} onError={onError} onSaved={() => { setPreviewNonce(value => value + 1); void refreshPages() }} />}
           </section>}
@@ -2341,17 +2742,21 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
             <Button size="sm" onClick={() => openRun(pendingElsewhere[0]!)}>Open review</Button>
           </div>}
 
-          {historyEntries && <section class="page-history-panel">
-            <header><strong><Icon name="clock" size={15} />History for {activePage.title}</strong><button type="button" aria-label="Close page history" onClick={() => setHistoryEntries(null)}><Icon name="close" size={14} /></button></header>
-            {historyEntries.length
-              ? historyEntries.map((entry) => <div class="page-history-row" key={entry.requestId}><Badge tone={statusTone(entry.requestStatus)}>{statusLabel(entry.requestStatus)}</Badge><span><strong>{entry.requestText ?? 'Documentation update'}</strong><small>{timeText(entry.requestedAt)}</small></span></div>)
-              : <p class="page-history-empty">No recorded changes for this page yet.</p>}
-          </section>}
+          {historyEntries && <div class="proposal-drawer-scrim page-history-scrim" role="presentation" onClick={(event) => event.target === event.currentTarget && setHistoryEntries(null)}>
+            <aside class="page-history-panel" role="dialog" aria-modal="true" aria-labelledby="page-history-title" onKeyDown={(event) => { if (event.key === 'Escape') setHistoryEntries(null) }}>
+              <header><span><span class="kicker">History</span><strong id="page-history-title">{activePage.title}</strong></span><button type="button" aria-label="Close page history" onClick={() => setHistoryEntries(null)}><Icon name="close" size={16} /></button></header>
+              <div class="page-history-body">
+                {historyEntries.length
+                  ? historyEntries.map((entry) => <div class="page-history-row" key={entry.requestId}><Badge tone={statusTone(entry.requestStatus)}>{statusLabel(entry.requestStatus)}</Badge><span><strong>{entry.requestText ?? 'Documentation update'}</strong><small>{timeText(entry.requestedAt)}</small></span></div>)
+                  : <p class="page-history-empty">No recorded changes for this page yet.</p>}
+              </div>
+            </aside>
+          </div>}
 
 
           <div class="page-editor-layout">
             <section class="page-editor-canvas" aria-label="Page content">
-              {!activeJob && !(reviewable && viewingProposalPage) && <PageContentEditor key={`${state.root ?? state.cwd}:${activePage.path}`} root={state.root ?? state.cwd} path={activePage.path} native={state.project?.generator === 'doxbrix'} base={previewUrl ? `${previewUrl}${activePage.route}` : ''} focusLine={focusLine} refreshToken={previewNonce} editing={editingContent} onEditingChange={setEditingContent} onStatus={(dirty, busy) => { setContentDirty(dirty); setContentBusy(busy) }} onChanged={async () => { await refreshPages(); setFocusLine(0); setPreviewNonce(value => value + 1); await act(async () => true) }}>{previewFrame(activePage)}</PageContentEditor>}
+              {!activeJob && !(reviewable && viewingProposalPage) && <PageContentEditor key={`${state.root ?? state.cwd}:${activePage.path}`} root={state.root ?? state.cwd} path={activePage.path} native={nativeEditor} base={previewUrl ? `${previewUrl}${activePage.route}` : ''} focusLine={focusLine} refreshToken={previewNonce} editing={editingContent} mode={editorMode} onModeChange={setEditorMode} onEditingChange={setEditingContent} onStatus={(dirty, busy) => { setContentDirty(dirty); setContentBusy(busy) }} onChanged={async () => { await refreshPages(); setFocusLine(0); setPreviewNonce(value => value + 1); await act(async () => true) }}>{previewFrame(activePage)}</PageContentEditor>}
               {activeJob && previewFrame(activePage)}
               {!activeJob && reviewable && proposal && viewingProposalPage && <section class="page-edit-review" aria-label="Proposed changes">
             {reviewChange ? <>
@@ -2380,8 +2785,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
               </section>}
             </section>
             {agentPanelOpen && <aside class="page-agent-panel" aria-label="Agent instructions" onKeyDown={event => { if (event.key === 'Escape') { setAgentPanelOpen(false); document.querySelector<HTMLButtonElement>('.page-agent-toggle')?.focus() } }}>
-              <header class="page-agent-panel-header"><Icon name="bot" size={18} /><h2>Instruct agent</h2><button type="button" aria-label="Close agent panel" onClick={() => { setAgentPanelOpen(false); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.page-agent-toggle')?.focus()) }}><Icon name="close" size={16} /></button></header>
-              <div class="page-agent-scope"><Icon name="file" size={15} /><span>{selected.length > 1 ? `${selected.length} pages selected` : activePage.title}</span></div>
+              <header class="page-agent-panel-header"><h2 class="kicker">Instruct the agent</h2><span class="page-agent-scope">{selected.length > 1 ? `${selected.length} pages selected` : activePage.title}</span><button type="button" aria-label="Close agent panel" onClick={() => { setAgentPanelOpen(false); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.page-agent-toggle')?.focus()) }}><Icon name="close" size={16} /></button></header>
               {activeJob && !otherPageWhileRunning && <>
             <section class="page-edit-running">
               <header>
@@ -2401,7 +2805,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
               <div>
                 <small>Agent proposal</small>
                 <h2>Review this edit</h2>
-                <p>{proposal.summary}</p>
+                <p>{pageEditSummary(proposal)}</p>
               </div>
               <Badge tone={statusTone(proposal.status)}>{statusLabel(proposal.status)}</Badge>
             </header>
@@ -2427,49 +2831,37 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
               {!activeJob && !(reviewable && viewingProposalPage) && <>
                 {failed && proposal && viewingProposalPage && <PageEditFailure proposal={proposal} onRetry={related => void submit({ instruction: latestPageEditInstruction(proposal), allowRelated: related, paths: proposalPaths })} onRefine={() => { setInstruction(latestPageEditInstruction(proposal)); leaveProposal(); updateUrl(proposalPaths); focusComposer() }} />}
             <section class="page-edit-composer">
-              <header class="composer-head">
-                <span class="composer-icon"><Icon name="sparkles" size={18} /></span>
-                <div>
-                  <h2>Describe the change</h2>
-                  <p>The agent proposes an update for your review.</p>
-                </div>
-              </header>
               <div class="composer-body">
-                <div class="composer-field">
-                  <label for="page-edit-instruction" class="field-label">{composerLabel}</label>
-                  <div class="composer-textarea">
-                    <Textarea id="page-edit-instruction" ref={textarea} rows={5} maxlength={2000} value={instruction} disabled={submitting} placeholder="For example: add a curl example under Authentication and say that tokens expire after 24 hours." onInput={(event) => setInstruction(event.currentTarget.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void submit() } }} />
-                    <small class={instruction.length > 1900 ? 'warn' : ''}>{instruction.trim().length < MIN_EDIT_INSTRUCTION && instruction.length > 0 ? `At least ${MIN_EDIT_INSTRUCTION} characters` : `${instruction.length}/2000`}</small>
-                  </div>
-                </div>
                 <div class="page-intent-chips" aria-label="Starting points">
-                  <span>Start with</span>
-                  {PAGE_EDIT_INTENTS.map(([label, value]) => <button key={label} type="button" aria-pressed="false" disabled={submitting} onClick={() => insertIntent(value)}>{label}</button>)}
-                  <button type="button" aria-pressed="false" disabled={submitting} onClick={() => setAssetPicker(true)}><Icon name="plus" size={12} /> Insert an image…</button>
+                  <span class="sr-only">Start with</span>
+                  {PAGE_EDIT_INTENTS.map(([label, value]) => <button key={label} type="button" class="chip" aria-pressed="false" disabled={submitting} onClick={() => insertIntent(value)}>{label}</button>)}
+                  <button type="button" class="chip" aria-pressed="false" disabled={submitting} onClick={() => setAssetPicker(true)}><Icon name="plus" size={12} />Insert an image…</button>
                 </div>
-                <details class="page-agent-advanced"><summary>Options &amp; agent settings</summary>
-                <div class="page-edit-options">
-                  <div class={`page-option-card ${allowRelated ? 'on' : ''}`}>
-                    <Toggle checked={allowRelated} disabled={submitting} onChange={setAllowRelated} label="Also allow related changes" />
-                    <small>Lets the agent update navigation and add or replace images for this page.</small>
+                <div class="composer-line">
+                  <div class="composer-field">
+                    <label for="page-edit-instruction" class="sr-only">{composerLabel}</label>
+                    <div class="composer-textarea">
+                      <Icon name="update" size={16} />
+                      <Textarea id="page-edit-instruction" ref={textarea} rows={1} maxlength={2000} value={instruction} disabled={submitting} placeholder={selected.length > 1 ? `What should be different on these ${selected.length} pages?` : 'What should be different on this page?'} onInput={(event) => setInstruction(event.currentTarget.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void submit() } }} />
+                      <small class={instruction.length > 1900 ? 'warn' : ''}>{instruction.trim().length < MIN_EDIT_INSTRUCTION && instruction.length > 0 ? `At least ${MIN_EDIT_INSTRUCTION} characters` : instruction.length > 0 ? `${instruction.length}/2000` : ''}</small>
+                    </div>
                   </div>
-                  {state.project?.application && <div class={`page-option-card ${screenshots ? 'on' : ''}`}>
-                    <Toggle checked={screenshots} disabled={submitting} onChange={setScreenshots} label="Capture product screenshots" />
-                    <small>Off by default for page edits. Turn on when the change needs a fresh screenshot.</small>
-                  </div>}
+                  <Button tone="primary" icon="sparkles" busy={submitting} disabled={!instructionReady || selectedPaths.length === 0 || contentLocked} onClick={() => void submit()}>Generate proposal</Button>
                 </div>
-                <button type="button" class="agent-config-summary" aria-expanded={agentOpen} onClick={() => setAgentOpen(!agentOpen)}><Icon name="bot" size={16} /><span>Agent: <b>{agent ? agentLabel(agent) : 'Automatically detect'}{model ? ` · ${model}` : ''}</b></span><strong>{agentOpen ? 'Done' : 'Change'}</strong></button>
-                {agentOpen && <div class="page-agent-options">
-                  <Field label="Agent"><Select value={agent} onChange={(event) => { const value = event.currentTarget.value; const nextModel = defaultModelForAgent(value); const level = preferredReasoningLevel(value, nextModel); setAgent(value); setModel(nextModel); setReasoning(value === 'codex' ? level : ''); setEffort(value === 'claude' ? level : '') }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
-                  <Field label="Model"><Combo value={model} options={agentModels(agent).map((entry) => [entry.id, entry.label] as const)} disabled={!agent} onValueChange={setModel} /></Field>
-                  {(agent === 'codex' || agent === 'claude') && <Field label={agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={agent === 'claude' ? effort : reasoning} options={modelReasoningLevels(agent, model).map((value) => [value, value] as const)} onValueChange={agent === 'claude' ? setEffort : setReasoning} /></Field>}
-                </div>}
-                </details>
+                <div class="composer-options">
+                  <Toggle checked={allowRelated} disabled={submitting} onChange={setAllowRelated} label="Also allow related changes" />
+                  {state.project?.application && <Toggle checked={screenshots} disabled={submitting} onChange={setScreenshots} label="Capture product screenshots" />}
+                  <details class="page-agent-advanced"><summary>Options &amp; agent settings</summary>
+                    <button type="button" class="agent-config-summary" aria-expanded={agentOpen} onClick={() => setAgentOpen(!agentOpen)}><Icon name="bot" size={16} /><span>Agent: <b>{agent ? agentLabel(agent) : 'Automatically detect'}{model ? ` · ${model}` : ''}</b></span><strong>{agentOpen ? 'Done' : 'Change'}</strong></button>
+                    {agentOpen && <div class="page-agent-options">
+                      <Field label="Agent"><Select value={agent} onChange={(event) => { const value = event.currentTarget.value; const nextModel = defaultModelForAgent(value); const level = preferredReasoningLevel(value, nextModel); setAgent(value); setModel(nextModel); setReasoning(value === 'codex' ? level : ''); setEffort(value === 'claude' ? level : '') }}><option value="">Automatically detect</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+                      <Field label="Model"><Combo value={model} options={agentModels(agent).map((entry) => [entry.id, entry.label] as const)} disabled={!agent} onValueChange={setModel} /></Field>
+                      {(agent === 'codex' || agent === 'claude') && <Field label={agent === 'claude' ? 'Effort' : 'Reasoning'}><Combo value={agent === 'claude' ? effort : reasoning} options={modelReasoningLevels(agent, model).map((value) => [value, value] as const)} onValueChange={agent === 'claude' ? setEffort : setReasoning} /></Field>}
+                    </div>}
+                  </details>
+                </div>
+                {contentLocked && <small class="composer-note">Save or discard your content edits before generating a proposal.</small>}
               </div>
-              <footer class="composer-foot">
-                <Button tone="primary" icon="sparkles" busy={submitting} disabled={!instructionReady || selectedPaths.length === 0 || contentLocked} onClick={() => void submit()}>Generate proposal</Button>
-                <small>{contentLocked ? 'Save or discard your content edits before generating a proposal.' : 'The page stays unchanged until you accept the result.'}</small>
-              </footer>
             </section>
               </>}
             </aside>}
@@ -2482,6 +2874,11 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
 }
 
 type PagesView = 'pages' | 'assets'
+
+/** Three dots for a "more actions" button; the icon set has no ellipsis. */
+function EllipsisGlyph() {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg>
+}
 
 function pagesViewFrom(value: string | null): PagesView {
   return value === 'assets' ? value : 'pages'
@@ -2498,6 +2895,24 @@ function groupPageSummaries(pages: PageSummary[]): Array<[string, PageSummary[]]
   const orphan = groups.get('Not in navigation')
   if (orphan) { groups.delete('Not in navigation'); groups.set('Not in navigation', orphan) }
   return [...groups]
+}
+
+/** What a Review row is, in words: a plan's documentation, or a source update. */
+export function proposalRowTitle(run: Pick<Proposal, 'planId' | 'changes' | 'summary' | 'authoringMode'>): string {
+  const pages = run.changes.filter((change) => change.category === 'page' && change.kind !== 'deleted').length
+  if (run.planId) return `${run.authoringMode === 'create' ? 'New documentation' : 'Documentation update'} from the approved plan · ${pages} page${pages === 1 ? '' : 's'}`
+  return run.summary || 'Documentation update'
+}
+
+/** "1 page changed · evidence updated" rather than a file-count ledger. */
+export function pageEditSummary(proposal: Pick<Proposal, 'changes'>): string {
+  const pages = proposal.changes.filter((change) => change.category === 'page').length
+  const others = proposal.changes.filter((change) => change.category !== 'page')
+  const parts = [`${pages} page${pages === 1 ? '' : 's'} changed`]
+  if (others.some((change) => change.category === 'evidence')) parts.push('evidence updated')
+  const rest = others.filter((change) => change.category !== 'evidence').length
+  if (rest > 0) parts.push(`${rest} other file${rest === 1 ? '' : 's'}`)
+  return parts.join(' · ')
 }
 
 function latestPageEditInstruction(proposal: Proposal): string {
@@ -2639,35 +3054,31 @@ function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: str
       detail="Once you start an update, the request and everything it changed are recorded here."
     />
   }
-  return <Table class="history-table" head={<><th>Action</th><th>Instruction</th><th>Result</th><th>When</th></>}>
+  return <Table class="history-table pl-history-table" head={<><th>Request</th><th>Result</th><th>Cost</th><th>When</th></>}>
     {entries.map((entry) => {
       const pages = entry.pages ?? []
       const instruction = historyRequestSummary(historyInstruction(entry))
       const editPath = entry.kind === 'edit' ? pages[0]?.path : undefined
       const openEdit = () => { if (editPath) setLocation('pages', { path: editPath }, 'push') }
+      const changes = entry.pagesChanged > 0 ? `${changeCountText(pages, entry.pagesChanged)} changed` : entry.kind === 'edit' && pages.length > 0 ? `${changeCountText(pages, pages.length)} selected` : ''
       return <tr key={entry.id} class={`history-row ${editPath ? 'clickable' : ''}`} tabIndex={editPath ? 0 : undefined} onClick={openEdit} onKeyDown={(event) => {
         if (!editPath || (event.key !== 'Enter' && event.key !== ' ')) return
         event.preventDefault()
         openEdit()
       }}>
-        <td class="history-action">
-          <strong>{historyActionLabel(entry.kind)}</strong>
-        </td>
         <td>
           <div class="history-request">
             <strong title={instruction.truncated ? historyInstruction(entry) : undefined}>{instruction.text}</strong>
-            {pages.length > 0 && <small class="history-pages" title={pages.map((page) => page.path).join('\n')}>{historyPageNames(pages)}</small>}
-            {entry.error && <small class="history-error">{entry.error}</small>}
+            <small>{historyActionLabel(entry.kind)}{pages.length > 0 && <span class="history-pages" title={pages.map((page) => page.path).join('\n')}> · {historyPageNames(pages)}</span>}</small>
+            {entry.error && <small class="history-error" title={entry.error}>{friendlyDeployError(entry.error)}</small>}
           </div>
         </td>
         <td class="history-result">
           <Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge>
-          <small>{entry.pagesChanged > 0 ? `${changeCountText(pages, entry.pagesChanged)} changed` : entry.kind === 'edit' && pages.length > 0 ? `${changeCountText(pages, pages.length)} selected` : 'No page changes'}</small>
+          {changes && <small>{changes}</small>}
         </td>
-        <td class="muted-cell">
-          {timeText(entry.createdAt)}
-          {entry.usage && <small class="history-duration" title={`${entry.usage.totalTokens.toLocaleString()} tokens · ${entry.usage.turns} turns · largest context ${entry.usage.maxContextTokens.toLocaleString()} tokens`}>{usageText(entry.usage)}</small>}
-        </td>
+        <td class="history-cost">{entry.usage ? <span title={`${entry.usage.totalTokens.toLocaleString()} tokens · ${entry.usage.turns} turns · largest context ${entry.usage.maxContextTokens.toLocaleString()} tokens`}>{usageText(entry.usage)}</span> : <span>—</span>}</td>
+        <td class="muted-cell">{timeText(entry.createdAt)}</td>
       </tr>
     })}
   </Table>
@@ -2678,34 +3089,28 @@ function RequestHistory({ jobs, onError }: { jobs: UiJob[]; onError: (error: str
  * Deploy page itself, which also needs the last successful deployment URL.
  */
 function DeploymentHistory({ entries, available, loading }: HistoryFeed<DeploymentRecord>) {
-  if (!available) return <HistoryUnavailable />
-  if (loading && entries.length === 0) return <div class="history-loading">Loading history…</div>
+  if (!available) return <div class="ops-empty-wrap"><HistoryUnavailable /></div>
+  if (loading && entries.length === 0) return <div class="history-loading ops-empty-wrap">Loading history…</div>
   if (entries.length === 0) {
-    return <Empty
+    return <div class="ops-empty-wrap"><Empty
       icon="clock"
       title="Nothing published yet"
       detail="Each deployment is recorded here with the pages it published and whether it succeeded."
-    />
+    /></div>
   }
-  return <Table class="history-table" head={<><th>Destination</th><th>Result</th><th>Pages</th><th>When</th></>}>
+  return <Table class="history-table deploy-history" head={<><th>Publish</th><th>Access</th><th>Result</th><th>When</th></>}>
     {entries.map((entry) => <tr key={`${entry.startedAt}-${entry.slug ?? entry.target}`} class="history-row">
       <td>
-        <div class="history-request">
-          <strong>{entry.slug ?? entry.name ?? entry.target}</strong>
-          <small>
-            {entry.target}
-            {entry.visibility && <> · {entry.visibility}</>}
-          </small>
-          {entry.error && <small class="history-error">{entry.error}</small>}
-        </div>
-      </td>
-      <td><Badge tone={statusTone(entry.status)}>{statusLabel(entry.status)}</Badge></td>
-      <td class="history-changed">
-        <span>{entry.pagesCount === undefined ? '—' : changeCountText([], entry.pagesCount)}</span>
+        <span class="deploy-history-name">{entry.slug ?? entry.name ?? entry.target}{entry.pagesCount !== undefined && <> · {changeCountText([], entry.pagesCount)}</>}</span>
         {(entry.pagesCreated || entry.pagesUpdated) && <small class="history-lines">
           {entry.pagesCreated ? <i class="added">+{entry.pagesCreated} new</i> : null}
-          {entry.pagesUpdated ? <i>{entry.pagesUpdated} updated</i> : null}
+          {entry.pagesUpdated ? <i>{entry.pagesCreated ? ' · ' : ''}{entry.pagesUpdated} updated</i> : null}
         </small>}
+      </td>
+      <td class="deploy-history-target">{entry.target === 'doxbrix' ? (entry.visibility === 'public' ? 'Public' : entry.visibility === 'private' ? 'Private' : 'Doxbrix') : deployTargetLabel(entry.target)}</td>
+      <td>
+        <Badge tone={statusTone(entry.status)}>{entry.status === 'succeeded' ? 'Published' : entry.status === 'failed' ? 'Failed' : statusLabel(entry.status)}</Badge>
+        {entry.error && <small class="history-error" title={entry.error}>{friendlyDeployError(entry.error)}</small>}
       </td>
       <td class="muted-cell">
         {timeText(entry.startedAt)}
@@ -2713,6 +3118,11 @@ function DeploymentHistory({ entries, available, loading }: HistoryFeed<Deployme
       </td>
     </tr>)}
   </Table>
+}
+
+/** Reader-facing name of a deployment target id. */
+function deployTargetLabel(target: string): string {
+  return target === 'github-pages' ? 'GitHub Pages' : target === 'netlify' ? 'Netlify' : target === 'vercel' ? 'Vercel' : target === 'doxbrix' ? 'Doxbrix' : target === 'export' ? 'Export' : target
 }
 
 /** Mirrors `formatAgentUsage` in src/agent-log.ts: `1.2M tokens · 98% cached · $1.42 · 3 sessions`. */
@@ -2757,6 +3167,7 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const localSources = project.sources.filter((item) => (item.kind ?? 'directory') === 'directory' && !item.remote)
   const checking = state.jobs.some((job) => job.type === 'sync' && job.status === 'running')
+  const checkBlocked = authoringJobRunning(state.jobs)
   const save = async () => {
     setSaving(true)
     try {
@@ -2766,46 +3177,54 @@ function MonitoringDialog({ state, act, onClose }: { state: UiState; act: Action
       setSaving(false)
     }
   }
-  return <div class="sources-modal-scrim" onClick={onClose}>
-    <section class="monitoring-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-dialog-title" onClick={(event) => event.stopPropagation()}>
-      <header>
-        <span class="sources-dialog-icon"><Icon name="bell" size={23} /></span>
+  return <div class="sources-modal-scrim ops-dialog-scrim" onClick={onClose}>
+    <section class="monitoring-dialog ops-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-dialog-title" onClick={(event) => event.stopPropagation()}>
+      <header class="ops-dialog-head">
         <div><h2 id="monitoring-dialog-title">Configure project monitoring</h2><p>One project-wide policy checks all {project.sources.length} connected sources. Changes generate a documentation proposal for review.</p></div>
-        <button type="button" aria-label="Close" onClick={onClose}><Icon name="close" size={17} /></button>
+        <button type="button" class="ops-icon-button" aria-label="Close" onClick={onClose}><Icon name="close" size={16} /></button>
       </header>
-      <div class="monitoring-dialog-body">
-        <div class="monitoring-dialog-status"><span class={project.sync.on.length ? 'active' : ''}><i />{project.sync.on.length ? scheduleSummary(scheduleForm(project.sync.on)) : 'Monitoring is not configured'}</span><Button size="sm" icon="refresh" busy={checking} disabled={checking} onClick={() => void act(() => post('/api/sync/now'), 'Source check started', false)}>{checking ? 'Checking…' : 'Check now'}</Button></div>
-        {checking && <Note>A source check is running. Its result appears as a notice when it finishes; the live log is under Update.</Note>}
+      <div class="monitoring-dialog-body ops-dialog-body">
+        <div class="monitoring-dialog-status"><span class={project.sync.on.length ? 'active' : ''}><i />{project.sync.on.length ? scheduleSummary(scheduleForm(project.sync.on)) : 'Monitoring is not configured'}</span><Button size="sm" icon="refresh" busy={checking} disabled={checking || checkBlocked} title={checkBlocked ? 'Available when the running writing task finishes' : undefined} onClick={() => void act(() => post('/api/sync/now'), 'Source check started', false)}>{checking ? 'Checking…' : 'Check now'}</Button></div>
+        {checking && <Note>A source check is running. Its result appears as a notice when it finishes; the live log is under Plan.</Note>}
         {localSources.length > 0 && <Note>{localSources.map((item) => item.name).join(', ')} {localSources.length === 1 ? 'is a local folder and is' : 'are local folders and are'} checked in place: a Git checkout by its HEAD commit and working tree, any other folder by the files recorded at the last sync. Nothing is fetched, pulled, or written there.</Note>}
         <section class="monitoring-policy-fields">
-          <div class="form-grid">
-            <Field label="Product branch"><Input value={sync.branch ?? ''} placeholder="main" onInput={(event) => set('branch', event.currentTarget.value)} /></Field>
-            <Field label="Schedule"><Select value={schedule.kind} onChange={(event) => updateSchedule({ kind: event.currentTarget.value as ScheduleKind })}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom schedule</option></Select></Field>
+          <Field label="Product branch" hint="The branch monitoring compares against. Leave empty for the source's default branch."><Input value={sync.branch ?? ''} placeholder={project.sources.find((item) => item.remote?.branch)?.remote?.branch ?? 'main'} onInput={(event) => set('branch', event.currentTarget.value)} /></Field>
+          <div class="field ops-choice">
+            <span class="field-label">Schedule</span>
+            <RadioRows label="Schedule" value={schedule.kind} onChange={(kind) => updateSchedule({ kind })} items={[
+              { id: 'daily', label: 'Daily' },
+              { id: 'weekdays', label: 'Weekdays' },
+              { id: 'weekly', label: 'Weekly' },
+              { id: 'monthly', label: 'Monthly' },
+              { id: 'custom', label: 'Custom interval', detail: 'Every few minutes or hours' },
+            ] as const} />
           </div>
-          <div class="form-grid gap-top schedule-fields">
-            {schedule.kind === 'weekly' && <Field label="Day of week"><Select value={schedule.weekday} onChange={(event) => updateSchedule({ weekday: event.currentTarget.value })}>{WEEKDAY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>}
-            {schedule.kind === 'monthly' && <Field label="Day of month" hint="The 1st through 28th runs reliably every month."><Input type="number" min="1" max="28" value={schedule.day} onInput={(event) => updateSchedule({ day: clampNumber(event.currentTarget.value, 1, 28) })} /></Field>}
-            {schedule.kind !== 'custom' && <Field label="Time" hint={`Uses your device timezone (${timezone}).`}><Input type="time" value={schedule.time} onInput={(event) => updateSchedule({ time: event.currentTarget.value || '09:00' })} /></Field>}
-            {schedule.kind === 'custom' && <><Field label="Repeat every"><Input type="number" min="1" max={schedule.unit === 'm' ? '59' : '24'} value={schedule.interval} onInput={(event) => updateSchedule({ interval: clampNumber(event.currentTarget.value, 1, schedule.unit === 'm' ? 59 : 24) })} /></Field><Field label="Interval"><Select value={schedule.unit} onChange={(event) => { const unit = event.currentTarget.value as ScheduleUnit; updateSchedule({ unit, interval: Math.min(schedule.interval, unit === 'm' ? 59 : 24) }) }}><option value="m">Minutes</option><option value="h">Hours</option></Select></Field></>}
-          </div>
+          {schedule.kind === 'weekly' && <Field label="Day of week"><Select value={schedule.weekday} onChange={(event) => updateSchedule({ weekday: event.currentTarget.value })}>{WEEKDAY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>}
+          {schedule.kind === 'monthly' && <Field label="Day of month" hint="The 1st through 28th runs reliably every month."><Input type="number" min="1" max="28" value={schedule.day} onInput={(event) => updateSchedule({ day: clampNumber(event.currentTarget.value, 1, 28) })} /></Field>}
+          {schedule.kind !== 'custom' && <Field label="Time" hint={`Uses your device timezone (${timezone}).`}><Input type="time" value={schedule.time} onInput={(event) => updateSchedule({ time: event.currentTarget.value || '09:00' })} /></Field>}
+          {schedule.kind === 'custom' && <>
+            <Field label="Repeat every"><Input type="number" min="1" max={schedule.unit === 'm' ? '59' : '24'} value={schedule.interval} onInput={(event) => updateSchedule({ interval: clampNumber(event.currentTarget.value, 1, schedule.unit === 'm' ? 59 : 24) })} /></Field>
+            <Field label="Interval"><Select value={schedule.unit} onChange={(event) => { const unit = event.currentTarget.value as ScheduleUnit; updateSchedule({ unit, interval: Math.min(schedule.interval, unit === 'm' ? 59 : 24) }) }}><option value="m">Minutes</option><option value="h">Hours</option></Select></Field>
+          </>}
           <p class="schedule-summary"><Icon name="calendar" size={15} />{scheduleSummary(schedule)}</p>
           <button type="button" class="disclosure" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} />Advanced watch scope and budgets</button>
           {advanced && <div class="form-grid gap-top">
-            <Field label="Watched paths"><Lines value={sync.watch} onInput={(value) => set('watch', value)} placeholder={'src/**\nopenapi.yaml'} /></Field>
-            <Field label="Ignored paths"><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
+            <Field label="Watched paths" hint="One glob per line. Only changes under these paths trigger an update."><Lines value={sync.watch} onInput={(value) => set('watch', value)} placeholder={'src/**\nopenapi.yaml'} /></Field>
+            <Field label="Ignored paths" hint="One glob per line. Changes here never trigger an update."><Lines value={sync.ignore} onInput={(value) => set('ignore', value)} placeholder={'**/*.test.ts\npnpm-lock.yaml'} /></Field>
             <Field label="Maximum agent minutes"><Input type="number" min="1" value={sync.budget?.maxMinutes ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxMinutes', event.currentTarget.value) })} /></Field>
             <Field label="Maximum runs per day"><Input type="number" min="1" value={sync.budget?.maxRunsPerDay ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxRunsPerDay', event.currentTarget.value) })} /></Field>
-            <Field label="Maximum Claude spend (USD)" hint="Stops a Claude Code run at this cost and names the cap in the run log. Codex and Gemini have no spending flag, so this is ignored for them. Leave it empty for no cap."><Input type="number" min="0.5" step="0.5" placeholder="No cap" value={sync.budget?.maxUsd ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxUsd', event.currentTarget.value) })} /></Field>
+            {/* Only Claude Code has a spending flag; Codex and Gemini projects never see a cap that would not apply. */}
+            {(!state.project?.defaultAgent || state.project.defaultAgent === 'claude') && <Field label="Maximum Claude spend (USD)" hint="Stops a Claude Code run at this cost and names the cap in the run log. Codex and Gemini have no spending flag, so this is ignored for them. Leave it empty for no cap."><Input type="number" min="0.5" step="0.5" placeholder="No cap" value={sync.budget?.maxUsd ?? ''} onInput={(event) => setSync({ ...sync, budget: numberBudget(sync.budget, 'maxUsd', event.currentTarget.value) })} /></Field>}
             <Field label="Re-verify after (days)" hint="Checks evidence age even when source content is unchanged."><Input type="number" min="1" max="3650" value={sync.maxVerificationAgeDays ?? ''} onInput={(event) => set('maxVerificationAgeDays', event.currentTarget.value ? clampNumber(event.currentTarget.value, 1, 3650) : undefined)} /></Field>
             <Field label="Expired verification"><Select value={sync.maxVerificationAgeSeverity ?? 'warn'} onChange={(event) => set('maxVerificationAgeSeverity', event.currentTarget.value as 'warn' | 'fail')}><option value="warn">Warn</option><option value="fail">Fail validation</option></Select></Field>
           </div>}
-          <Note>Monitoring creates the documentation update as a proposal under Review. It never modifies the product source or publishes automatically.</Note>
+          <Note>Save and install adds a background schedule on this computer, so checks run even when the control center is closed. Updates arrive as proposals under Review. Monitoring never changes the product source or publishes on its own.</Note>
         </section>
       </div>
-      <footer>
+      <footer class="ops-dialog-foot">
         {project.sync.on.length > 0 && <Button tone="danger" onClick={() => confirm('Disable the installed monitoring schedule?') && void act(() => post('/api/sync/off'), 'Monitoring disabled')}>Disable</Button>}
         <span />
-        <Button onClick={onClose}>Cancel</Button>
+        <Button tone="ghost" onClick={onClose}>Cancel</Button>
         <Button tone="primary" busy={saving} onClick={() => void save()}>Save and install</Button>
       </footer>
     </section>
@@ -2912,6 +3331,29 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
   // Screenshot coverage is measured against the guides the plan asked for.
   const linkedPlan = selected && state.documentationPlan && (state.documentationPlan.proposalId === selected.id || state.documentationPlan.id === selected.planId) ? state.documentationPlan : undefined
   const planGuides = linkedPlan ? linkedPlan.pages.filter((page) => page.priority !== 'later' && page.action !== 'remove' && page.action !== 'preserve' && isGuidePage(page)).length : undefined
+  // The header keeps one primary action; everything rarer sits behind "⋯".
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRoot = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!menuOpen) return
+    const closeOnOutsidePress = (event: PointerEvent) => { if (event.target instanceof Node && !menuRoot.current?.contains(event.target)) setMenuOpen(false) }
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false) }
+    document.addEventListener('pointerdown', closeOnOutsidePress)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => { document.removeEventListener('pointerdown', closeOnOutsidePress); document.removeEventListener('keydown', closeOnEscape) }
+  }, [menuOpen])
+  useEffect(() => { setMenuOpen(false); setReviseDraft('') }, [selectedId])
+  // The revise bar under the diff sends straight to the agent; "Choose files" opens the dialog.
+  const [reviseDraft, setReviseDraft] = useState('')
+  const [reviseScope, setReviseScope] = useState<'current' | 'all' | 'selected'>('current')
+  const diffMode: 'rendered' | 'split' | 'source' = view === 'source' ? 'source' : layout === 'split' ? 'split' : 'rendered'
+  const setDiffMode = (next: 'rendered' | 'split' | 'source') => { if (next === 'source') setView('source'); else { setView('rendered'); setLayout(next === 'split' ? 'split' : 'unified') } }
+  // Written pages and removed pages are counted apart so this line agrees
+  // with the "N pages applied" confirmation.
+  const pageChangeCount = selected ? selected.changes.filter((item) => item.category === 'page' && item.kind !== 'deleted').length : 0
+  const pageRemovedCount = selected ? selected.changes.filter((item) => item.category === 'page' && item.kind === 'deleted').length : 0
+  const logJob = selected ? state.jobs.find((job) => job.type.endsWith(`:${selected.id}`)) : undefined
+  const acceptedShare = selected && selected.changes.length > 0 ? Math.round((decisions.accepted / selected.changes.length) * 100) : 0
   const [accepting, setAccepting] = useState(false)
   const acceptAll = async (proposal: Proposal) => {
     if (accepting) return
@@ -2930,23 +3372,29 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
       setAccepting(false)
     }
   }
-  const requestRevision = async (proposal: Proposal) => {
-    if (!revision?.instruction.trim()) return
-    const changeIds = revision.mode === 'all'
+  const requestRevision = async (proposal: Proposal, draft: ProposalRevisionDraft | null = revision): Promise<boolean> => {
+    if (!draft?.instruction.trim()) return false
+    const changeIds = draft.mode === 'all'
       ? proposal.changes.map((item) => item.id)
-      : revision.mode === 'current'
+      : draft.mode === 'current'
         ? (change ? [change.id] : [])
-        : revision.selectedIds
+        : draft.selectedIds
     const result = await act(
       () => post<UiJob>(`/api/proposals/${proposal.id}/revise`, {
-        instruction: revision.instruction,
+        instruction: draft.instruction,
         changeIds,
-        hunkIds: revision.hunkIds,
+        hunkIds: draft.hunkIds,
       }),
       'Revision started',
       false,
     )
     if (result) setRevision(null)
+    return Boolean(result)
+  }
+  const sendRevision = async () => {
+    if (!selected || !change || !reviseDraft.trim() || !open) return
+    if (reviseScope === 'selected') { setRevision({ mode: 'selected', instruction: reviseDraft.trim(), selectedIds: [change.id], hunkIds: [] }); return }
+    if (await requestRevision(selected, { mode: reviseScope, instruction: reviseDraft.trim(), selectedIds: [change.id], hunkIds: [] })) setReviseDraft('')
   }
   return <>
     {delivery && <div class="proposal-ready-scrim" role="presentation"><section class="proposal-ready-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-delivery-title"><button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setDelivery(null)}><Icon name="close" size={16} /></button><span class="proposal-ready-icon"><Icon name="external" size={24} /></span><div><h2 id="proposal-delivery-title">{delivery.pullRequestUrl ? 'Pull request is ready' : delivery.pushedAt ? 'Branch published' : 'Pull-request branch is ready'}</h2><p>{delivery.pushedAt ? 'The reviewed commit is available on the remote without changing your current working tree.' : 'Doxloop created the branch in an isolated Git worktree without changing your current working tree.'}</p></div><div class="proposal-ready-summary"><strong>{delivery.branch}</strong><span>Commit {delivery.commit.slice(0, 12)}</span></div>{!delivery.pushedAt && delivery.pullRequestCommand && <code>{delivery.pullRequestCommand}</code>}<footer>{delivery.pullRequestUrl ? <a class="btn primary md" href={delivery.pullRequestUrl} target="_blank" rel="noreferrer">Open pull request</a> : delivery.pushedAt ? delivery.compareUrl && <a class="btn primary md" href={delivery.compareUrl} target="_blank" rel="noreferrer">Open comparison</a> : <><Button onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: false }), 'Branch published'); if (result) setDelivery(result) })()}>Push branch</Button><Button tone="primary" onClick={() => void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selectedId}/delivery/publish`, { createPullRequest: true }), 'Pull request created'); if (result) setDelivery(result) })()}>Push & create PR</Button></>}<Button onClick={() => setDelivery(null)}>Done</Button></footer></section></div>}
@@ -2971,72 +3419,79 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
       <section class="proposal-ready-dialog proposal-applied-dialog" role="dialog" aria-modal="true" aria-labelledby="proposal-applied-title">
         <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setAppliedProposal(null)}><Icon name="close" size={16} /></button>
         <span class="proposal-ready-icon applied"><Icon name="check" size={24} /></span>
-        <div><h2 id="proposal-applied-title">{appliedProposal.status === 'applied' ? 'Documentation changes applied' : 'Some changes were applied'}</h2><p>{appliedPageText(appliedProposal)} Preview the result, then deploy when it looks right.</p></div>
+        <div><h2 id="proposal-applied-title">{appliedProposal.status === 'applied' ? 'Documentation changes applied' : 'Some changes were applied'}</h2><p>{appliedPageText(appliedProposal)} Preview the result, then publish it when it looks right.</p></div>
         <div class="proposal-ready-summary"><strong>{proposalSummaryText(appliedProposal.changes)}</strong><span>{appliedProposal.status === 'applied' ? 'Undo stays available from this proposal until newer edits replace these files.' : 'The remaining changes are still waiting for a decision in this proposal.'}</span></div>
-        <footer><Button onClick={() => setAppliedProposal(null)}>Done</Button><Button icon="preview" onClick={() => void openPreviewTab((openServerSide) => post<{ url: string }>('/api/preview/start', { open: openServerSide }))}>Preview docs</Button><Button tone="primary" icon="deploy" onClick={() => { setAppliedProposal(null); setLocation('publish', {}, 'push') }}>Deploy</Button></footer>
+        <footer><Button onClick={() => setAppliedProposal(null)}>Done</Button><Button icon="preview" onClick={() => void openPreviewTab((openServerSide) => post<{ url: string }>('/api/preview/start', { open: openServerSide }))}>Preview docs</Button><Button tone="primary" icon="deploy" onClick={() => { setAppliedProposal(null); setLocation('publish', {}, 'push') }}>Publish</Button></footer>
       </section>
     </div>}
     {selected
-      ? <div class="review-detail-heading">
-        <button type="button" class="review-back-button" onClick={() => setSelectedId('')}><Icon name="chevronRight" size={14} />All proposals</button>
-        <PageHeader title="Review proposal" description="Compare the current documentation with the proposed update." actions={<><Button icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview documentation</Button>{open && <Button icon="publish" onClick={() => void (async () => { const result = await act(() => post<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string }>(`/api/proposals/${selected.id}/delivery/branch`, {}), 'Pull-request branch prepared'); if (result) setDelivery(result) })()}>Prepare PR branch</Button>}{!selected.archivedAt && selected.status !== 'generating' && <Button onClick={() => confirm('Archive this proposal? It can remain in history until cleanup.') && void act(() => post(`/api/proposals/${selected.id}/archive`), 'Proposal archived')}>Archive</Button>}</>} />
-      </div>
-      : <PageHeader title="Review" description="Choose a proposal to inspect and approve its documentation changes." />}
+      ? <PageHeader kicker={linkedPlan ? `Proposal · plan v${linkedPlan.version}` : selected.editRequest ? 'Proposal · page edit' : 'Proposal'} title="Review proposal" actions={<>
+        <div class="review-more" ref={menuRoot}>
+          <button type="button" class="btn secondary md review-more-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><EllipsisGlyph /></button>
+          {menuOpen && <div class="review-more-menu" role="menu" aria-label="More actions">
+            {(open || (selected.status === 'stale' && !selected.archivedAt)) && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRevision({ mode: 'all', instruction: 'Regenerate this proposal using the current approved plan and evidence.', selectedIds: selected.changes.map((item) => item.id), hunkIds: [] }) }}>Regenerate</button>}
+            {selected.status === 'awaiting-review' && !selected.archivedAt && (selected.validation?.errors ?? 0) > 0 && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void act(() => post<Proposal>(`/api/proposals/${selected.id}/repair`), 'Proposal repaired and validated again') }}>Repair proposal</button>}
+            {selected.status === 'failed' && !selected.archivedAt && selected.recovery?.resumable !== false && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void act(() => post<UiJob>(`/api/proposals/${selected.id}/resume`), 'Continuing the documentation run') }}>Resume</button>}
+            {selected.status === 'failed' && !selected.archivedAt && selected.recovery?.ignorable !== false && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void act(() => post<Proposal>(`/api/proposals/${selected.id}/recover`, { ignoreScreenshotProblems: true }), 'Proposal ready for review with problems ignored') }}>Ignore problems &amp; review</button>}
+            {selected.status === 'applied' && selected.undo?.status === 'available' && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); if (confirm('Undo every file applied by this proposal? Newer edits will be protected.')) void act(() => post(`/api/proposals/${selected.id}/undo`), 'Documentation changes undone') }}>Undo</button>}
+            {!selected.archivedAt && selected.status !== 'generating' && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); if (confirm('Archive this proposal? It can remain in history until cleanup.')) void act(() => post(`/api/proposals/${selected.id}/archive`), 'Proposal archived') }}>Archive</button>}
+            {delivery && !delivery.pushedAt && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selected.id}/delivery/publish`, { createPullRequest: false }), 'Branch published'); if (result) setDelivery(result) })() }}>Push branch</button>}
+            {delivery && !delivery.pushedAt && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void (async () => { const result = await act(() => post<typeof delivery>(`/api/proposals/${selected.id}/delivery/publish`, { createPullRequest: true }), 'Pull request created'); if (result) setDelivery(result) })() }}>Push &amp; create PR</button>}
+            {delivery?.pullRequestUrl && <a role="menuitem" href={delivery.pullRequestUrl} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>Open pull request</a>}
+            {delivery?.pushedAt && !delivery.pullRequestUrl && delivery.compareUrl && <a role="menuitem" href={delivery.compareUrl} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>Open comparison</a>}
+          </div>}
+        </div>
+        {open && <Button icon="publish" onClick={() => void (async () => { const result = await act(() => post<{ branch: string; commit: string; compareUrl?: string; pullRequestCommand?: string }>(`/api/proposals/${selected.id}/delivery/branch`, {}), 'Pull-request branch prepared'); if (result) setDelivery(result) })()}>Prepare PR branch</Button>}
+        {/* An applied proposal has nothing left to apply; its useful action is undo. */}
+        {selected.status === 'applied'
+          ? selected.undo?.status === 'available'
+            ? <Button icon="undo" onClick={() => { if (confirm('Undo every file applied by this proposal? Newer edits will be protected.')) void act(() => post(`/api/proposals/${selected.id}/undo`), 'Documentation changes undone') }}>Undo apply</Button>
+            : <Badge tone="good">Applied</Badge>
+          : <Button tone="primary" icon="check" disabled={!open} onClick={() => setConfirmingAcceptance(selected)}>Apply changes</Button>}
+      </>} />
+      : <PageHeader kicker="Review" title="Review" actions={runs.length > 0 ? <><Button onClick={() => setShowArchived(!showArchived)}>{showArchived ? 'Back to proposals' : `Archived (${archivedCount})`}</Button>{showArchived && archivedCount > 0 && <Button tone="danger" onClick={() => confirm('Permanently remove every archived proposal workspace?') && void act(() => post('/api/proposals/cleanup', {}), 'Archived proposals cleaned up')}>Clean up archived</Button>}</> : undefined} />}
     {runs.length === 0
-      ? <Panel flush><Empty icon="proposals" title="No proposals yet" detail="Run source monitoring, or start an update when documentation becomes stale." /></Panel>
+      ? <Panel flush><Empty icon="review" title="No changes waiting for review" detail="When the agent finishes writing, the proposal appears here." /></Panel>
       : !selected
-        ? <Panel class="proposal-index-panel" title={showArchived ? 'Archived proposals' : 'All proposals'} description={visibleRuns.length + ' documentation update' + (visibleRuns.length === 1 ? '' : 's') + (showArchived ? ' retained for audit.' : ' available for review.')} flush>
-          <div class="proposal-index-tools"><Button size="sm" onClick={() => setShowArchived(!showArchived)}>{showArchived ? 'Back to proposals' : `Archived (${archivedCount})`}</Button>{showArchived && archivedCount > 0 && <Button size="sm" tone="danger" onClick={() => confirm('Permanently remove every archived proposal workspace?') && void act(() => post('/api/proposals/cleanup', {}), 'Archived proposals cleaned up')}>Clean up archived</Button>}</div>
-          {visibleRuns.length === 0 ? <Empty title={showArchived ? 'No archived proposals' : 'No active proposals'} detail={showArchived ? 'Archived proposal workspaces will appear here until cleanup.' : 'Archive completed reviews to keep this list focused.'} /> :
-          <Table class="proposal-index-table" head={<><th>Proposal</th><th>Changes</th><th>Files</th><th>Created</th><th>Status</th><th><span class="sr-only">Open</span></th></>}>
+        ? <Panel class="proposal-index-panel" flush>
+          {visibleRuns.length === 0 ? <Empty icon="review" title={showArchived ? 'No archived proposals' : 'No changes waiting for review'} detail={showArchived ? 'Archived proposal workspaces appear here until cleanup.' : 'When the agent finishes writing, the proposal appears here.'} /> :
+          <div class="proposal-index-list">
             {visibleRuns.map((run) => {
               const runCounts = proposalChangeCounts(run.changes)
-              return <tr key={run.id} class="proposal-index-row" tabIndex={0} onClick={() => setSelectedId(run.id)} onKeyDown={(event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return
-                event.preventDefault()
-                setSelectedId(run.id)
-              }}>
-                <td><span class="proposal-index-name"><span><Icon name="proposals" size={17} /></span><span><strong>{run.summary || 'Documentation update'}</strong><small>{run.sourceSummary}</small></span></span></td>
-                <td><span class="proposal-index-counts"><b class="added">+{runCounts.added}</b><b class="modified">{runCounts.modified} modified</b><b class="deleted">−{runCounts.deleted}</b></span></td>
-                <td><span class="proposal-index-files"><Icon name="file" size={14} />{run.changes.length}</span></td>
-                <td><time>{timeText(run.createdAt)}</time></td>
-                <td><Badge tone={statusTone(run.archivedAt ? 'archived' : run.status)}>{run.archivedAt ? 'Archived' : statusLabel(run.status)}</Badge></td>
-                <td><Icon name="chevronRight" size={15} /></td>
-              </tr>
+              // A page edit is reviewed beside the page it changed, so its row
+              // names that page and the request and opens the Docs review panel.
+              const edit = run.editRequest
+              if (edit) {
+                const pages = edit.paths.length === 1 ? edit.paths[0]! : `${edit.paths.length} pages`
+                return <button type="button" key={run.id} class="proposal-index-row" onClick={() => setLocation('pages', { run: run.id }, 'push')}>
+                  <span class="proposal-index-copy"><strong>Page edit · {pages}</strong><small>{timeText(run.createdAt)} · {latestPageEditInstruction(run)}</small></span>
+                  <Badge tone={statusTone(run.archivedAt ? 'archived' : run.status)}>{run.archivedAt ? 'Archived' : statusLabel(run.status)}</Badge>
+                  <Icon name="chevronRight" size={15} />
+                </button>
+              }
+              return <button type="button" key={run.id} class="proposal-index-row" onClick={() => setSelectedId(run.id)}>
+                <span class="proposal-index-copy"><strong>{proposalRowTitle(run)}</strong><small>{[timeText(run.createdAt), `${run.changes.length} file${run.changes.length === 1 ? '' : 's'}: ${runCounts.added} added, ${runCounts.modified} changed${runCounts.deleted ? `, ${runCounts.deleted} removed` : ''}`, run.validation ? (run.validation.errors ? `${run.validation.errors} validation error${run.validation.errors === 1 ? '' : 's'}` : 'validates') : ''].filter(Boolean).join(' · ')}</small></span>
+                <Badge tone={statusTone(run.archivedAt ? 'archived' : run.status)}>{run.archivedAt ? 'Archived' : statusLabel(run.status)}</Badge>
+                <Icon name="chevronRight" size={15} />
+              </button>
             })}
-          </Table>
-          }
+          </div>}
         </Panel>
         : <div class="review">
-        <section class="review-main">
-          <div class="proposal-card">
-            <header class="proposal-summary">
-              <span class="proposal-summary-icon"><Icon name="proposals" size={25} /></span>
-              <div class="proposal-summary-copy">
-                <div class="proposal-summary-line">
-                  <h2>{selected.changes.length} file change{selected.changes.length === 1 ? '' : 's'}</h2>
-                  <div class="change-counts" aria-label={`${counts.added} added, ${counts.modified} modified, ${counts.deleted} deleted`}>
-                    {counts.added > 0 && <span class="added"><i />{counts.added} added</span>}
-                    {counts.added > 0 && (counts.modified > 0 || counts.deleted > 0) && <b />}
-                    {counts.modified > 0 && <span class="modified"><i />{counts.modified} modified</span>}
-                    {counts.modified > 0 && counts.deleted > 0 && <b />}
-                    {counts.deleted > 0 && <span class="deleted"><i />{counts.deleted} deleted</span>}
-                  </div>
-                </div>
-                <strong class="source-count">{selected.sourceSummary}</strong>
-                <small>{decisions.accepted} accepted · {decisions.rejected} rejected · {decisions.remaining} remaining</small>
-              </div>
-              <div class="proposal-summary-side">
-                <div class="proposal-actions">
-                  {selected.status === 'applied' && selected.undo?.status === 'available' && <Button onClick={() => confirm('Undo every file applied by this proposal? Newer edits will be protected.') && void act(() => post(`/api/proposals/${selected.id}/undo`), 'Documentation changes undone')}>Undo</Button>}
-                  {(open || (selected.status === 'stale' && !selected.archivedAt)) && <Button onClick={() => setRevision({ mode: 'all', instruction: 'Regenerate this proposal using the current approved plan and evidence.', selectedIds: selected.changes.map((item) => item.id), hunkIds: [] })}>Regenerate</Button>}
-                  <Button tone="danger" disabled={!open} onClick={() => confirm('Reject the remaining undecided changes? Already accepted changes stay applied.') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Remaining changes rejected')}>Reject remaining</Button>
-                  <Button tone="primary" icon="check" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
-                </div>
-              </div>
-            </header>
-
-            {open && <details class="text-editor"><summary>Review a folder</summary><div class="text-editor-body"><label>Folder<select value={folder} onChange={(event) => setFolder(event.currentTarget.value)}><option value="">Choose a folder</option>{[...new Set(selected.changes.flatMap((item) => { const parts = item.path.split('/'); return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/')) }))].sort().map((path) => <option>{path}</option>)}</select></label>{folder && <ul>{selected.changes.filter((item) => item.path.startsWith(`${folder}/`) && item.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)).map((item) => <li>{item.path}</li>)}</ul>}<label>Rejection reason<input value={folderReason} onInput={(event) => setFolderReason(event.currentTarget.value)} /></label><div class="text-editor-actions"><Button disabled={!folder} onClick={() => { const changes = selected.changes.filter((item) => item.path.startsWith(`${folder}/`)); if (changes.some((item) => item.changedDuringRun)) { onError('A file in this folder changed during generation. Review and accept it individually before accepting the folder.'); return } void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'folder', folder }), 'Folder changes accepted') }}>Accept pending changes in folder</Button><Button disabled={!folder || !folderReason.trim()} onClick={() => void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { scope: 'folder', folder, reason: folderReason }), 'Folder changes rejected')}>Reject pending changes in folder</Button></div></div></details>}
+        <section class="review-summary-bar" aria-label="Proposal summary">
+          <div class="review-summary-copy">
+            <strong>{linkedPlan ? `Generated from plan v${linkedPlan.version}` : selected.editRequest ? 'Page edit' : 'Documentation update'} · {selected.changes.length} file{selected.changes.length === 1 ? '' : 's'}{pageChangeCount > 0 ? ` · ${pageChangeCount} page${pageChangeCount === 1 ? '' : 's'}` : ''}{pageRemovedCount > 0 ? ` · ${pageRemovedCount} removed` : ''}{selected.screenshots && selected.screenshots.status !== 'not-requested' ? ` · ${selected.screenshots.captured} screenshot${selected.screenshots.captured === 1 ? '' : 's'}` : ''}</strong>
+            <small>{[selected.sourceSummary, timeText(selected.createdAt), selected.usage ? usageText(selected.usage) : ''].filter(Boolean).join(' · ')}</small>
+          </div>
+          <div class="review-summary-side">
+            {selected.validation && <Badge tone={selected.validation.errors > 0 ? 'bad' : selected.validation.warnings > 0 ? 'warn' : 'good'}>{selected.validation.errors > 0 ? `${selected.validation.errors} validation error${selected.validation.errors === 1 ? '' : 's'}` : selected.validation.warnings > 0 ? `${selected.validation.warnings} validation warning${selected.validation.warnings === 1 ? '' : 's'}` : 'Navigation valid'}</Badge>}
+            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <Badge tone={selected.screenshots.status === 'verified' ? 'good' : selected.screenshots.status === 'failed' ? 'bad' : 'neutral'}>{selected.screenshots.status === 'verified' ? `Screenshots verified ${selected.screenshots.captured} / ${selected.screenshots.planned}` : selected.screenshots.status === 'failed' ? 'Screenshots need attention' : selected.screenshots.status === 'skipped' ? 'Screenshots skipped' : 'Screenshots planned'}</Badge>}
+            <Badge tone={statusTone(selected.archivedAt ? 'archived' : selected.status)}>{selected.archivedAt ? 'Archived' : statusLabel(selected.status)}</Badge>
+            <Button size="sm" icon="external" onClick={() => void openProposalPreview(selected.id, onError)}>Preview docs</Button>
+            {logJob && <a class="btn ghost sm" href={`/api/jobs/${logJob.id}/log`} target="_blank" rel="noreferrer">Open log</a>}
+          </div>
+        </section>
+        <div class="review-notices">
             {selected.status === 'failed' && !selected.archivedAt && <div class="proposal-lifecycle-notice failed">
               <Icon name="alert" size={15} />
               <span class="proposal-failed-copy"><strong>This run stopped before it could be reviewed.</strong>{selected.error && <small>{selected.error}</small>}{(selected.recovery?.resumable !== false || selected.recovery?.ignorable !== false) && <small>Its workspace is preserved: continue it instead of generating again.</small>}</span>
@@ -3068,56 +3523,62 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
               <span>{selected.status === 'stale' ? selected.error : selected.status === 'superseded' ? `A newer revision${selected.supersededBy ? ` (${selected.supersededBy})` : ''} replaced this proposal.` : 'This proposal is archived.'}</span>
             </div>}
 
-            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <div class={`proposal-screenshot-result ${selected.screenshots.ignoredProblems ? 'ignored' : selected.screenshots.status === 'verified' && planGuides !== undefined && selected.screenshots.guides * 2 < planGuides ? 'thin' : selected.screenshots.status}`}><span class="screenshot-camera"><Icon name="camera" size={17} /></span><span><strong>{selected.screenshots.status === 'skipped' ? 'Application screenshots skipped' : selected.screenshots.status === 'failed' ? 'Application screenshot capture needs attention' : screenshotCoverageText(selected.screenshots, planGuides)}</strong><small>{selected.screenshots.ignoredProblems ? `${selected.screenshots.ignoredProblems} screenshot problem${selected.screenshots.ignoredProblems === 1 ? '' : 's'} to review. ` : ''}{selected.screenshots.message ?? (selected.screenshots.textOnly > 0 ? `${selected.screenshots.textOnly} step${selected.screenshots.textOnly === 1 ? '' : 's'} could not be captured and are described in text.` : planGuides !== undefined && selected.screenshots.guides < planGuides ? `The other ${planGuides - selected.screenshots.guides} guide${planGuides - selected.screenshots.guides === 1 ? ' is' : 's are'} text-only.` : '')}</small></span>{selected.screenshots.status === 'verified' && <Button size="sm" onClick={() => void openProposalPreview(selected.id, onError)}>Review in preview</Button>}</div>}
-            {selected.usage && <div class="proposal-usage"><Icon name="bot" size={15} /><span>Agent usage: {usageText(selected.usage)}</span></div>}
+            {selected.screenshots && selected.screenshots.status !== 'not-requested' && <div class={`proposal-screenshot-result ${selected.screenshots.ignoredProblems ? 'ignored' : selected.screenshots.status === 'verified' && planGuides !== undefined && selected.screenshots.guides * 2 < planGuides ? 'thin' : selected.screenshots.status}`}><span class="screenshot-camera"><Icon name="camera" size={17} /></span><span><strong>{selected.screenshots.status === 'skipped' ? 'Application screenshots skipped' : selected.screenshots.status === 'failed' ? 'Application screenshot capture needs attention' : screenshotCoverageText(selected.screenshots, planGuides)}</strong><small>{selected.screenshots.ignoredProblems ? `${selected.screenshots.ignoredProblems} screenshot problem${selected.screenshots.ignoredProblems === 1 ? '' : 's'} to review. ` : ''}{selected.screenshots.message ? <ScreenshotMessage message={selected.screenshots.message} /> : (selected.screenshots.textOnly > 0 ? `${selected.screenshots.textOnly} step${selected.screenshots.textOnly === 1 ? '' : 's'} could not be captured and are described in text.` : planGuides !== undefined && selected.screenshots.guides < planGuides ? `The other ${planGuides - selected.screenshots.guides} guide${planGuides - selected.screenshots.guides === 1 ? ' is' : 's are'} text-only.` : '')}</small></span>{selected.screenshots.status === 'verified' && <Button size="sm" onClick={() => void openProposalPreview(selected.id, onError)}>Review in preview</Button>}</div>}
+        </div>
 
-            <div class="review-workspace">
-              <section class="review-diff-panel">
-                {change ? <>
-                  <header class="review-file-head">
-                    <div class="review-file-head-main">
-                      <ReviewFilePicker
-                        key={selected.id}
-                        changes={selected.changes}
-                        selected={change}
-                        onSelect={setChangeId}
-                      />
-                    </div>
-                    <span class="file-position">{Math.max(0, selected.changes.findIndex((item) => item.id === change.id)) + 1} of {selected.changes.length}</span>
-                  </header>
-                  {change.changedDuringRun && <div class="proposal-lifecycle-notice concurrent" role="note">
-                    <Icon name="alert" size={15} />
-                    <span><strong>This file was edited in the project while the agent ran.</strong> The comparison shows the proposal against your edited version; accepting replaces that edit and asks first.</span>
-                  </div>}
-                  <div class="review-toolbar">
-                    <div class="review-view-control">
-                      <span class="toolbar-label">View</span>
-                      <Segmented value={view} onChange={setView} items={[['rendered', 'Preview'], ['source', 'Source']] as const} />
-                    </div>
-                    <div class="row-actions">
-                      {view === 'rendered' && <>
-                        <div class="review-layout-control"><span class="toolbar-label">Diff layout</span><Segmented value={layout} onChange={setLayout} items={[['split', 'Side-by-side'], ['unified', 'Inline']] as const} /></div>
-                        <Button size="sm" class={onlyChanges ? 'active-filter' : ''} onClick={() => setOnlyChanges(!onlyChanges)}>{onlyChanges ? 'Changes only' : 'Show all'}</Button>
-                      </>}
-                      <Button size="sm" onClick={() => setRationaleChange(change)}>Why this change</Button>
-                      {selected.status === 'applied' && change.category === 'page' && change.kind !== 'deleted' && <Button size="sm" onClick={() => setLocation('pages', { path: change.path }, 'push')}>Edit this page</Button>}
-                      <Button size="sm" disabled={!open} onClick={() => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [] })}>Ask agent to revise</Button>
-                      <Button size="sm" tone="danger" disabled={!open || !change.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)} onClick={() => { const reason = prompt('Why reject the remaining changes in this file? (optional)', ''); if (reason !== null) void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { changeId: change.id, reason }), 'File changes rejected') }}>Reject file</Button>
-                      <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => confirmOverwrite(change) && void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id, ...(change.changedDuringRun ? { confirmChangedDuringRun: true } : {}) }), 'Page accepted')}>Accept file</Button>
-                    </div>
-                  </div>
-                  <Comments key={`comments:${selected.id}:${change.id}`} path={change.path} proposal={{ id: selected.id, change }} onRequest={async (text, hunkId) => { if (!open) throw new Error('This proposal is closed. Comment on the live page to request a new update.'); await act(() => post(`/api/proposals/${selected.id}/revise`, { instruction: `Address this reviewer comment: ${text}`, changeIds: [change.id], hunkIds: hunkId ? [hunkId] : [] }), 'Comment revision started') }} />
-                  {open && change.category === 'page' && !change.binary && change.kind !== 'deleted' && change.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${selected.id}:${change.id}`} root={state.root ?? state.cwd} path={change.path} proposal={{ id: selected.id, changeId: change.id }} onChanged={async () => { await act(async () => true) }} />}
-                  <div class="review-diff-body">
-                    {view === 'source'
-                      ? <ProposalSourceDiff runId={selected.id} change={change} act={act} partialActions={open} beforeAccept={() => confirmOverwrite(change)} onReviseHunk={(hunkId) => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [hunkId] })} />
-                      : <ProposalRenderedDiff key={`${selected.id}:${change.afterHash}`} runId={selected.id} change={change} layout={layout} onlyChanges={onlyChanges} />}
-                  </div>
-                </> : <Empty title="This proposal contains no file changes" />}
-              </section>
+        <div class="review-workspace">
+          <aside class="review-files" aria-label="Files in this proposal">
+            <div class="review-files-card">
+              <div class="review-files-head"><strong>{selected.changes.length} file{selected.changes.length === 1 ? '' : 's'}</strong><small>{decisions.accepted} accepted · {decisions.remaining} pending{decisions.rejected > 0 ? ` · ${decisions.rejected} rejected` : ''}</small></div>
+              <div class="progress good" role="progressbar" aria-label="Accepted files" aria-valuemin={0} aria-valuemax={100} aria-valuenow={acceptedShare}><i style={{ width: `${acceptedShare}%` }} /></div>
+              <div class="review-files-actions">
+                <Button size="sm" disabled={!open} onClick={() => selected && setConfirmingAcceptance(selected)}>Accept all</Button>
+                <Button size="sm" tone="ghost" disabled={!open} onClick={() => confirm('Reject the remaining undecided changes? Already accepted changes stay applied.') && void act(() => post(`/api/proposals/${selected.id}/reject`), 'Remaining changes rejected')}>Reject remaining</Button>
+              </div>
             </div>
-          </div>
-        </section>
+            {change && <ReviewFilePicker key={selected.id} changes={selected.changes} selected={change} onSelect={setChangeId} />}
+            {open && <details class="text-editor review-folder-tools"><summary>Review a folder</summary><div class="text-editor-body"><label>Folder<select value={folder} onChange={(event) => setFolder(event.currentTarget.value)}><option value="">Choose a folder</option>{[...new Set(selected.changes.flatMap((item) => { const parts = item.path.split('/'); return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/')) }))].sort().map((path) => <option>{path}</option>)}</select></label>{folder && <ul>{selected.changes.filter((item) => item.path.startsWith(`${folder}/`) && item.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)).map((item) => <li>{item.path}</li>)}</ul>}<label>Rejection reason<input value={folderReason} onInput={(event) => setFolderReason(event.currentTarget.value)} /></label><div class="text-editor-actions"><Button disabled={!folder} onClick={() => { const changes = selected.changes.filter((item) => item.path.startsWith(`${folder}/`)); if (changes.some((item) => item.changedDuringRun)) { onError('A file in this folder changed during generation. Review and accept it individually before accepting the folder.'); return } void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'folder', folder }), 'Folder changes accepted') }}>Accept pending changes in folder</Button><Button disabled={!folder || !folderReason.trim()} onClick={() => void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { scope: 'folder', folder, reason: folderReason }), 'Folder changes rejected')}>Reject pending changes in folder</Button></div></div></details>}
+          </aside>
+
+          <section class="review-diff-panel">
+            {change ? <>
+              <header class="review-file-head">
+                <div class="review-file-head-main">
+                  <div class="review-file-title"><code>{change.path}</code><span class={`badge no-dot ${change.kind === 'added' ? 'good' : change.kind === 'deleted' ? 'bad' : 'warn'}`}>{change.kind === 'added' ? 'Added' : change.kind === 'deleted' ? 'Deleted' : 'Modified'}</span>{change.changedDuringRun && <span class="badge warn">Edited while the agent ran</span>}</div>
+                  <small>{change.hunks.length} change{change.hunks.length === 1 ? '' : 's'} · {change.category}{change.title && change.title !== change.path ? ` · ${change.title}` : ''} · {Math.max(0, selected.changes.findIndex((item) => item.id === change.id)) + 1} of {selected.changes.length}</small>
+                </div>
+                <div class="review-file-head-actions">
+                  <Segmented value={diffMode} onChange={setDiffMode} items={[['rendered', 'Rendered'], ['split', 'Side-by-side'], ['source', 'Source']] as const} />
+                  <Button size="sm" tone="danger" disabled={!open || !change.hunks.some((hunk) => !hunk.acceptedAt && !hunk.rejectedAt)} onClick={() => { const reason = prompt('Why reject the remaining changes in this file? (optional)', ''); if (reason !== null) void act(() => post(`/api/proposals/${selected.id}/reject-changes`, { changeId: change.id, reason }), 'File changes rejected') }}>Reject file</Button>
+                  <Button size="sm" tone="primary" icon="check" disabled={!open} onClick={() => confirmOverwrite(change) && void act(() => post(`/api/proposals/${selected.id}/accept`, { scope: 'page', changeId: change.id, ...(change.changedDuringRun ? { confirmChangedDuringRun: true } : {}) }), 'Page accepted')}>Accept file</Button>
+                </div>
+              </header>
+              <div class="review-file-tools">
+                {view === 'rendered' && <button type="button" class="chip" aria-pressed={onlyChanges} onClick={() => setOnlyChanges(!onlyChanges)}>Changes only</button>}
+                <Button size="sm" tone="ghost" icon="info" onClick={() => setRationaleChange(change)}>Why this change</Button>
+                {selected.status === 'applied' && change.category === 'page' && change.kind !== 'deleted' && <Button size="sm" tone="ghost" icon="update" onClick={() => setLocation('pages', { path: change.path }, 'push')}>Edit this page</Button>}
+              </div>
+              {change.changedDuringRun && <div class="proposal-lifecycle-notice concurrent" role="note">
+                <Icon name="alert" size={15} />
+                <span><strong>This file was edited in the project while the agent ran.</strong> The comparison shows the proposal against your edited version; accepting replaces that edit and asks first.</span>
+              </div>}
+              <div class="review-diff-body">
+                {view === 'source'
+                  ? <ProposalSourceDiff runId={selected.id} change={change} act={act} partialActions={open} beforeAccept={() => confirmOverwrite(change)} onReviseHunk={(hunkId) => setRevision({ mode: 'current', instruction: '', selectedIds: [change.id], hunkIds: [hunkId] })} />
+                  : <ProposalRenderedDiff key={`${selected.id}:${change.afterHash}`} runId={selected.id} change={change} layout={layout} onlyChanges={onlyChanges} />}
+              </div>
+              <div class="review-file-extras">
+                <Comments key={`comments:${selected.id}:${change.id}`} path={change.path} proposal={{ id: selected.id, change }} onRequest={async (text, hunkId) => { if (!open) throw new Error('This proposal is closed. Comment on the live page to request a new update.'); await act(() => post(`/api/proposals/${selected.id}/revise`, { instruction: `Address this reviewer comment: ${text}`, changeIds: [change.id], hunkIds: hunkId ? [hunkId] : [] }), 'Comment revision started') }} />
+                {open && change.category === 'page' && !change.binary && change.kind !== 'deleted' && change.hunks.every((hunk) => !hunk.acceptedAt && !hunk.rejectedAt) && <TextEditor key={`${selected.id}:${change.id}`} root={state.root ?? state.cwd} path={change.path} proposal={{ id: selected.id, changeId: change.id }} onChanged={async () => { await act(async () => true) }} />}
+              </div>
+              <footer class="review-revise-bar">
+                <div class="review-revise-input"><Icon name="sparkles" size={16} /><input class="input" type="text" aria-label="Ask the agent to revise" placeholder={open ? 'Ask the agent to revise this file…' : 'This proposal is closed'} value={reviseDraft} disabled={!open} onInput={(event) => setReviseDraft(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void sendRevision() } }} /></div>
+                <label class="review-revise-scope"><span class="sr-only">Revision scope</span><select class="chip" value={reviseScope} disabled={!open} onChange={(event) => setReviseScope(event.currentTarget.value as 'current' | 'all' | 'selected')}><option value="current">This file</option><option value="all">Whole proposal</option><option value="selected">Choose files</option></select><Icon name="chevronDown" size={13} /></label>
+                <Button disabled={!open || !reviseDraft.trim()} onClick={() => void sendRevision()}>Send</Button>
+              </footer>
+            </> : <Empty title="This proposal contains no file changes" />}
+          </section>
+        </div>
       </div>}
   </>
 }
@@ -3152,21 +3613,15 @@ function ProposalRevisionDialog({ proposal, current, draft, onChange, onClose, o
   </div>
 }
 
-type ReviewTreeNode = {
-  name: string
-  path: string
-  children: ReviewTreeNode[]
-  change?: ProposalChange
-}
-
+/**
+ * The changed files, always visible beside the diff: one row per file with the
+ * change kind as a letter, grouped by what the reviewer cares about first.
+ */
 function ReviewFilePicker({ changes, selected, onSelect }: {
   changes: ProposalChange[]
   selected: ProposalChange
   onSelect: (id: string) => void
 }) {
-  const root = useRef<HTMLDivElement>(null)
-  const searchInput = useRef<HTMLInputElement>(null)
-  const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const groups = reviewFileGroups(changes)
   // Supporting files stay folded unless the reviewer asks for them or the
@@ -3174,145 +3629,48 @@ function ReviewFilePicker({ changes, selected, onSelect }: {
   const [showSupporting, setShowSupporting] = useState(false)
   const supportingVisible = showSupporting || groups.supporting.some((item) => item.id === selected.id) || (groups.documentation.length === 0 && groups.concurrent.length === 0)
   const sections = [
-    { id: 'concurrent', label: 'Changed while the agent ran', hint: 'Applying these replaces your edits', changes: groups.concurrent, tone: 'warn' },
-    { id: 'documentation', label: 'Documentation', hint: 'Pages, navigation, and assets', changes: groups.documentation, tone: '' },
-    ...(supportingVisible ? [{ id: 'supporting', label: 'Supporting files', hint: 'Evidence, configuration, and skills', changes: groups.supporting, tone: '' }] : []),
+    { id: 'concurrent', label: 'Changed while the agent ran', changes: groups.concurrent, tone: 'warn' },
+    { id: 'documentation', label: 'Pages, navigation, and assets', changes: groups.documentation, tone: '' },
+    ...(supportingVisible ? [{ id: 'supporting', label: 'Evidence, configuration, and skills', changes: groups.supporting, tone: '' }] : []),
   ].filter((section) => section.changes.length > 0)
-  const filteredSections = sections.map((section) => ({ ...section, nodes: filterReviewFileTree(proposalFileTree(section.changes), query) })).filter((section) => section.nodes.length > 0)
-  const matchingFiles = filteredSections.reduce((count, section) => count + countReviewTreeFiles(section.nodes), 0)
-  const selectedName = selected.path.split('/').filter(Boolean).pop() ?? selected.path
-
-  useEffect(() => {
-    if (!open) return
-    searchInput.current?.focus()
-    const closeOnOutsidePress = (event: PointerEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false)
-    }
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setOpen(false)
-      root.current?.querySelector<HTMLButtonElement>('.review-file-picker-trigger')?.focus()
-    }
-    document.addEventListener('pointerdown', closeOnOutsidePress)
-    document.addEventListener('keydown', closeOnEscape)
-    return () => {
-      document.removeEventListener('pointerdown', closeOnOutsidePress)
-      document.removeEventListener('keydown', closeOnEscape)
-    }
-  }, [open])
-
-  const selectFile = (id: string) => {
-    onSelect(id)
-    setOpen(false)
-    setQuery('')
+  const needle = query.trim().toLocaleLowerCase()
+  const byPath = (left: ProposalChange, right: ProposalChange) => left.path.localeCompare(right.path)
+  const filteredSections = sections
+    .map((section) => ({ ...section, changes: [...section.changes].filter((item) => !needle || item.path.toLocaleLowerCase().includes(needle)).sort(byPath) }))
+    .filter((section) => section.changes.length > 0)
+  const matchingFiles = filteredSections.reduce((count, section) => count + section.changes.length, 0)
+  const decision = (item: ProposalChange): 'accepted' | 'rejected' | 'partial' | 'pending' => {
+    if (item.hunks.length === 0) return 'pending'
+    if (item.hunks.every((hunk) => hunk.acceptedAt)) return 'accepted'
+    if (item.hunks.every((hunk) => hunk.rejectedAt)) return 'rejected'
+    return item.hunks.some((hunk) => hunk.acceptedAt || hunk.rejectedAt) ? 'partial' : 'pending'
   }
 
-  return <div class="review-file-picker" ref={root}>
-    <button
-      type="button"
-      class={`review-file-picker-trigger ${open ? 'open' : ''}`}
-      aria-haspopup="dialog"
-      aria-expanded={open}
-      aria-controls="review-file-picker-menu"
-      onClick={() => setOpen(!open)}
-    >
-      <Icon name="file" size={15} />
-      <strong class="review-file-picker-name">{selectedName}</strong>
-      <span class={`review-file-picker-status ${selected.kind}`}>{selected.kind}</span>
-      {selected.changedDuringRun && <span class="review-file-picker-status concurrent" title="Edited in the project while the agent ran">edited</span>}
-      <Icon name="chevronRight" size={13} />
-    </button>
-
-    {open && <div id="review-file-picker-menu" class="review-file-picker-menu" role="dialog" aria-label="Changed files">
-      <header>
-        <span><strong>Changed files</strong><small>{changes.length} file{changes.length === 1 ? '' : 's'} in this proposal</small></span>
-        <button type="button" aria-label="Close changed files" onClick={() => setOpen(false)}><Icon name="close" size={14} /></button>
-      </header>
-      <label class="review-file-search">
-        <span class="sr-only">Search changed files</span>
-        <Icon name="search" size={15} />
-        <input
-          class="input"
-          ref={searchInput}
-          type="search"
-          value={query}
-          placeholder="Search files or folders…"
-          onInput={(event) => setQuery(event.currentTarget.value)}
-        />
-      </label>
-      <div class="review-file-picker-tree">
-        {matchingFiles > 0
-          ? filteredSections.map((section) => <section key={section.id} class={`review-file-group ${section.tone}`} aria-label={section.label}>
-            <header><strong>{section.label}</strong><small>{section.hint}</small></header>
-            <ReviewFileTree nodes={section.nodes} selectedId={selected.id} onSelect={selectFile} />
-          </section>)
-          : <div class="review-file-search-empty"><Icon name="search" size={18} /><strong>No matching files</strong><small>Try a filename or folder path.</small></div>}
-        {groups.supporting.length > 0 && !query.trim() && <button type="button" class="review-file-group-toggle" aria-expanded={supportingVisible} onClick={() => setShowSupporting(!supportingVisible)}>
-          <Icon name="chevronRight" size={12} />{supportingVisible ? 'Hide' : 'Show'} {groups.supporting.length} supporting file{groups.supporting.length === 1 ? '' : 's'}
-        </button>}
-      </div>
-      {query.trim() && <footer>{matchingFiles} matching file{matchingFiles === 1 ? '' : 's'}</footer>}
-    </div>}
-  </div>
-}
-
-function proposalFileTree(changes: ProposalChange[]): ReviewTreeNode[] {
-  const root: ReviewTreeNode[] = []
-  for (const change of changes) {
-    const parts = change.path.split('/').filter(Boolean)
-    let level = root
-    let currentPath = ''
-    parts.forEach((part, index) => {
-      currentPath = currentPath ? currentPath + '/' + part : part
-      const isFile = index === parts.length - 1
-      let node = level.find((item) => item.name === part && Boolean(item.change) === isFile)
-      if (!node) {
-        node = { name: part, path: currentPath, children: [], ...(isFile ? { change } : {}) }
-        level.push(node)
-      }
-      level = node.children
-    })
-  }
-  const sort = (nodes: ReviewTreeNode[]): ReviewTreeNode[] => nodes
-    .sort((left, right) => Number(Boolean(left.change)) - Number(Boolean(right.change)) || left.name.localeCompare(right.name))
-    .map((node) => ({ ...node, children: sort(node.children) }))
-  return sort(root)
-}
-
-function filterReviewFileTree(nodes: ReviewTreeNode[], rawQuery: string): ReviewTreeNode[] {
-  const query = rawQuery.trim().toLocaleLowerCase()
-  if (!query) return nodes
-  return nodes.flatMap((node): ReviewTreeNode[] => {
-    const matches = node.path.toLocaleLowerCase().includes(query)
-    if (node.change) return matches ? [node] : []
-    if (matches) return [node]
-    const children = filterReviewFileTree(node.children, query)
-    return children.length > 0 ? [{ ...node, children }] : []
-  })
-}
-
-function countReviewTreeFiles(nodes: ReviewTreeNode[]): number {
-  return nodes.reduce((count, node) => count + (node.change ? 1 : countReviewTreeFiles(node.children)), 0)
-}
-
-function ReviewFileTree({ nodes, selectedId, onSelect, depth = 0 }: {
-  nodes: ReviewTreeNode[]
-  selectedId: string
-  onSelect: (id: string) => void
-  depth?: number
-}) {
-  return <div class={depth === 0 ? 'review-file-tree' : 'review-tree-children'}>
-    {nodes.map((node) => node.change
-      ? <button type="button" key={node.path} class={'review-tree-file ' + (selectedId === node.change?.id ? 'active' : '')} style={'--tree-depth:' + depth} aria-current={selectedId === node.change.id ? 'true' : undefined} title={node.path} onClick={() => onSelect(node.change!.id)}>
-        <span class="review-file-icon"><Icon name="file" size={14} /></span>
-        <span class="review-file-copy"><strong>{node.name}</strong></span>
-        <Badge tone={statusTone(node.change.kind)}>{node.change.kind}</Badge>
-      </button>
-      : <details key={node.path} class="review-tree-folder" open>
-        <summary style={'--tree-depth:' + depth}><Icon name="chevronRight" size={12} /><Icon name="folder" size={15} /><strong>{node.name}</strong></summary>
-        <ReviewFileTree nodes={node.children} selectedId={selectedId} onSelect={onSelect} depth={depth + 1} />
-      </details>)}
-  </div>
+  return <nav class="review-file-list" aria-label="Changed files">
+    {changes.length > 8 && <label class="review-file-search">
+      <span class="sr-only">Search changed files</span>
+      <Icon name="search" size={15} />
+      <input class="input" type="search" value={query} placeholder="Filter files…" onInput={(event) => setQuery(event.currentTarget.value)} />
+    </label>}
+    {matchingFiles > 0
+      ? filteredSections.map((section) => <section key={section.id} class={`review-file-group ${section.tone}`} aria-label={section.label}>
+        <header><span class="kicker">{section.label}</span><small>{section.changes.length}</small></header>
+        {section.changes.map((item) => {
+          const state = decision(item)
+          return <button type="button" key={item.id} class={`review-file-row ${selected.id === item.id ? 'active' : ''} ${state}`} aria-current={selected.id === item.id ? 'true' : undefined} title={item.path} onClick={() => onSelect(item.id)}>
+            <b class={`review-file-kind ${item.kind}`} aria-hidden="true">{item.kind === 'added' ? 'A' : item.kind === 'deleted' ? 'D' : 'M'}</b>
+            <span class="review-file-path">{item.path}</span>
+            {state === 'accepted' && <Icon name="check" size={13} />}
+            {state === 'rejected' && <Icon name="close" size={13} />}
+            {state === 'partial' && <i class="review-file-partial" title="Partly decided" />}
+          </button>
+        })}
+      </section>)
+      : <div class="review-file-search-empty"><strong>No matching files</strong><small>Try a filename or folder path.</small></div>}
+    {groups.supporting.length > 0 && !needle && <button type="button" class="review-file-group-toggle" aria-expanded={supportingVisible} onClick={() => setShowSupporting(!supportingVisible)}>
+      <Icon name="chevronRight" size={12} />{supportingVisible ? 'Hide' : 'Show'} {groups.supporting.length} supporting file{groups.supporting.length === 1 ? '' : 's'}
+    </button>}
+  </nav>
 }
 
 function proposalChangeCounts(changes: ProposalChange[]): { added: number; modified: number; deleted: number } {
@@ -3384,15 +3742,18 @@ function deploySteps(job: UiJob, labels: string[]): { steps: DeployStep[]; perce
 }
 
 /** Live checklist, progress bar and log for the deployment that is running (or just finished). */
-function DeployProgress({ job, generator, act, streamConnected, onDismiss }: {
+function DeployProgress({ job, generator, act, streamConnected, onDismiss, siteUrl }: {
   job: UiJob
   generator: string | undefined
   act: Action
   streamConnected: boolean
   onDismiss?: (() => void) | undefined
+  /** The published site, offered once the deployment has finished. */
+  siteUrl?: string | undefined
 }) {
   const log = useRef<HTMLPreElement>(null)
-  const [logOpen, setLogOpen] = useState(true)
+  // A successful run folds its log away; anything still running or failed keeps it open.
+  const [logOpen, setLogOpen] = useState(job.status !== 'succeeded')
   const dryRun = job.type === 'deploy:dry-run'
   const exporting = job.type === 'export'
   const { steps, percent } = deploySteps(job, deployStepLabels(generator, dryRun, exporting))
@@ -3401,30 +3762,41 @@ function DeployProgress({ job, generator, act, streamConnected, onDismiss }: {
   useEffect(() => {
     if (log.current) log.current.scrollTop = log.current.scrollHeight
   }, [job.lines.length, logOpen])
+  const signInExpired = job.status === 'failed' && job.lines.some((line) => isSignInFailure(line))
   const headline = running
-    ? active?.label ?? (exporting ? 'Exporting static site' : dryRun ? 'Validating deployment' : 'Deploying documentation')
+    ? active?.label ?? (exporting ? 'Exporting static site' : dryRun ? 'Validating deployment' : 'Publishing to Doxbrix')
     : job.status === 'succeeded'
       ? exporting ? 'Static site exported' : dryRun ? 'Deployment is valid' : 'Documentation published'
-      : job.status === 'cancelled' ? exporting ? 'Export cancelled' : 'Deployment cancelled' : exporting ? 'Export failed' : 'Deployment failed'
-  return <section class={`deploy-progress ${job.status}`} aria-live="polite">
-    <header class="deploy-progress-head">
+      : job.status === 'cancelled' ? exporting ? 'Export cancelled' : 'Publish cancelled' : exporting ? 'Export failed' : 'Publish failed'
+  // A deploy started from the page header must be visible without hunting
+  // for it two screens down: bring a new run's panel into view once.
+  const panel = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (job.status === 'running') panel.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [job.id])
+  return <section ref={panel} class={`panel deploy-progress ${job.status}`} aria-live="polite">
+    {signInExpired && <Note tone="warn"><span>Doxbrix did not accept the saved sign-in, so nothing was uploaded. It may have expired, been revoked, or belong to a different Doxbrix server. Choose <strong>Sign in with browser</strong> above, then deploy again.</span></Note>}
+    <header class="panel-head deploy-progress-head">
       <span class={`deploy-progress-icon ${job.status}`}>
-        <Icon name={running ? 'publish' : job.status === 'succeeded' ? 'check' : 'alert'} size={19} />
+        <Icon name={running ? 'publish' : job.status === 'succeeded' ? 'check' : 'alert'} size={17} />
       </span>
-      <div class="deploy-progress-title">
-        <strong>{headline}</strong>
-        <small>{exporting ? 'Writing a self-hostable folder and zip on this computer.' : dryRun ? 'Validation only — nothing is uploaded.' : 'Publishing the validated static bundle to the selected target.'}</small>
+      <div class="panel-title deploy-progress-title">
+        <h2>{exporting ? 'Latest export' : dryRun ? 'Latest dry run' : 'Latest publish'}</h2>
+        <p><strong>{headline}</strong> · {running ? `started ${timeText(job.startedAt)}` : exporting ? 'Self-hostable folder and zip on this computer' : dryRun ? 'Validation only, nothing uploaded' : job.status !== 'succeeded' ? 'Nothing was changed on the live site' : siteUrl ? `Live at ${hostOf(siteUrl)}` : 'Published to Doxbrix'}</p>
       </div>
-      {running
-        ? <Badge tone={streamConnected ? 'good' : 'warn'} icon="broadcast">{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
-        : <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>}
-      {running && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Deployment stopped')}>Stop</Button>}
-      {!running && onDismiss && <Button size="sm" icon="close" onClick={onDismiss}>Dismiss</Button>}
+      <div class="panel-actions">
+        {running
+          ? <Badge tone={streamConnected ? 'info' : 'warn'}>{streamConnected ? 'In progress' : 'Reconnecting…'}</Badge>
+          : <Badge tone={statusTone(job.status)}>{job.status === 'succeeded' ? (exporting ? 'Exported' : dryRun ? 'Valid' : 'Live') : job.status === 'failed' ? 'Failed' : statusLabel(job.status)}</Badge>}
+        {!running && job.status === 'succeeded' && siteUrl && !exporting && !dryRun && <a class="btn secondary sm" href={siteUrl} target="_blank" rel="noreferrer"><Icon name="external" size={14} />View site</a>}
+        {running && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Deployment stopped')}>Stop</Button>}
+        {!running && onDismiss && <Button size="sm" tone="ghost" icon="close" onClick={onDismiss}>Dismiss</Button>}
+      </div>
     </header>
-    <div class="deploy-progress-bar">
-      <div class={`deploy-progress-track ${running ? 'running' : ''}`}><i style={{ width: `${percent}%` }} /></div>
+    {running && <div class="deploy-progress-bar">
+      <div class="deploy-progress-track running"><i style={{ width: `${percent}%` }} /></div>
       <span>{percent}%</span>
-    </div>
+    </div>}
     <ol class="deploy-progress-steps">
       {steps.map((step, index) => <li key={index} class={step.status}>
         <span class="deploy-step-mark">{step.status === 'done'
@@ -3448,27 +3820,73 @@ function DeployProgress({ job, generator, act, streamConnected, onDismiss }: {
   </section>
 }
 
+/** The pre-publish checklist: what Doxloop verified before anything is uploaded. */
+type PublishCheck = { state: 'ok' | 'warn' | 'bad'; title: string; detail: string; action?: { label: string; run: () => void } }
+
+function PublishChecklist({ checks }: { checks: PublishCheck[] }) {
+  return <ul class="publish-checklist" aria-label="Before publishing">
+    {checks.map((check) => <li key={check.title} class={check.state}>
+      <span class="publish-check-mark" aria-hidden="true"><Icon name={check.state === 'ok' ? 'check' : 'alert'} size={13} /></span>
+      <span class="publish-check-copy"><strong>{check.title}</strong><small>{check.detail}</small></span>
+      {check.action && <button type="button" class="btn link" onClick={check.action.run}>{check.action.label}</button>}
+    </li>)}
+  </ul>
+}
+
+/** Public or private, as radio rows. */
+function VisibilityRows({ value, onChange }: { value: 'public' | 'private'; onChange: (value: 'public' | 'private') => void }) {
+  return <div class="radio-rows publish-visibility" role="radiogroup" aria-label="Who can read it">
+    <button type="button" role="radio" aria-checked={value === 'public'} class={value === 'public' ? 'selected' : ''} onClick={() => onChange('public')}>
+      <Icon name="globe" size={17} /><span><strong>Public</strong><small>Anyone with the link can read it. Search engines can index it.</small></span>
+    </button>
+    <button type="button" role="radio" aria-checked={value === 'private'} class={value === 'private' ? 'selected' : ''} onClick={() => onChange('private')}>
+      <Icon name="lock" size={17} /><span><strong>Private</strong><small>Only people you invite in Doxbrix can open it.</small></span>
+    </button>
+  </div>
+}
+
+/** The device-code sign-in in progress: the code large, the fallback link, and when it expires. */
+function DoxbrixSigningIn({ job, onCancel }: { job: UiJob; onCancel: () => void }) {
+  const text = job.lines.join('\n')
+  const link = /Open (https?:\/\/\S+)/.exec(text)?.[1]
+  const code = /Enter code:\s*([A-Z0-9-]{4,})/.exec(text)?.[1]
+  const minutes = Number(/The code expires in (\d+) minute/.exec(text)?.[1])
+  const until = minutes && job.startedAt ? new Date(Date.parse(job.startedAt) + minutes * 60_000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
+  return <section class="publish-hero" role="status" aria-live="polite">
+    <div class="publish-hero-head">
+      <span class="publish-mark" aria-hidden="true"><Icon name="rocket" size={22} /></span>
+      <div>
+        <h2>Approve the sign-in in your browser</h2>
+        <p>Doxbrix opened in a new tab. Check that it shows this code, then choose <strong>Approve</strong>. This page continues by itself.</p>
+      </div>
+    </div>
+    <div class="publish-code">
+      <span class="kicker">Your code</span>
+      <code>{code ?? '…'}</code>
+      <span class="publish-code-wait"><span class="spinner" />Waiting for approval{until && <> · the code works until {until}</>}</span>
+    </div>
+    <div class="publish-hero-foot">
+      <span>{link ? <>Tab did not open? Go to <a href={link} target="_blank" rel="noreferrer">{link.replace(/^https?:\/\//, '')}</a></> : 'Starting the sign-in…'}</span>
+      <Button onClick={onCancel}>Cancel sign-in</Button>
+    </div>
+  </section>
+}
+
 function Publish({ state, act, streamConnected, onError }: { state: UiState; act: Action; streamConnected: boolean; onError: (error: string) => void }) {
   const effective = state.effectiveDeployment!
-  const [deployment, setDeployment, deploymentSync] = useSeededForm(() => effective, JSON.stringify(effective))
-  /** Visibility is asked once. An explicit saved choice means every later deploy runs straight away. */
+  // The UI publishes to Doxbrix only; other targets remain available from the CLI.
+  const [deployment, setDeployment, deploymentSync] = useSeededForm(() => ({ ...effective, target: 'doxbrix' as const }), JSON.stringify(effective))
   const chosenVisibility = state.project?.deployment?.visibility
-  const [dialog, setDialog] = useState<'first' | 'change' | null>(null)
-  const [choice, setChoice] = useState<'private' | 'public'>(deployment.visibility === 'public' ? 'public' : 'private')
+  const [visibilityDialog, setVisibilityDialog] = useState<'public' | 'private' | null>(null)
   const [starting, setStarting] = useState(false)
-  const [providerToken, setProviderToken] = useState('')
-  /** Set when a deploy is attempted while signed out, so the reason is explained in place. */
-  const [signInRequired, setSignInRequired] = useState(false)
+  const [editingSite, setEditingSite] = useState(false)
+  const [copied, setCopied] = useState(false)
   const account = state.account
   const signedIn = Boolean(account?.signedIn)
-  const target = deployment.target ?? 'doxbrix'
-  const targetLabel = target === 'github-pages' ? 'GitHub Pages' : target === 'netlify' ? 'Netlify' : target === 'vercel' ? 'Vercel' : 'Doxbrix'
-  const activeDeploy = state.jobs.find((job) => (job.type.startsWith('deploy') || job.type === 'export') && job.status === 'running')
+  const activeDeploy = state.jobs.find((job) => job.type.startsWith('deploy') && job.status === 'running')
   const busy = Boolean(activeDeploy || starting)
-  // A finished deployment keeps its checklist and log on screen until it is
-  // dismissed, so a failure can be read instead of vanishing with the job.
   const [dismissedDeployId, setDismissedDeployId] = useState<string>()
-  const shownDeploy = activeDeploy ?? recentSettledJob(state.jobs, (job) => job.type.startsWith('deploy') || job.type === 'export', dismissedDeployId)
+  const shownDeploy = activeDeploy ?? recentSettledJob(state.jobs, (job) => job.type.startsWith('deploy'), dismissedDeployId)
   const loginJob = state.jobs.find((job) => job.type === 'login')
   const [dismissedLoginId, setDismissedLoginId] = useState<string>()
   const signingIn = loginJob?.status === 'running' ? loginJob : undefined
@@ -3480,219 +3898,224 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
     state.jobs,
     onError,
   )
+  const requests = useHistoryFeed<HistoryRequest>('/api/history?limit=50', (payload) => (payload.requests as HistoryRequest[]) ?? [], state.jobs, onError)
   /**
    * Doxbrix hosts the reader site on a slug it provisions, so the live lookup is
    * the source of truth. Deployments recorded before Doxloop read `hostedUrl`
    * stored an editor link, which must never be offered as the deployed site.
    */
   const [siteUrl, setSiteUrl] = useState<string | null>(null)
-  const settledDeploys = state.jobs.filter((job) => (job.type.startsWith('deploy') || job.type === 'export') && job.status !== 'running').length
+  const settledDeploys = state.jobs.filter((job) => job.type.startsWith('deploy') && job.status !== 'running').length
   useEffect(() => {
-    if (!signedIn || target !== 'doxbrix') return
+    if (!signedIn) return
     let current = true
     void api<{ url: string | null }>('/api/deployment/site')
       .then((payload) => { if (current) setSiteUrl(payload.url) })
       .catch(() => undefined)
     return () => { current = false }
-  }, [signedIn, settledDeploys, target])
-  const recordedUrl = deployments.entries.find((entry) => entry.status === 'succeeded' && entry.url)?.url
+  }, [signedIn, settledDeploys])
+  const lastSuccess = deployments.entries.find((entry) => entry.status === 'succeeded' && entry.target === 'doxbrix')
+  const recordedUrl = lastSuccess?.url
   const publishedUrl = siteUrl ?? (recordedUrl && !recordedUrl.includes('/editor?project=') ? recordedUrl : undefined)
-
-  const start = async (visibility: 'private' | 'public', dryRun: boolean) => {
-    setStarting(true)
+  const published = Boolean(publishedUrl && lastSuccess)
+  const slugSuffix = (() => {
     try {
-      await act(
-        () => post('/api/deploy', { ...deployment, visibility, public: visibility === 'public', dryRun }),
-        dryRun ? 'Deployment validation started' : 'Deployment started',
-      )
-    } finally {
-      setStarting(false)
-    }
-  }
+      if (!publishedUrl || !deployment.slug) return '.sites.doxbrix.com'
+      const host = new URL(publishedUrl).hostname
+      return host.startsWith(`${deployment.slug}.`) ? host.slice(deployment.slug.length) : '.sites.doxbrix.com'
+    } catch { return '.sites.doxbrix.com' }
+  })()
+  // Doxbrix may prefix a new site's host with the team, so an unpublished address is only the name.
+  const address = publishedUrl ? hostOf(publishedUrl) : `${deployment.slug} · address confirmed on first publish`
+
+  // What Doxloop checks before it uploads.
+  const validation = validationState(state.validation)
+  const waiting = validRuns(state.runs).filter((run) => OPEN_STATUSES.includes(run.status) && !run.archivedAt)
+  const pageCount = validation.ok ? validation.result.pages.length : 0
+  const errors = validation.ok ? validation.result.issues.filter((issue) => issue.severity === 'error') : []
+  const checks: PublishCheck[] = [
+    ...(validation.ok
+      ? errors.length === 0
+        ? [{ state: 'ok' as const, title: `${pageCount} page${pageCount === 1 ? ' passes' : 's pass'} validation`, detail: 'Links, navigation, and page names are publish-safe' }]
+        : errors.slice(0, 3).map((issue) => ({ state: 'bad' as const, title: issue.code === 'duplicate-page-name' ? 'Two pages share a name' : `${issue.file ?? 'Documentation'} needs a fix`, detail: issue.message, action: { label: 'Open Docs', run: () => setLocation('pages', issue.file && /\.mdx?$/.test(issue.file) ? { path: issue.file } : {}, 'push') } }))
+      : [{ state: 'warn' as const, title: 'Validation has not finished', detail: validation.reason }]),
+    waiting.length === 0
+      ? { state: 'ok', title: 'Nothing waiting in Review', detail: 'Every accepted change is included' }
+      : { state: 'warn', title: `${waiting.length} proposal${waiting.length === 1 ? '' : 's'} waiting in Review`, detail: 'Publishing now leaves those changes out', action: { label: 'Review changes', run: () => setLocation('proposals', { proposal: waiting[0]!.id }, 'push') } },
+    // The address already belongs to a site this workspace never published (another project, or an older copy).
+    ...(siteUrl && !lastSuccess && !deployments.loading
+      ? [{ state: 'warn' as const, title: 'This address already has a Doxbrix site', detail: `${hostOf(siteUrl)} was published from another workspace. Publishing replaces it; change the address to keep both.`, action: { label: 'Change address', run: () => setEditingSite(true) } }]
+      : []),
+  ]
+  const blocked = errors.length > 0 || !validation.ok
+
+  // Accepted since the last successful publish: what the live site does not show yet.
+  const since = lastSuccess ? Date.parse(lastSuccess.startedAt) : undefined
+  const pending = since === undefined ? [] : requests.entries.filter((entry) =>
+    ['applied', 'completed', 'partially-applied'].includes(entry.status) && Date.parse(entry.finishedAt ?? entry.createdAt) > since && entry.pagesChanged > 0)
+  // Direct edits (the editor, glossary, branding) record a count without a page list; show the request itself.
+  const pendingPages = [...new Map(pending.flatMap((entry) => (entry.pages?.length
+    ? entry.pages.filter((page) => page.decision !== 'rejected').map((page) => [page.path, { path: page.path, title: page.title, changeKind: page.changeKind }] as const)
+    : [[`request:${entry.id}`, { path: historyActionLabel(entry.kind), title: historyInstruction(entry), changeKind: 'modified' as const }] as const]))).values()]
+
+  const signInExpired = shownDeploy?.status === 'failed' && shownDeploy.lines.some((line) => isSignInFailure(line))
+  const startSignIn = () => void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started')
   const saveVisibility = async (visibility: 'private' | 'public') => {
     const next = { ...deployment, visibility }
     setDeployment(next)
     return act(() => patch('/api/project', { deployment: next }), undefined)
   }
-  const deploy = async (dryRun: boolean) => {
-    if (busy) return
-    if (target === 'doxbrix' && !signedIn) {
-      setSignInRequired(true)
-      return
+  const publish = async () => {
+    if (busy || blocked || !signedIn) return
+    setStarting(true)
+    try {
+      const visibility = isPublic ? 'public' : 'private'
+      // The first publish records the choice made on this page; later ones use the saved one.
+      if (!chosenVisibility && (await saveVisibility(visibility)) === undefined) return
+      await act(() => post('/api/deploy', { ...deployment, target: 'doxbrix', visibility, public: visibility === 'public', dryRun: false }), 'Publishing to Doxbrix')
+    } finally {
+      setStarting(false)
     }
-    setSignInRequired(false)
-    if (target === 'doxbrix' && !dryRun && !chosenVisibility) {
-      setChoice(isPublic ? 'public' : 'private')
-      setDialog('first')
-      return
-    }
-    await start(isPublic ? 'public' : 'private', dryRun)
   }
-  const saveDeployment = () => act(() => patch('/api/project', { deployment }), 'Deployment settings saved')
-  const exportSite = () => act(() => post('/api/export', { basePath: deployment.basePath }), 'Static export started')
-  const saveProviderToken = async () => {
-    if (target !== 'netlify' && target !== 'vercel') return
-    const result = await act(() => post('/api/deployment/credentials', { target, token: providerToken }), `${targetLabel} token saved outside the project`)
-    if (result !== undefined) setProviderToken('')
+  const saveSite = async () => {
+    const result = await act(() => patch('/api/project', { deployment: { ...deployment, target: 'doxbrix' } }), 'Site settings saved')
+    if (result !== undefined) setEditingSite(false)
   }
-  const confirmFirstDeploy = async () => {
-    setDialog(null)
-    const saved = await saveVisibility(choice)
-    if (saved === undefined) return
-    await start(choice, false)
+  const chooseVisibility = (next: 'public' | 'private') => {
+    if (next === (isPublic ? 'public' : 'private')) return
+    // Only a live site has readers to warn about; before the first publish the choice just applies.
+    if (published) { setVisibilityDialog(next); return }
+    if (chosenVisibility) void saveVisibility(next)
+    else setDeployment({ ...deployment, visibility: next })
   }
+  const copyAddress = () => {
+    if (!publishedUrl) return
+    void navigator.clipboard?.writeText(publishedUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600) }).catch(() => undefined)
+  }
+  const title = state.project?.title ?? 'your documentation'
+  const summary = `${pageCount} page${pageCount === 1 ? '' : 's'} · ${isPublic ? 'public' : 'private'}`
 
-  return <div class="publish-page">
-    {dialog && <div class="proposal-ready-scrim" role="presentation">
+  const siteSettings = <Panel class="publish-site" title="Site" {...(editingSite ? { description: 'Changes apply from the next publish.' } : {})} actions={editingSite
+    ? <><Button size="sm" tone="ghost" onClick={() => { deploymentSync.resync(); setEditingSite(false) }}>Cancel</Button><Button size="sm" tone="primary" icon="check" onClick={() => void saveSite()}>Save</Button></>
+    : <Button size="sm" onClick={() => setEditingSite(true)}>Change</Button>}>
+    {editingSite
+      ? <>
+        <Field label="Site name"><Input value={deployment.name} onInput={(event) => setDeployment({ ...deployment, name: event.currentTarget.value })} /></Field>
+        <Field label="Address" hint={publishedUrl ? 'The part before the Doxbrix domain.' : 'Doxbrix may add your team as a prefix; the full address is shown after the first publish.'}><div class="input-addon-row"><Input class="mono-input" value={deployment.slug} onInput={(event) => setDeployment({ ...deployment, slug: event.currentTarget.value })} /><span class="input-addon">{slugSuffix}</span></div></Field>
+      </>
+      : <div class="vrows">
+        <div class="vrow"><span class="vrow-label">Address</span><span class="vrow-value mono">{address}</span></div>
+        <div class="vrow"><span class="vrow-label">Site name</span><span class="vrow-value">{deployment.name}</span></div>
+      </div>}
+  </Panel>
+
+  return <div class="publish-page publish-doxbrix">
+    {visibilityDialog && <div class="proposal-ready-scrim" role="presentation">
       <section class="proposal-ready-dialog visibility-dialog" role="dialog" aria-modal="true" aria-labelledby="visibility-dialog-title">
-        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setDialog(null)}><Icon name="close" size={16} /></button>
-        <span class="proposal-ready-icon"><Icon name="shield" size={24} /></span>
+        <button class="proposal-ready-close" type="button" aria-label="Close" onClick={() => setVisibilityDialog(null)}><Icon name="close" size={16} /></button>
+        <span class="proposal-ready-icon"><Icon name={visibilityDialog === 'public' ? 'globe' : 'lock'} size={24} /></span>
         <div>
-          <h2 id="visibility-dialog-title">{dialog === 'first' ? 'Who can see this documentation?' : 'Deployment visibility'}</h2>
-          <p>{dialog === 'first'
-            ? 'Choose once — later deployments publish with this setting without asking again.'
-            : 'This applies to the next and every following deployment.'}</p>
-        </div>
-        <div class="visibility-card-grid" role="radiogroup" aria-label="Deployment visibility">
-          <button type="button" role="radio" aria-checked={choice === 'private'} class={`visibility-card ${choice === 'private' ? 'selected' : ''}`} onClick={() => setChoice('private')}>
-            <span class="visibility-card-icon private"><Icon name="lock" size={20} /></span>
-            <span><strong>Private</strong><small>Only signed-in members with access can open the documentation.</small></span>
-            <i class="visibility-radio"><Icon name="check" size={12} /></i>
-          </button>
-          <button type="button" role="radio" aria-checked={choice === 'public'} class={`visibility-card ${choice === 'public' ? 'selected' : ''}`} onClick={() => setChoice('public')}>
-            <span class="visibility-card-icon public"><Icon name="cloud" size={20} /></span>
-            <span><strong>Public</strong><small>Anyone with the published URL can open the documentation.</small></span>
-            <i class="visibility-radio"><Icon name="check" size={12} /></i>
-          </button>
+          <h2 id="visibility-dialog-title">Make the site {visibilityDialog}?</h2>
+          <p>{visibilityDialog === 'public' ? 'Anyone with the link will be able to read it.' : 'Only people you invite in Doxbrix will be able to open it.'} This applies from the next publish.</p>
         </div>
         <footer>
-          <Button onClick={() => setDialog(null)}>Cancel</Button>
-          {dialog === 'first'
-            ? <Button tone="primary" icon="publish" onClick={() => void confirmFirstDeploy()}>Deploy {choice === 'public' ? 'publicly' : 'privately'}</Button>
-            : <Button tone="primary" icon="check" onClick={() => { setDialog(null); void saveVisibility(choice) }}>Save visibility</Button>}
+          <Button tone="ghost" onClick={() => setVisibilityDialog(null)}>Cancel</Button>
+          <Button tone="primary" icon="check" onClick={() => { const next = visibilityDialog; setVisibilityDialog(null); void saveVisibility(next) }}>Make it {visibilityDialog}</Button>
         </footer>
       </section>
     </div>}
 
-    <PageHeader
-      title="Deploy"
-      description="Export a self-hostable site or publish it to a configured host. Product sources are never included."
-      actions={publishedUrl
-        ? <a class="btn secondary md" href={publishedUrl} target="_blank" rel="noreferrer"><Icon name="external" size={16} />View deployed docs</a>
-        : undefined}
-    />
+    <PageHeader kicker="Publish" title="Publish" description={published ? 'Your documentation is live on Doxbrix.' : 'Your documentation, live on Doxbrix.'} />
     {deploymentSync.stale && <StaleFormNotice onResync={deploymentSync.resync} />}
 
-    <section class="deploy-target-picker" aria-label="Deployment target">
-      {([
-        ['doxbrix', 'Doxbrix', 'Managed hosting with private or public access'],
-        ['github-pages', 'GitHub Pages', 'Publish the static build to gh-pages'],
-        ['netlify', 'Netlify', 'Upload directly to an existing Netlify site'],
-        ['vercel', 'Vercel', 'Create a production deployment through Vercel'],
-      ] as const).map(([id, label, detail]) => <button type="button" key={id} class={target === id ? 'selected' : ''} aria-pressed={target === id} onClick={() => setDeployment({ ...deployment, target: id, ...(id === 'netlify' ? { apiUrl: 'https://api.netlify.com' } : id === 'vercel' ? { apiUrl: 'https://api.vercel.com' } : id === 'doxbrix' ? { apiUrl: account?.apiUrl ?? 'https://app.doxbrix.com' } : {}) })}>
-        <strong>{label}</strong><small>{detail}</small>
-      </button>)}
-    </section>
-
-    <section class="publish-card">
-      <header class="publish-card-head">
-        <span class="publish-card-icon"><Icon name="publish" size={20} /></span>
-        <div>
-          <h2>Deploy to {targetLabel}</h2>
-          <p>{target === 'doxbrix' && chosenVisibility
-            ? `This documentation publishes ${isPublic ? 'publicly' : 'privately'} — no further prompts.`
-            : target === 'doxbrix' ? 'The first deployment asks who can see the documentation.' : 'Doxloop builds and validates the same portable static bundle before publishing.'}</p>
+    {/* Connect: signed out, or signing in. */}
+    {!signedIn && (signingIn
+      ? <DoxbrixSigningIn job={signingIn} onCancel={() => void act(() => post(`/api/jobs/${signingIn.id}/cancel`), 'Sign-in cancelled')} />
+      : <section class="publish-hero">
+        <div class="publish-hero-head">
+          <span class="publish-mark" aria-hidden="true"><Icon name="rocket" size={22} /></span>
+          <div>
+            <h2>{published ? 'Sign in to Doxbrix to publish changes' : `Put ${title} online`}</h2>
+            <p>Doxbrix hosts your documentation with search, a reader assistant, and access control, free to start. Sign in once, choose who can read it, and publish.</p>
+          </div>
         </div>
-        {target === 'doxbrix' && (signedIn
-          ? <Badge tone="good" icon="check">Signed in</Badge>
-          : <Badge tone="warn" icon="alert">Not signed in</Badge>)}
-      </header>
+        <div class="publish-connect">
+          <Icon name="key" size={20} />
+          <span><strong>Connect your Doxbrix account</strong><small>{account?.signedInElsewhere?.length
+            ? `You are signed in to ${account.signedInElsewhere.map(hostOf).join(', ')}; this project publishes to ${hostOf(account.apiUrl)}. That sign-in is kept.`
+            : 'Opens your browser. You approve once; the session stays on this computer.'}</small></span>
+          <Button tone="primary" icon="external" onClick={startSignIn}>Sign in to Doxbrix</Button>
+        </div>
+        {failedLogin && <Note tone="warn"><span class="note-body"><strong>Sign-in did not complete.</strong> {loginFailureText(failedLogin)}<span class="note-actions"><Button size="sm" onClick={() => setDismissedLoginId(failedLogin.id)}>Dismiss</Button></span></span></Note>}
+      </section>)}
 
-      <dl class="publish-destination">
-        <div><dt>Project name</dt><dd><input class="input" value={deployment.name} onInput={(event) => setDeployment({ ...deployment, name: event.currentTarget.value })} /></dd></div>
-        <div><dt>Slug</dt><dd><input class="input mono" value={deployment.slug} onInput={(event) => setDeployment({ ...deployment, slug: event.currentTarget.value })} /></dd></div>
-        {(target === 'doxbrix' || target === 'netlify' || target === 'vercel') && <div><dt>API URL</dt><dd><input class="input mono" value={deployment.apiUrl} onInput={(event) => setDeployment({ ...deployment, apiUrl: event.currentTarget.value })} /></dd></div>}
-        {target === 'netlify' && <div><dt>Site ID</dt><dd><input class="input mono" placeholder="Netlify site ID" value={deployment.siteId ?? ''} onInput={(event) => setDeployment({ ...deployment, siteId: event.currentTarget.value })} /></dd></div>}
-        {target === 'vercel' && <><div><dt>Project ID or name</dt><dd><input class="input mono" value={deployment.projectId ?? ''} onInput={(event) => setDeployment({ ...deployment, projectId: event.currentTarget.value })} /></dd></div><div><dt>Team ID (optional)</dt><dd><input class="input mono" value={deployment.teamId ?? ''} onInput={(event) => setDeployment({ ...deployment, teamId: event.currentTarget.value })} /></dd></div></>}
-        {target === 'github-pages' && <><div><dt>Branch</dt><dd><input class="input mono" value={deployment.branch ?? 'gh-pages'} onInput={(event) => setDeployment({ ...deployment, branch: event.currentTarget.value })} /></dd></div><div><dt>Base path (optional)</dt><dd><input class="input mono" placeholder="/repository" value={deployment.basePath ?? ''} onInput={(event) => setDeployment({ ...deployment, basePath: event.currentTarget.value })} /></dd></div></>}
-        {target === 'doxbrix' && <div class="publish-destination-visibility">
-          <dt>Visibility</dt>
-          <dd>
-            <span class={`visibility-pill ${isPublic ? 'public' : 'private'}`}><Icon name={isPublic ? 'cloud' : 'lock'} size={13} />{isPublic ? 'Public' : 'Private'}</span>
-            {chosenVisibility
-              ? <button type="button" class="publish-link-button" onClick={() => { setChoice(isPublic ? 'public' : 'private'); setDialog('change') }}>Change</button>
-              : <small>Chosen on first deploy</small>}
-          </dd>
+    {/* Live: the site, with Copy and Visit. */}
+    {published && <section class="publish-live" aria-label="Live site">
+      <div class="publish-live-meta">
+        <Badge tone="good">Live</Badge>
+        <span>{isPublic ? 'Public' : 'Private'} · published {timeText(lastSuccess!.startedAt)}</span>
+      </div>
+      <div class="publish-live-address">
+        <a class="mono" href={publishedUrl} target="_blank" rel="noreferrer">{hostOf(publishedUrl!)}</a>
+        <Button icon="copy" aria-label="Copy site address" onClick={copyAddress}>{copied ? 'Copied' : 'Copy'}</Button>
+        <a class="btn primary md" href={publishedUrl} target="_blank" rel="noreferrer"><Icon name="external" size={16} />Visit site</a>
+      </div>
+      <div class="publish-live-stats">
+        <span><Icon name="file" size={15} />{lastSuccess!.pagesCount ?? pageCount} pages</span>
+        <span><Icon name={isPublic ? 'globe' : 'lock'} size={15} />{isPublic ? 'Anyone with the link' : 'Invited readers only'}</span>
+        <span><Icon name="sparkle" size={15} />Reader assistant included</span>
+      </div>
+    </section>}
+
+    {signInExpired && <section class="publish-attention" role="alert">
+      <span class="publish-attention-icon"><Icon name="key" size={18} /></span>
+      <div><h2>Doxbrix did not accept the saved sign-in</h2><p>It expired, was revoked, or belongs to another Doxbrix server, so nothing was uploaded. Sign in again; your changes are still ready.</p></div>
+      <Button tone="primary" icon="key" onClick={startSignIn}>Sign in again</Button>
+    </section>}
+
+    {shownDeploy && <DeployProgress job={shownDeploy} generator={state.project?.generator} act={act} streamConnected={streamConnected} siteUrl={publishedUrl} onDismiss={shownDeploy.status === 'running' ? undefined : () => setDismissedDeployId(shownDeploy.id)} />}
+
+    {signedIn && !published && <div class="publish-account-row">
+      <span class="avatar">{(account?.user?.name || account?.user?.email || '?').slice(0, 2).toUpperCase()}</span>
+      <span class="publish-account-identity"><strong>Signed in to Doxbrix</strong><small>{account?.user?.email}</small></span>
+      <Button size="sm" tone="ghost" icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Switch account</Button>
+    </div>}
+
+    {published && pendingPages.length > 0 && <Panel class="publish-changes" title="Changes since the last publish" description="Saved or accepted since then, not yet on the live site." actions={<Badge tone="warn">{pendingPages.length} page{pendingPages.length === 1 ? '' : 's'}</Badge>} flush>
+      <ul class="publish-change-list">
+        {pendingPages.slice(0, 8).map((page) => <li key={page.path}><code>{page.changeKind === 'added' ? 'A' : page.changeKind === 'deleted' ? 'D' : 'M'}</code><span>{page.title || page.path}</span><small>{page.path}</small></li>)}
+      </ul>
+    </Panel>}
+
+    <Panel class="publish-ready" title={published ? 'Before the next publish' : 'Ready to publish'} description="Doxloop checks everything before it uploads." flush>
+      <PublishChecklist checks={checks} />
+    </Panel>
+
+    {!published && <Panel class="publish-visibility-panel" title="Who can read it" description="You can change this later; it applies from the next publish.">
+      <VisibilityRows value={isPublic ? 'public' : 'private'} onChange={chooseVisibility} />
+    </Panel>}
+    {!published && siteSettings}
+
+    <div class="publish-bar">
+      <span><strong>{published ? (pendingPages.length ? `${pendingPages.length} changed page${pendingPages.length === 1 ? '' : 's'} to publish` : 'The live site is up to date') : summary}</strong>
+        <small>{!signedIn ? 'Sign in to Doxbrix to publish.' : blocked ? 'Fix the checks above to publish.' : 'Usually live in under a minute.'}</small></span>
+      <Button class="publish-deploy-button" tone="primary" icon="publish" busy={busy} disabled={!signedIn || blocked || busy} onClick={() => void publish()}>{published ? (pendingPages.length ? `Publish ${pendingPages.length} change${pendingPages.length === 1 ? '' : 's'}` : 'Publish again') : 'Publish to Doxbrix'}</Button>
+    </div>
+
+    {published && <details class="publish-settings">
+      <summary><Icon name="settings" size={15} />Site settings<small>{address} · {isPublic ? 'public' : 'private'}</small></summary>
+      <div class="publish-settings-body">
+        <Panel class="publish-visibility-panel" title="Who can read it"><VisibilityRows value={isPublic ? 'public' : 'private'} onChange={chooseVisibility} /></Panel>
+        {siteSettings}
+        {signedIn && <div class="publish-account-row">
+          <span class="avatar">{(account?.user?.name || account?.user?.email || '?').slice(0, 2).toUpperCase()}</span>
+          <span class="publish-account-identity"><strong>Signed in to Doxbrix</strong><small>{account?.user?.email}</small></span>
+          <Button size="sm" tone="ghost" icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button>
         </div>}
-      </dl>
+      </div>
+    </details>}
 
-      <div class="deploy-config-actions"><Button icon="check" onClick={() => void saveDeployment()}>Save target settings</Button></div>
-      {(target === 'netlify' || target === 'vercel') && <div class="deploy-token-row">
-        <label><span>{targetLabel} access token</span><input class="input mono" type="password" autocomplete="off" placeholder="Stored outside this project" value={providerToken} onInput={(event) => setProviderToken(event.currentTarget.value)} /></label>
-        <Button disabled={providerToken.length < 8} onClick={() => void saveProviderToken()}>Save token</Button>
-        <small>You can also use <code>{target === 'netlify' ? 'DOXLOOP_NETLIFY_TOKEN' : 'DOXLOOP_VERCEL_TOKEN'}</code>.</small>
-      </div>}
-
-      {target === 'doxbrix' && (signedIn
-        ? <div class="publish-account-row">
-          <span class="avatar">{account?.user?.email.slice(0, 1).toUpperCase()}</span>
-          <span class="publish-account-identity">
-            <strong>{account?.user?.name ?? account?.user?.email}</strong>
-            <small>{account?.user?.email}</small>
-          </span>
-          <Button icon="logout" onClick={() => void act(() => post('/api/auth/logout'), 'Signed out')}>Sign out</Button>
-        </div>
-        : <div class="publish-account-row signed-out">
-          <span class="avatar muted"><Icon name="user" size={18} /></span>
-          <span class="publish-account-identity">
-            <strong>Not signed in</strong>
-            <small>{account?.detail ?? 'Deploying needs a connected Doxbrix account.'}</small>
-          </span>
-          {signingIn
-            ? <Button tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${signingIn.id}/cancel`), 'Sign-in cancelled')}>Cancel sign-in</Button>
-            : <Button tone="primary" icon="key" onClick={() => { setSignInRequired(false); void act(() => post('/api/auth/login', { apiUrl: deployment.apiUrl }), 'Browser sign-in started') }}>Sign in with browser</Button>}
-        </div>)}
-
-      {target === 'doxbrix' && signingIn && <div class="publish-signin-pending" role="status" aria-live="polite">
-        <Icon name="external" size={16} />
-        <span>
-          <strong>Finish signing in in your browser.</strong>
-          <small>Doxbrix opened in a new browser tab. Approve the sign-in there; this page updates as soon as the account is connected.</small>
-        </span>
-        <a href={`/api/jobs/${signingIn.id}/log`} target="_blank" rel="noreferrer">Show log</a>
-      </div>}
-      {target === 'doxbrix' && failedLogin && <div class="publish-signin-required" role="alert">
-        <Icon name="alert" size={16} />
-        <span>
-          <strong>Sign-in did not complete.</strong>
-          <small>{jobFailureReason(failedLogin) ?? 'The sign-in stopped before an account was connected. Try again.'}</small>
-        </span>
-        <Button size="sm" onClick={() => setDismissedLoginId(failedLogin.id)}>Dismiss</Button>
-      </div>}
-
-      {target === 'doxbrix' && signInRequired && !signedIn && <div class="publish-signin-required" role="alert">
-        <Icon name="alert" size={16} />
-        <span>
-          <strong>Sign in with Doxbrix to deploy the documentation.</strong>
-          <small>Deploying uploads the documentation to your Doxbrix account, so use “Sign in with browser” above to connect it first.</small>
-        </span>
-      </div>}
-
-      <footer class="publish-card-actions">
-        <Button class="publish-deploy-button" tone="primary" icon="publish" busy={busy} onClick={() => void deploy(false)}>Deploy to {targetLabel}</Button>
-        <Button disabled={busy} onClick={() => void deploy(true)}>Dry run</Button>
-        <Button disabled={busy} onClick={() => void exportSite()}>Export folder + zip</Button>
-        <small>A dry run validates and leaves a zip in <code>.doxloop/exports</code> without uploading.</small>
-      </footer>
-    </section>
-
-    {shownDeploy && <DeployProgress job={shownDeploy} generator={state.project?.generator} act={act} streamConnected={streamConnected} onDismiss={shownDeploy.status === 'running' ? undefined : () => setDismissedDeployId(shownDeploy.id)} />}
-
-    <Panel
-      class="history-panel"
-      title="Deployment history"
-      description="Past deployments, including the ones that did not succeed."
-    >
+    <Panel class="history-panel" title="History" flush>
       <DeploymentHistory {...deployments} />
     </Panel>
   </div>
@@ -3701,12 +4124,22 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
 const SETTINGS_SECTIONS = [
   ['general', 'General', 'Project identity and defaults', 'settings'],
   ['experience', 'Audience and voice', 'Writing style and accessibility', 'book'],
-  ['capture', 'Visual evidence', 'Application screenshots', 'preview'],
+  ['capture', 'Screenshots', 'Application screenshots', 'preview'],
   ['branding', 'Branding', 'Logo, colours, and fonts', 'sparkle'],
   ['tools', 'Generator', 'Active documentation generator', 'publish'],
+  ['monitoring', 'Monitoring', 'Schedule and budgets', 'bell'],
 ] as const
 
 type SettingsSection = typeof SETTINGS_SECTIONS[number][0]
+
+/** Which sheet is open: one per setting row, or a compound editor. */
+type SettingsSheet =
+  | 'title' | 'agent'
+  | 'primaryAudience' | 'audiences' | 'experienceLevel' | 'locale' | 'accessibilityTarget' | 'tone' | 'outcomes' | 'preferredExamples' | 'designDirection' | 'standardsProfile' | 'styleGuide' | 'terms' | 'exclusions' | 'instructions'
+  | 'applicationUrl' | 'signIn' | 'screenshotPolicy' | 'viewport'
+
+const SCREENSHOT_POLICIES: Record<string, string> = { requested: 'Only when requested', auto: 'Automatically for UI workflows', off: 'Never' }
+const EXPERIENCE_LEVELS: Record<string, string> = { beginner: 'Beginner', intermediate: 'Intermediate', advanced: 'Advanced', mixed: 'Mixed' }
 
 function Settings({ state, act, onError }: { state: UiState; act: Action; onError: (error: string) => void }) {
   const project = state.project!
@@ -3717,7 +4150,7 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
   // Forms reseed from the project after a save or a reload; unsaved edits are
   // kept and flagged instead of being replaced underneath the reader.
   const [identity, setIdentity, identitySync] = useSeededForm(() => ({ title: project.title, defaultAgent: project.defaultAgent ?? '', defaultModel: project.defaultModel ?? '' }), JSON.stringify([project.title, project.defaultAgent, project.defaultModel]))
-  const [docs, setDocs, docsSync] = useSeededForm(() => ({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join(', ') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), terms: termsFromRecord(project.documentation.terminology) }), JSON.stringify(project.documentation))
+  const [docs, setDocs, docsSync] = useSeededForm(() => ({ ...project.documentation, audiencesText: project.documentation.audiences?.join(', ') ?? '', customInstructions: project.documentation.customInstructions ?? '', outcomesText: project.documentation.priorityOutcomes?.join('\n') ?? '', preferredExamplesText: project.documentation.preferredExamples?.join(', ') ?? '', toneText: project.documentation.tone.join(', '), exclusionsText: project.documentation.exclusions.join('\n'), terms: termsFromRecord(project.documentation.terminology) }), JSON.stringify(project.documentation))
   const [application, setApplication, applicationSync] = useSeededForm(() => ({
     baseUrl: project.application?.baseUrl ?? '',
     source: project.application?.source ?? '',
@@ -3732,6 +4165,19 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
   }), JSON.stringify(project.application ?? null))
   const [applicationReadiness, setApplicationReadiness] = useState<ApplicationReadiness>()
   const [testingApplication, setTestingApplication] = useState(false)
+  const [sheet, setSheet] = useState<SettingsSheet | null>(null)
+  /** The form values when the sheet opened, restored on Cancel. */
+  const [snapshot, setSnapshot] = useState<{ identity: typeof identity; docs: typeof docs; application: typeof application } | null>(null)
+  const [monitoringOpen, setMonitoringOpen] = useState(false)
+  // The sign-in row shows what is stored; the sheet's panel manages it.
+  const [captureAuth, setCaptureAuth] = useState<CaptureAuthState>()
+  const applicationConfigured = Boolean(project.application)
+  useEffect(() => {
+    if (!applicationConfigured) { setCaptureAuth(undefined); return }
+    let live = true
+    void api<CaptureAuthState>('/api/application/auth').then((auth) => { if (live) setCaptureAuth(auth) }).catch(() => undefined)
+    return () => { live = false }
+  }, [applicationConfigured, sheet])
   const applicationPayload = { baseUrl: application.baseUrl, source: application.source, readyPath: application.readyPath, screenshots: { policy: application.policy, highlight: application.highlight, viewport: { width: application.viewportWidth, height: application.viewportHeight }, startPath: application.startPath, workflow: application.workflow }, authentication: { loginPath: application.loginPath } }
   const testApplication = async () => {
     setTestingApplication(true)
@@ -3739,10 +4185,88 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
     catch { setApplicationReadiness(undefined) }
     finally { setTestingApplication(false) }
   }
-  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitComma(docs.outcomesText), preferredExamples: splitComma(docs.preferredExamplesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: recordFromTerms(docs.terms) } }), 'Documentation preferences saved')
+  const saveIdentity = () => act(() => patch('/api/project', identity), 'Identity settings saved')
+  const saveDocs = () => act(() => patch('/api/project', { documentation: { ...docs, audiences: splitComma(docs.audiencesText), priorityOutcomes: splitLines(docs.outcomesText), preferredExamples: splitComma(docs.preferredExamplesText), tone: splitComma(docs.toneText), exclusions: docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), terminology: recordFromTerms(docs.terms) } }), 'Documentation preferences saved')
+  const saveApplication = () => act(() => patch('/api/project', { application: applicationPayload }), 'Application settings saved')
   const unsavedTerms = JSON.stringify(recordFromTerms(docs.terms)) !== JSON.stringify(project.documentation.terminology)
+  const openSheet = (next: SettingsSheet) => { setSnapshot({ identity, docs, application }); setSheet(next) }
+  const cancelSheet = () => {
+    if (snapshot) { setIdentity(snapshot.identity); setDocs(snapshot.docs); setApplication(snapshot.application) }
+    setSheet(null)
+  }
+  const [sheetSaving, setSheetSaving] = useState(false)
+  const commitSheet = async (save: () => Promise<unknown>) => {
+    setSheetSaving(true)
+    try {
+      const result = await save()
+      if (result !== undefined) setSheet(null)
+    } finally { setSheetSaving(false) }
+  }
+  const agentSummary = identity.defaultAgent ? `${agentLabel(identity.defaultAgent)}${identity.defaultModel ? ` · ${identity.defaultModel}` : ''}` : 'Choose per run'
+  const listSummary = (items: string[], limit = 3): string => items.length === 0 ? '' : items.length <= limit ? items.join(', ') : `${items.slice(0, limit).join(', ')} · ${items.length - limit} more`
+  const generator = state.generators.find((entry) => entry.id === project.generator)
+  const sync = project.sync
+  const budgetSummary = [
+    sync.budget?.maxMinutes ? `${sync.budget.maxMinutes} min` : '',
+    sync.budget?.maxRunsPerDay ? `${sync.budget.maxRunsPerDay} runs per day` : '',
+    sync.budget?.maxUsd ? `$${sync.budget.maxUsd.toFixed(2)} cap` : '',
+  ].filter(Boolean).join(' · ')
+  const docsField = (label: string, key: 'primaryAudience' | 'audiencesText' | 'locale' | 'accessibilityTarget' | 'toneText' | 'outcomesText' | 'preferredExamplesText' | 'designDirection' | 'standardsProfile' | 'styleGuide', placeholder?: string, hint?: string) =>
+    <Field label={label} {...(hint ? { hint } : {})}><Input value={docs[key] ?? ''} {...(placeholder ? { placeholder } : {})} onInput={(event) => setDocs({ ...docs, [key]: event.currentTarget.value })} /></Field>
+
+  const sheetSpec = (): { title: string; body: import('preact').ComponentChildren; save: () => Promise<unknown>; disabled?: boolean } | null => {
+    switch (sheet) {
+      case 'title': return { title: 'Site title', save: saveIdentity, body: <Field label="Site title"><Input value={identity.title} onInput={(event) => setIdentity({ ...identity, title: event.currentTarget.value })} /></Field> }
+      case 'agent': return { title: 'Default coding agent', save: saveIdentity, body: <>
+        <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => { const agent = event.currentTarget.value; setIdentity({ ...identity, defaultAgent: agent, defaultModel: agent === identity.defaultAgent ? identity.defaultModel : defaultModelForAgent(agent) }) }}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
+        <Field label="Default model" hint={identity.defaultAgent ? `Used by ${agentLabel(identity.defaultAgent)} runs unless a run picks another model. Search suggested models or enter another model ID.` : 'Choose a default agent to set its model.'}><Combo value={identity.defaultModel} options={agentModels(identity.defaultAgent).map((model) => [model.id, model.label] as const)} disabled={!identity.defaultAgent} placeholder="Agent default" onValueChange={(value) => setIdentity({ ...identity, defaultModel: value })} /></Field>
+        <details class="agent-capabilities-details" open={identity.defaultAgent === 'gemini'}>
+          <summary>What each assistant supports</summary>
+          <AgentCapabilityMatrix selected={identity.defaultAgent || undefined} />
+        </details>
+      </> }
+      case 'primaryAudience': return { title: 'Primary audience', save: saveDocs, body: docsField('Primary audience', 'primaryAudience', 'Developers integrating our API') }
+      case 'audiences': return { title: 'Audiences', save: saveDocs, body: docsField('Audiences', 'audiencesText', 'Developers, API consumers, administrators', 'Separate multiple audiences with commas') }
+      case 'experienceLevel': return { title: 'Experience level', save: saveDocs, body: <Field label="Experience level"><Select value={docs.experienceLevel ?? 'intermediate'} onChange={(event) => setDocs({ ...docs, experienceLevel: event.currentTarget.value })}>{Object.entries(EXPERIENCE_LEVELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field> }
+      case 'locale': return { title: 'Locale', save: saveDocs, body: docsField('Locale', 'locale', 'en-US') }
+      case 'accessibilityTarget': return { title: 'Accessibility target', save: saveDocs, body: docsField('Accessibility target', 'accessibilityTarget', 'WCAG 2.2 AA') }
+      case 'tone': return { title: 'Tone', save: saveDocs, body: docsField('Tone', 'toneText', 'clear, direct, helpful', 'Separate several qualities with commas') }
+      // One outcome per line: outcomes are sentences and contain commas, so
+      // a comma list split a single goal into fragments on every save.
+      case 'outcomes': return { title: 'Priority outcomes', save: saveDocs, body: <Field label="Priority outcomes" hint="What readers must be able to do, one outcome per line."><Textarea rows={5} value={docs.outcomesText ?? ''} placeholder={'Install the product and send the first request\nDiagnose and fix common errors'} onInput={(event) => setDocs({ ...docs, outcomesText: event.currentTarget.value })} /></Field> }
+      case 'preferredExamples': return { title: 'Preferred examples', save: saveDocs, body: docsField('Preferred examples', 'preferredExamplesText', 'TypeScript, curl', 'Languages and tools examples are written in') }
+      case 'designDirection': return { title: 'Design direction', save: saveDocs, body: docsField('Design direction', 'designDirection', 'Compact, task-led developer documentation') }
+      case 'standardsProfile': return { title: 'Standards profile', save: saveDocs, body: docsField('Standards profile', 'standardsProfile') }
+      case 'styleGuide': return { title: 'Style guide', save: saveDocs, body: docsField('Style guide', 'styleGuide') }
+      case 'terms': return { title: 'Preferred terminology', save: saveDocs, body: <Field label="Preferred terminology" hint="Product vocabulary with its meaning or preferred wording. Feeds every run and the glossary page." wide><TermsEditor value={docs.terms} onChange={(terms) => setDocs({ ...docs, terms })} /></Field> }
+      case 'exclusions': return { title: 'Content exclusions', save: saveDocs, body: <Field label="Content exclusions" hint="One item per line"><Textarea rows={6} value={docs.exclusionsText} onInput={(event) => setDocs({ ...docs, exclusionsText: event.currentTarget.value })} /></Field> }
+      case 'instructions': return { title: 'Instructions', save: saveDocs, body: <Field label="Instructions" hint="Additional guidance reused for future documentation runs" wide><Textarea rows={8} value={docs.customInstructions} placeholder="Use concise explanations and include TypeScript examples." onInput={(event) => setDocs({ ...docs, customInstructions: event.currentTarget.value })} /></Field> }
+      case 'applicationUrl': return { title: 'Application URL', save: saveApplication, disabled: !application.baseUrl, body: <>
+        <Field label="Application base URL" hint="A safe local or test instance of the product; screenshots are taken there."><Input value={application.baseUrl} placeholder="http://localhost:3000" onInput={(event) => setApplication({ ...application, baseUrl: event.currentTarget.value })} /></Field>
+        <Field label="Product source" hint="The connected source this application is built from."><Select value={application.source} onChange={(event) => setApplication({ ...application, source: event.currentTarget.value })}><option value="">None</option>{project.sources.map((source) => <option key={source.name} value={source.name}>{source.name}</option>)}</Select></Field>
+        <Field label="Ready path" hint="A path that answers once the application is up, for example /health."><Input value={application.readyPath} placeholder="/health" onInput={(event) => setApplication({ ...application, readyPath: event.currentTarget.value })} /></Field>
+        <Field label="Default starting route" hint="Where capture sessions begin."><Input value={application.startPath} placeholder="/settings/team" onInput={(event) => setApplication({ ...application, startPath: event.currentTarget.value })} /></Field>
+      </> }
+      case 'signIn': return { title: 'Sign-in', save: saveApplication, disabled: !application.baseUrl, body: <>
+        <Field label="Sign-in route" hint="Where the browser sign-in opens; leave empty when the app redirects to its login page"><Input value={application.loginPath} placeholder="/login" onInput={(event) => setApplication({ ...application, loginPath: event.currentTarget.value })} /></Field>
+        <CaptureSignInPanel embedded application={applicationPayload} configured={applicationConfigured} onError={onError} onChanged={() => setApplicationReadiness(undefined)} />
+      </> }
+      case 'screenshotPolicy': return { title: 'Screenshot policy', save: saveApplication, disabled: !application.baseUrl, body: <>
+        <Field label="Screenshot policy"><Select value={application.policy} onChange={(event) => setApplication({ ...application, policy: event.currentTarget.value })}>{Object.entries(SCREENSHOT_POLICIES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
+        <Field label="Capture workflow guidance" hint="Safe test state, authentication, actions, and expected outcomes" wide><Textarea rows={5} value={application.workflow} placeholder="Reuse the signed-in demo workspace and synthetic data only." onInput={(event) => setApplication({ ...application, workflow: event.currentTarget.value })} /></Field>
+      </> }
+      case 'viewport': return { title: 'Viewport', save: saveApplication, disabled: !application.baseUrl, body: <>
+        <Field label="Viewport width"><Input type="number" min="320" max="3840" value={application.viewportWidth} onInput={(event) => setApplication({ ...application, viewportWidth: event.currentTarget.value })} /></Field>
+        <Field label="Viewport height"><Input type="number" min="320" max="2160" value={application.viewportHeight} onInput={(event) => setApplication({ ...application, viewportHeight: event.currentTarget.value })} /></Field>
+        <Toggle checked={application.highlight} onChange={(checked) => setApplication({ ...application, highlight: checked })} label="Highlight captured controls" />
+      </> }
+      default: return null
+    }
+  }
+  const openSheetSpec = sheetSpec()
+
   return <>
-    <PageHeader title="Settings" description="Shape the documentation experience for this workspace." />
+    <PageHeader kicker="Settings" title="Settings" description="Choose a row to change it. Nothing is saved until you choose Save." />
     <div class="settings">
       <nav class="settings-nav" aria-label="Settings sections">
         {SETTINGS_SECTIONS.map(([id, label, detail, icon]) => <button key={id} class={section === id ? 'active' : ''} aria-pressed={section === id} onClick={() => setSection(id)}>
@@ -3750,85 +4274,101 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
         </button>)}
       </nav>
       <div class="stack">
-        {section === 'general' && <Panel title="Project identity" description="The name, default documentation tool, and model used across this workspace.">
+        {section === 'general' && <>
           {identitySync.stale && <StaleFormNotice onResync={identitySync.resync} />}
-          <div class="form-grid">
-            <Field label="Site title"><Input value={identity.title} onInput={(event) => setIdentity({ ...identity, title: event.currentTarget.value })} /></Field>
-            <Field label="Default documentation agent"><Select value={identity.defaultAgent} onChange={(event) => { const agent = event.currentTarget.value; setIdentity({ ...identity, defaultAgent: agent, defaultModel: agent === identity.defaultAgent ? identity.defaultModel : defaultModelForAgent(agent) }) }}><option value="">Choose per run</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini</option></Select></Field>
-            <Field label="Default model" hint={identity.defaultAgent ? `Used by ${agentLabel(identity.defaultAgent)} runs unless a run picks another model. Search suggested models or enter another model ID.` : 'Choose a default agent to set its model.'}><Combo value={identity.defaultModel} options={agentModels(identity.defaultAgent).map((model) => [model.id, model.label] as const)} disabled={!identity.defaultAgent} placeholder="Agent default" onValueChange={(value) => setIdentity({ ...identity, defaultModel: value })} /></Field>
-          </div>
-          <KeyValues items={[['Content directory', <code class="mono">{project.contentDir || 'Project root'}</code>], ['Generator', generatorLabel(state.generators, project.generator)], ['Workspace', <code class="mono">{state.root ?? state.cwd}</code>]]} />
-          <details class="agent-capabilities-details" open={identity.defaultAgent === 'gemini'}>
-            <summary>What each assistant supports</summary>
-            <AgentCapabilityMatrix selected={identity.defaultAgent || undefined} />
-          </details>
-          <div class="form-actions"><Button tone="primary" onClick={() => void act(() => patch('/api/project', identity), 'Identity settings saved')}>Save changes</Button></div>
-        </Panel>}
+          <Panel title="Project identity" flush>
+            <div class="vrows">
+              <SettingRow label="Site title" value={identity.title} onOpen={() => openSheet('title')} />
+              <SettingRow label="Default coding agent" value={agentSummary} onOpen={() => openSheet('agent')} />
+              <SettingRow label="Content directory" value={<code>{project.contentDir || 'Project root'}</code>} />
+              <SettingRow label="Documentation generator" value={generatorLabel(state.generators, project.generator)} onOpen={() => setSection('tools')} />
+              <SettingRow label="Project folder" value={<code>{state.root ?? state.cwd}</code>} />
+            </div>
+          </Panel>
+        </>}
 
-        {section === 'experience' && <Panel title="Audience and voice" description="These preferences guide every documentation run, so results stay consistent.">
+        {section === 'experience' && <>
           {docsSync.stale && <StaleFormNotice onResync={docsSync.resync} />}
-          <div class="form-grid">
-            <Field label="Primary audience"><Input value={docs.primaryAudience ?? ''} placeholder="Developers integrating our API" onInput={(event) => setDocs({ ...docs, primaryAudience: event.currentTarget.value })} /></Field>
-            <Field label="Audiences" hint="Separate multiple audiences with commas"><Input value={docs.audiencesText} placeholder="Developers, API consumers, administrators" onInput={(event) => setDocs({ ...docs, audiencesText: event.currentTarget.value })} /></Field>
-            <Field label="Experience level"><Select value={docs.experienceLevel ?? 'intermediate'} onChange={(event) => setDocs({ ...docs, experienceLevel: event.currentTarget.value })}><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option></Select></Field>
-            <Field label="Locale"><Input value={docs.locale} onInput={(event) => setDocs({ ...docs, locale: event.currentTarget.value })} /></Field>
-            <Field label="Accessibility target"><Input value={docs.accessibilityTarget} onInput={(event) => setDocs({ ...docs, accessibilityTarget: event.currentTarget.value })} /></Field>
-            <Field label="Tone"><Input value={docs.toneText} placeholder="clear, direct, helpful" onInput={(event) => setDocs({ ...docs, toneText: event.currentTarget.value })} /></Field>
-            <Field label="Priority outcomes"><Input value={docs.outcomesText} placeholder="quick start, successful integration" onInput={(event) => setDocs({ ...docs, outcomesText: event.currentTarget.value })} /></Field>
-            <Field label="Preferred examples"><Input value={docs.preferredExamplesText} placeholder="TypeScript, curl" onInput={(event) => setDocs({ ...docs, preferredExamplesText: event.currentTarget.value })} /></Field>
-            <Field label="Design direction"><Input value={docs.designDirection ?? ''} placeholder="Compact, task-led developer documentation" onInput={(event) => setDocs({ ...docs, designDirection: event.currentTarget.value })} /></Field>
-            <Field label="Standards profile"><Input value={docs.standardsProfile} onInput={(event) => setDocs({ ...docs, standardsProfile: event.currentTarget.value })} /></Field>
-            <Field label="Style guide"><Input value={docs.styleGuide} onInput={(event) => setDocs({ ...docs, styleGuide: event.currentTarget.value })} /></Field>
-            <Field label="Preferred terminology" hint="Product vocabulary with its meaning or preferred wording. Feeds every run and the glossary page." wide><TermsEditor value={docs.terms} onChange={(terms) => setDocs({ ...docs, terms })} /></Field>
-            <Field label="Content exclusions" hint="One item per line"><Textarea rows={5} value={docs.exclusionsText} onInput={(event) => setDocs({ ...docs, exclusionsText: event.currentTarget.value })} /></Field>
-            <Field label="Instructions" hint="Additional guidance reused for future documentation runs" wide><Textarea rows={5} value={docs.customInstructions} placeholder="Use concise explanations and include TypeScript examples." onInput={(event) => setDocs({ ...docs, customInstructions: event.currentTarget.value })} /></Field>
-          </div>
-          <div class="form-actions"><Button tone="primary" onClick={() => void saveDocs()}>Save changes</Button></div>
-        </Panel>}
-        {section === 'experience' && <GlossaryPanel act={act} onError={onError} unsavedTerms={unsavedTerms} onOpenPage={(path) => setLocation('pages', { path }, 'push')} />}
+          <Panel title="Audience and voice" flush>
+            <div class="vrows">
+              {/* The wizard writes the audiences joined as the primary audience; the row only earns its place when someone wrote something different. */}
+              {(docs.primaryAudience ?? '').trim() && (docs.primaryAudience ?? '').trim() !== splitComma(docs.audiencesText).join(', ') && <SettingRow label="Primary audience" value={docs.primaryAudience ?? ''} onOpen={() => openSheet('primaryAudience')} />}
+              <SettingRow label="Audiences" value={listSummary(splitComma(docs.audiencesText))} onOpen={() => openSheet('audiences')} />
+              <SettingRow label="Experience level" value={EXPERIENCE_LEVELS[docs.experienceLevel ?? 'intermediate'] ?? docs.experienceLevel ?? ''} onOpen={() => openSheet('experienceLevel')} />
+              <SettingRow label="Locale" value={docs.locale} onOpen={() => openSheet('locale')} />
+              <SettingRow label="Accessibility target" value={docs.accessibilityTarget} onOpen={() => openSheet('accessibilityTarget')} />
+              <SettingRow label="Tone" value={listSummary(splitComma(docs.toneText))} onOpen={() => openSheet('tone')} />
+              <SettingRow label="Priority outcomes" value={listSummary(splitLines(docs.outcomesText))} onOpen={() => openSheet('outcomes')} />
+              <SettingRow label="Preferred examples" value={listSummary(splitComma(docs.preferredExamplesText))} onOpen={() => openSheet('preferredExamples')} />
+              <SettingRow label="Design direction" value={docs.designDirection ?? ''} onOpen={() => openSheet('designDirection')} />
+              <SettingRow label="Standards profile" value={docs.standardsProfile} onOpen={() => openSheet('standardsProfile')} />
+              <SettingRow label="Style guide" value={docs.styleGuide} onOpen={() => openSheet('styleGuide')} />
+              <SettingRow label="Preferred terminology" value={listSummary(docs.terms.map((term) => term.term))} onOpen={() => openSheet('terms')} />
+              <SettingRow label="Content exclusions" value={listSummary(docs.exclusionsText.split('\n').map((item) => item.trim()).filter(Boolean), 2)} onOpen={() => openSheet('exclusions')} />
+              <SettingRow label="Instructions" value={docs.customInstructions} onOpen={() => openSheet('instructions')} />
+            </div>
+          </Panel>
+          <GlossaryPanel act={act} onError={onError} unsavedTerms={unsavedTerms} onOpenPage={(path) => setLocation('pages', { path }, 'push')} />
+        </>}
 
         {section === 'branding' && <BrandingPanel act={act} onError={onError} {...(state.preview?.running && state.preview.url ? { previewUrl: state.preview.url } : {})} onPreviewStart={() => post<{ url: string }>('/api/preview/start', { open: false }).then((result) => result.url).catch((cause) => { onError(message(cause)); return undefined })} />}
 
         {section === 'capture' && <>
-          <Panel title="Application screenshots" description="Configure a safe local or test application for guide screenshots.">
-            {applicationSync.stale && <StaleFormNotice onResync={applicationSync.resync} />}
-            <div class="form-grid">
-              <Field label="Application base URL"><Input value={application.baseUrl} placeholder="http://localhost:3000" onInput={(event) => setApplication({ ...application, baseUrl: event.currentTarget.value })} /></Field>
-              <Field label="Product source"><Select value={application.source} onChange={(event) => setApplication({ ...application, source: event.currentTarget.value })}><option value="">None</option>{project.sources.map((source) => <option value={source.name}>{source.name}</option>)}</Select></Field>
-              <Field label="Ready path"><Input value={application.readyPath} placeholder="/health" onInput={(event) => setApplication({ ...application, readyPath: event.currentTarget.value })} /></Field>
-              <Field label="Default starting route"><Input value={application.startPath} placeholder="/settings/team" onInput={(event) => setApplication({ ...application, startPath: event.currentTarget.value })} /></Field>
-              <Field label="Sign-in route" hint="Where the browser sign-in opens; leave empty when the app redirects to its login page"><Input value={application.loginPath} placeholder="/login" onInput={(event) => setApplication({ ...application, loginPath: event.currentTarget.value })} /></Field>
-              <Field label="Screenshot policy"><Select value={application.policy} onChange={(event) => setApplication({ ...application, policy: event.currentTarget.value })}><option value="requested">Only when requested</option><option value="auto">Automatically for UI workflows</option><option value="off">Never</option></Select></Field>
-              <Field label="Viewport width"><Input type="number" min="320" max="3840" value={application.viewportWidth} onInput={(event) => setApplication({ ...application, viewportWidth: event.currentTarget.value })} /></Field>
-              <Field label="Viewport height"><Input type="number" min="320" max="2160" value={application.viewportHeight} onInput={(event) => setApplication({ ...application, viewportHeight: event.currentTarget.value })} /></Field>
-              <Field label="Capture workflow guidance" hint="Safe test state, authentication, actions, and expected outcomes" wide><Textarea rows={4} value={application.workflow} placeholder="Reuse the signed-in demo workspace and synthetic data only." onInput={(event) => setApplication({ ...application, workflow: event.currentTarget.value })} /></Field>
-            </div>
-            <Toggle checked={application.highlight} onChange={(checked) => setApplication({ ...application, highlight: checked })} label="Highlight captured controls" />
-            {applicationReadiness && <div class={`plan-capture-readiness ${applicationReadiness.status === 'ready' ? 'ready' : 'missing'}`}><Icon name={applicationReadiness.status === 'ready' ? 'check' : 'info'} size={15} /><span><strong>{applicationReadiness.status === 'ready' ? 'Application reachable' : applicationReadiness.status === 'authentication-required' ? 'Sign-in needed' : 'Application not reachable'}</strong><small>{applicationReadiness.message}</small></span></div>}
-            <div class="form-actions">
-              <Button tone="danger" onClick={() => void act(() => patch('/api/project', { application: null }), 'Application configuration removed')}>Remove</Button>
-              <Button disabled={!application.baseUrl} busy={testingApplication} onClick={() => void testApplication()}>Test application</Button>
-              <Button tone="primary" disabled={!application.baseUrl} onClick={() => void act(() => patch('/api/project', { application: applicationPayload }), 'Application settings saved')}>Save application</Button>
+          {applicationSync.stale && <StaleFormNotice onResync={applicationSync.resync} />}
+          <Panel title="Application screenshots" flush
+            actions={<Button size="sm" disabled={!application.baseUrl} busy={testingApplication} onClick={() => void testApplication()}>Test application</Button>}
+            {...(applicationConfigured ? { footer: <Button size="sm" tone="danger" onClick={() => void act(() => patch('/api/project', { application: null }), 'Application configuration removed')}>Remove application</Button> } : {})}>
+            <div class="vrows">
+              {applicationReadiness && <div class="vrow"><span class="vrow-label">{applicationReadiness.status === 'ready' ? 'Application reachable' : applicationReadiness.status === 'authentication-required' ? 'Sign-in needed' : 'Application not reachable'}<small>{applicationReadiness.message}</small></span><span class="vrow-value"><Badge tone={applicationReadiness.status === 'ready' ? 'good' : 'warn'}>{applicationReadiness.status === 'ready' ? 'Reachable' : 'Check'}</Badge></span></div>}
+              <SettingRow label="Application URL" value={application.baseUrl ? <code>{application.baseUrl}</code> : ''} sub={application.source ? `Built from ${application.source}` : undefined} onOpen={() => openSheet('applicationUrl')} />
+              <SettingRow label="Sign-in" value={captureAuth?.session
+                ? <Badge tone="good">Session saved {timeText(captureAuth.session.savedAt)}</Badge>
+                : captureAuth?.credentials
+                  ? <Badge tone="good">Credentials for {captureAuth.credentials.username}</Badge>
+                  : application.loginPath ? <code>{application.loginPath}</code> : 'Not set up'} onOpen={() => openSheet('signIn')} />
+              <SettingRow label="Screenshot policy" value={SCREENSHOT_POLICIES[application.policy] ?? application.policy} onOpen={() => openSheet('screenshotPolicy')} />
+              <SettingRow label="Viewport" value={`${application.viewportWidth} × ${application.viewportHeight}${application.highlight ? ' · highlight captured controls' : ''}`} onOpen={() => openSheet('viewport')} />
             </div>
           </Panel>
-          <CaptureSignInPanel application={applicationPayload} configured={Boolean(project.application)} onError={onError} onChanged={() => setApplicationReadiness(undefined)} />
         </>}
 
-        {section === 'tools' && <Panel title="Documentation generator" description="The generator selected for this workspace." flush>
-          <Table head={<><th>Generator</th><th>Status</th></>}>
-            {state.generators.filter((generator) => generator.id === project.generator).map((generator) => <tr key={generator.id}>
-              <td><div class="cell-lead"><span class="generator-mark">{generator.displayName.slice(0, 1)}</span><div class="row-copy"><strong>{generator.displayName}</strong><small>{generator.id === 'doxbrix' ? 'Built in' : generator.packageName ?? generator.id}</small></div></div></td>
-              <td><Badge tone="good" icon="check">Active</Badge>{generator.tierLabel && <small class={`generator-tier-label tier-${generator.tier}`} title={generator.tierDescription}>{generator.tierLabel} tier{generator.toolchainLabels?.length ? ` · ${generator.toolchainLabels.join(', ')}` : ''}</small>}</td>
-            </tr>)}
-          </Table>
+        {section === 'tools' && <Panel title="Documentation generator" flush>
+          <div class="vrows">
+            <SettingRow label="Generator" value={<>{generator?.displayName ?? project.generator}<Badge tone="good">Active</Badge></>} />
+            <SettingRow label="Package" value={generator?.id === 'doxbrix' ? 'Built in' : <code>{generator?.packageName ?? project.generator}</code>} />
+            {generator?.tierLabel && <SettingRow label="Tier" sub={generator.tierDescription} value={`${generator.tierLabel}${generator.toolchainLabels?.length ? ` · ${generator.toolchainLabels.join(', ')}` : ''}`} />}
+          </div>
+        </Panel>}
+
+        {section === 'monitoring' && <Panel title="Monitoring" flush actions={<Button size="sm" icon="bell" onClick={() => setMonitoringOpen(true)}>Configure</Button>}>
+          <div class="vrows">
+            <SettingRow label="Schedule" value={sync.on.length ? scheduleSummary(scheduleForm(sync.on)) : 'Not configured'} onOpen={() => setMonitoringOpen(true)} />
+            <SettingRow label="Product branch" value={sync.branch ?? ''} onOpen={() => setMonitoringOpen(true)} />
+            <SettingRow label="Budgets" value={budgetSummary || 'No limits'} onOpen={() => setMonitoringOpen(true)} />
+            <SettingRow label="Re-verify after" value={sync.maxVerificationAgeDays ? `${sync.maxVerificationAgeDays} days · ${sync.maxVerificationAgeSeverity === 'fail' ? 'fail validation' : 'warn'}` : 'Only on source changes'} onOpen={() => setMonitoringOpen(true)} />
+            <SettingRow label="Watched paths" value={sync.watch.length ? listSummary(sync.watch, 2) : 'Everything'} sub={sync.ignore.length ? `${sync.ignore.length} ignored` : undefined} onOpen={() => setMonitoringOpen(true)} />
+          </div>
         </Panel>}
       </div>
     </div>
+    {monitoringOpen && <MonitoringDialog state={state} act={act} onClose={() => setMonitoringOpen(false)} />}
+    {sheet && openSheetSpec && <OpsSheet class="settings-sheet" title={openSheetSpec.title} onClose={cancelSheet} footer={<><Button tone="ghost" onClick={cancelSheet}>Cancel</Button><Button tone="primary" busy={sheetSaving} disabled={openSheetSpec.disabled} onClick={() => void commitSheet(openSheetSpec.save)}>Save</Button></>}>
+      {openSheetSpec.body}
+    </OpsSheet>}
   </>
 }
 
-
-
+/** One settings fact: label left, current value right, a chevron when it opens a sheet. */
+function SettingRow({ label, value, sub, onOpen }: { label: string; value: import('preact').ComponentChildren; sub?: string | undefined; onOpen?: () => void }) {
+  const shown = value === '' || value === undefined || value === null ? <em>Not set</em> : typeof value === 'string' ? <span class="value-text">{value}</span> : value
+  const inner = <>
+    <span class="vrow-label">{label}{sub && <small>{sub}</small>}</span>
+    <span class="vrow-value">{shown}{onOpen && <Icon name="chevronRight" size={16} />}</span>
+  </>
+  return onOpen
+    ? <button type="button" class="vrow settings-row" onClick={onOpen}>{inner}</button>
+    : <div class="vrow settings-row static">{inner}</div>
+}
 
 /** Shown when the project changed elsewhere while a form holds unsaved edits. */
 type CaptureAuthState = {
@@ -3841,8 +4381,10 @@ type CaptureAuthState = {
  * Two ways past a login page: a session recorded from a visible Chrome window
  * the person signs in to by hand, or credentials the agent types by name. Both
  * are stored outside the project, so this panel only ever shows summaries.
+ * With `embedded` it renders its two blocks without the panel frame, for use
+ * inside the Settings sheet.
  */
-function CaptureSignInPanel({ application, configured, onError, onChanged }: { application: Record<string, unknown> & { baseUrl: string }; configured: boolean; onError: (error: string) => void; onChanged: () => void }) {
+function CaptureSignInPanel({ application, configured, onError, onChanged, embedded }: { application: Record<string, unknown> & { baseUrl: string }; configured: boolean; onError: (error: string) => void; onChanged: () => void; embedded?: boolean }) {
   const [auth, setAuth] = useState<CaptureAuthState>()
   const [busy, setBusy] = useState<'' | 'start' | 'finish' | 'cancel' | 'forget' | 'save' | 'remove'>('')
   const [credentials, setCredentials] = useState({ username: '', password: '' })
@@ -3869,11 +4411,11 @@ function CaptureSignInPanel({ application, configured, onError, onChanged }: { a
     }
   }
   const signIn = auth?.signIn
-  return <Panel title="Application sign-in" description="Let the capture browser past a login page without sharing secrets with the agent or the project.">
-    {!configured && <Note>Save the application settings above first. Sign-in details are stored on this computer against the project, never in the repository.</Note>}
+  const body = <>
+    {!configured && <Note>Save the application settings first. Sign-in details are stored on this computer against the project, never in the repository.</Note>}
     <div class="capture-signin">
       <section class="capture-signin-block">
-        <header><strong>Recorded browser session</strong><small>Sign in by hand in a Chrome window Doxloop opens, including MFA, SSO, or passkeys. The signed-in cookies and local storage are saved and loaded into every capture run.</small></header>
+        <header><strong>Recorded browser session</strong><small>Sign in by hand in a Chrome window Doxloop opens, including MFA, SSO, or passkeys. The signed-in cookies and local storage are loaded into every capture run.</small></header>
         {auth?.session
           ? <div class="plan-capture-readiness ready"><Icon name="check" size={15} /><span><strong>Session saved {timeText(auth.session.savedAt)}</strong><small>{auth.session.origin} · {auth.session.cookies} cookie{auth.session.cookies === 1 ? '' : 's'} · {auth.session.origins} storage origin{auth.session.origins === 1 ? '' : 's'}. Sign in again when the application reports the session expired.</small></span></div>
           : auth && <div class="plan-capture-readiness missing"><Icon name="info" size={15} /><span><strong>No session recorded</strong><small>Screenshots of signed-in screens need a session or credentials.</small></span></div>}
@@ -3888,24 +4430,24 @@ function CaptureSignInPanel({ application, configured, onError, onChanged }: { a
             </>
             : <>
               {auth?.session && <Button tone="danger" busy={busy === 'forget'} onClick={() => void run('forget', () => remove('/api/application/session'))}>Forget session</Button>}
-              <Button tone="primary" icon="preview" disabled={!application.baseUrl} busy={busy === 'start'} onClick={() => void run('start', () => post('/api/application/sign-in', application))}>{auth?.session ? 'Sign in again with browser' : 'Sign in with browser'}</Button>
+              <Button icon="preview" disabled={!application.baseUrl} busy={busy === 'start'} onClick={() => void run('start', () => post('/api/application/sign-in', application))}>{auth?.session ? 'Sign in again with browser' : 'Sign in with browser'}</Button>
             </>}
         </div>
       </section>
       <section class="capture-signin-block">
         <header><strong>Sign-in credentials</strong><small>For a plain username and password form. The agent fills the form by secret name; the capture server substitutes the values and redacts them from every result. Use a test account, never a production one.</small></header>
         {auth?.credentials && <div class="plan-capture-readiness ready"><Icon name="check" size={15} /><span><strong>Credentials saved for {auth.credentials.username}</strong><small>Saved {timeText(auth.credentials.savedAt)}. Enter new values below to replace them.</small></span></div>}
-        <div class="form-grid">
-          <Field label="Username or email"><Input value={credentials.username} autocomplete="off" placeholder="docs-demo@example.com" onInput={(event) => setCredentials({ ...credentials, username: event.currentTarget.value })} /></Field>
-          <Field label="Password"><Input type="password" value={credentials.password} autocomplete="new-password" placeholder="••••••••" onInput={(event) => setCredentials({ ...credentials, password: event.currentTarget.value })} /></Field>
-        </div>
+        <Field label="Username or email"><Input value={credentials.username} autocomplete="off" placeholder="docs-demo@example.com" onInput={(event) => setCredentials({ ...credentials, username: event.currentTarget.value })} /></Field>
+        <Field label="Password"><Input type="password" value={credentials.password} autocomplete="new-password" placeholder="••••••••" onInput={(event) => setCredentials({ ...credentials, password: event.currentTarget.value })} /></Field>
         <div class="form-actions start">
           {auth?.credentials && <Button tone="danger" busy={busy === 'remove'} onClick={() => void run('remove', () => remove('/api/application/credentials'))}>Remove credentials</Button>}
-          <Button tone="primary" disabled={!configured || !credentials.username.trim() || !credentials.password} busy={busy === 'save'} onClick={() => void run('save', async () => { const next = await put<CaptureAuthState>('/api/application/credentials', credentials); setCredentials({ username: '', password: '' }); return next })}>Save credentials</Button>
+          <Button disabled={!configured || !credentials.username.trim() || !credentials.password} busy={busy === 'save'} onClick={() => void run('save', async () => { const next = await put<CaptureAuthState>('/api/application/credentials', credentials); setCredentials({ username: '', password: '' }); return next })}>Save credentials</Button>
         </div>
       </section>
     </div>
-  </Panel>
+  </>
+  if (embedded) return <div class="capture-signin-embedded">{body}</div>
+  return <Panel title="Application sign-in" description="Let the capture browser past a login page without sharing secrets with the agent or the project.">{body}</Panel>
 }
 
 function StaleFormNotice({ onResync }: { onResync: () => void }) {
@@ -3913,6 +4455,35 @@ function StaleFormNotice({ onResync }: { onResync: () => void }) {
     <Icon name="info" size={14} />
     <span>These settings changed elsewhere while you were editing. Your unsaved edits are still here.</span>
     <Button size="sm" onClick={onResync}>Load the saved values</Button>
+  </div>
+}
+
+/**
+ * A right-side sheet: a title, one column of controls, and the action in the
+ * footer. Escape and the scrim close it the same way as the Cancel button.
+ */
+function OpsSheet({ title, description, onClose, footer, children, class: className }: {
+  title: string
+  description?: string
+  onClose: () => void
+  footer?: import('preact').ComponentChildren
+  children: import('preact').ComponentChildren
+  class?: string
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    addEventListener('keydown', onKey)
+    return () => removeEventListener('keydown', onKey)
+  }, [onClose])
+  return <div class="sources-modal-scrim ops-sheet-scrim" onClick={onClose}>
+    <section class={`ops-sheet ${className ?? ''}`} role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
+      <header class="ops-sheet-head">
+        <div><h2>{title}</h2>{description && <p>{description}</p>}</div>
+        <button type="button" class="ops-icon-button" aria-label="Close" onClick={onClose}><Icon name="close" size={16} /></button>
+      </header>
+      <div class="ops-sheet-body">{children}</div>
+      {footer && <footer class="ops-sheet-foot">{footer}</footer>}
+    </section>
   </div>
 }
 
@@ -3943,9 +4514,22 @@ function statusTone(status: string): string {
   return 'neutral'
 }
 
+/** Calm, sentence-case status words for badges. */
 function statusLabel(status: string): string {
-  if (status === 'awaiting-review') return 'pending'
-  return status.replaceAll('-', ' ').replaceAll('_', ' ')
+  if (status === 'awaiting-review') return 'Awaiting review'
+  const words = status.replaceAll('-', ' ').replaceAll('_', ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/**
+ * Screenshot notes can name dozens of image paths. The sentence stays on
+ * screen; the paths fold into a list the reviewer opens when needed.
+ */
+function ScreenshotMessage({ message }: { message: string }) {
+  const paths = [...new Set(message.match(/assets\/[^\s;=,]+?\.(?:png|jpe?g|webp)/g) ?? [])]
+  if (paths.length < 3) return <>{message}</>
+  const summary = message.replace(/:\s*assets\/[\s\S]*\.(?:png|jpe?g|webp)\.?/, '.').replace(/\s+/g, ' ').trim()
+  return <>{summary}<details class="screenshot-message-paths"><summary>Show {paths.length} image{paths.length === 1 ? '' : 's'}</summary><ul>{paths.map((path) => <li key={path}><code>{path}</code></li>)}</ul></details></>
 }
 
 function message(error: unknown): string {
@@ -4021,6 +4605,11 @@ function agentSignInLabel(status: string): string {
   if (status === 'unauthenticated' || status === 'missing') return 'needs sign-in'
   if (status === 'unknown') return 'sign-in unknown'
   return status.replaceAll('-', ' ')
+}
+
+function pageTitleFromPath(path: string): string {
+  const stem = path.split('/').pop()?.replace(/\.(mdx?|md)$/i, '') ?? path
+  return stem.replace(/[-_]+/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase())
 }
 
 function documentationExists(state: UiState): boolean {
@@ -4123,4 +4712,33 @@ function generatorLabel(generators: GeneratorEntry[], value: string): string {
 
 function agentLabel(value: string): string {
   return value === 'claude' ? 'Claude Code' : value === 'codex' ? 'Codex' : 'Gemini'
+}
+
+
+/** Non-empty trimmed lines, for settings that hold sentences. */
+function splitLines(value: string | undefined): string[] {
+  return (value ?? '').split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+
+/** A deploy that failed only because the Doxbrix session is missing or expired. */
+/** Why a browser sign-in stopped, phrased for the button the reader can press. */
+export function loginFailureText(job: Pick<UiJob, 'lines' | 'status'>): string {
+  const reason = jobFailureReason(job)
+  if (reason && /authori[sz]ation expired|expired_token|code expired/i.test(reason)) return 'The sign-in code expired before it was approved. Choose Sign in with browser to get a new code.'
+  if (reason && /access_denied|denied/i.test(reason)) return 'The sign-in was declined in the browser. Choose Sign in with browser to try again.'
+  return reason?.replace(/\s*Run `doxloop login` again\.?/, ' Choose Sign in with browser to try again.') ?? 'The sign-in stopped before an account was connected. Try again.'
+}
+
+/** A deployment error in reader terms; the raw text stays in the log and the title. */
+function friendlyDeployError(error: string): string {
+  return isSignInFailure(error) ? 'Doxbrix did not accept the saved sign-in. Sign in again, then redeploy.' : error
+}
+
+function hostOf(url: string): string {
+  try { return new URL(url).host } catch { return url }
+}
+
+function isSignInFailure(text: string): boolean {
+  return /\b401\b.*unauthori[sz]ed|authentication required|provide a dxb_token/i.test(text)
 }

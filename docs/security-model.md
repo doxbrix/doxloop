@@ -131,18 +131,18 @@ from branch names.
 
 ## Credentials and publishing
 
-Sign in from the **Deploy** page with **Sign in with browser**, which uses a
+Sign in from the **Publish** page with **Sign in with browser**, which uses a
 device flow so no token is typed or pasted. Stored credentials use user-only
 file permissions on operating systems that support them, and **Sign out**
 removes the local token.
 
-Only **Deploy to Doxbrix** publishes. Native projects send a contained
+Only **Publish to Doxbrix** publishes. Native projects send a contained
 documentation bundle to the Doxbrix API. External generators are built on the
 user's machine; Doxloop removes its Doxbrix tokens from the child build
 environment, scans only the declared static output, rejects symbolic
 links/private keys/likely secret files, omits source maps, and enforces file
 and expansion limits before packaging. Deployments are private by default. A
-public visibility setting is shown on the Deploy page before every deployment,
+public visibility setting is shown on the Publish page before every deployment,
 with a note that anyone with the URL will be able to open the site. A **Dry
 run** validates and builds without uploading anything.
 

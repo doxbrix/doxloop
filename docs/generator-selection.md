@@ -37,7 +37,7 @@ navigation is produced by something Doxloop cannot read statically: a Hugo
 theme, a MkDocs navigation plugin, a Starlight plugin, a sidebar built by a
 function or imported from another module, a Sphinx `autosummary` toctree, or
 a Jekyll theme that derives navigation from front matter. The native strict
-build, which **Dry run** on the Deploy page runs, remains the authority in
+build, which every publish runs before it uploads, remains the authority in
 those projects.
 
 The active generator is shown under **Settings → Generator**. It is
@@ -55,8 +55,8 @@ To migrate:
    translating content into the target generator's native format.
 4. Review the proposal, comparing routes, navigation, metadata, components,
    and theme behaviour with the existing site.
-5. Use **Preview docs** and a **Dry run** on the Deploy page, which runs the
-   target generator's strict build.
+5. Use **Preview docs**, then publish: every publish runs the target
+   generator's strict build first and stops before uploading if it fails.
 6. Redirect changed public URLs before replacing the existing site.
 
 Keep the original project until the new site passes validation and route review.

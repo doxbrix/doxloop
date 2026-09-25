@@ -1,4 +1,4 @@
-import type { JSX } from 'preact'
+import type { ComponentChildren, JSX } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { Button, Input, Select, Toggle } from './components'
 import { Icon } from './icons'
@@ -39,6 +39,14 @@ export interface NavigationEditorProps {
   activePath?: string
   maxDepth?: number
   emptyLabel?: string
+  /** Extra classes for a row, e.g. to mark plan pages by action. */
+  rowClass?: (item: NavItem) => string
+  /** Content rendered inside a row after its label (purpose, badges, menus). */
+  rowMeta?: (item: NavItem) => ComponentChildren
+  /** When set, activating a page row (click, Enter, Space) opens it instead of selecting it. */
+  onOpenItem?: (item: NavItem) => void
+  /** Noun used for a group's child count; defaults to "item". */
+  childNoun?: string
 }
 
 type DropPosition = 'before' | 'after' | 'into'
@@ -48,7 +56,7 @@ type DropPosition = 'before' | 'after' | 'into'
  * keyboard route: arrows move focus, Alt+arrows move the focused item, and
  * the row's buttons expose the same moves for screen readers.
  */
-export function NavigationEditor({ items, onChange, supports, icons, editable, requiresEveryPage, orphans, maxDepth, emptyLabel, onSelectPage, activePath }: NavigationEditorProps) {
+export function NavigationEditor({ items, onChange, supports, icons, editable, requiresEveryPage, orphans, maxDepth, emptyLabel, onSelectPage, activePath, rowClass, rowMeta, onOpenItem, childNoun = 'item' }: NavigationEditorProps) {
   const [selectedId, setSelectedId] = useState<string>()
   const [dragging, setDragging] = useState<string>()
   const [drop, setDrop] = useState<{ id: string; position: DropPosition }>()
@@ -110,7 +118,7 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
     else if (event.altKey && event.key === 'ArrowUp') { event.preventDefault(); change(shiftItem(items, id, -1)); requestAnimationFrame(() => focusRow(id)) }
     else if (event.altKey && event.key === 'ArrowRight') { event.preventDefault(); if (canIndent(id)) change(indentItem(items, id)); requestAnimationFrame(() => focusRow(id)) }
     else if (event.altKey && event.key === 'ArrowLeft') { event.preventDefault(); change(outdentItem(items, id)); requestAnimationFrame(() => focusRow(id)) }
-    else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(selectedId === id ? undefined : id) }
+    else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); const opening = onOpenItem && findItem(items, id)?.item; if (opening && opening.node.type === 'page') onOpenItem(opening); else setSelectedId(selectedId === id ? undefined : id) }
     else if (event.key === 'Delete' || event.key === 'Backspace') { const item = findItem(items, id)?.item; if (item && canRemove(item)) { event.preventDefault(); remove(id) } }
   }
   const dropTarget = (event: DragEvent, id: string, isGroup: boolean): DropPosition => {
@@ -140,7 +148,7 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
     const dropHere = drop?.id === item.id ? drop.position : undefined
     return <div key={item.id} class={`nav-tree-branch depth-${Math.min(depth, 3)}`}>
       <div
-        class={`nav-tree-row ${active ? 'active' : ''} ${dragging === item.id ? 'dragging' : ''} ${dropHere ? `drop-${dropHere}` : ''} type-${node.type}`}
+        class={`nav-tree-row ${active ? 'active' : ''} ${dragging === item.id ? 'dragging' : ''} ${dropHere ? `drop-${dropHere}` : ''} type-${node.type} ${rowClass?.(item) ?? ''}`}
         data-nav-item={item.id}
         role="treeitem"
         aria-level={depth + 1}
@@ -149,7 +157,7 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
         aria-expanded={isGroup ? true : undefined}
         tabIndex={0}
         draggable={editable}
-        onClick={() => setSelectedId(active ? undefined : item.id)}
+        onClick={() => { if (onOpenItem && node.type === 'page') onOpenItem(item); else setSelectedId(active ? undefined : item.id) }}
         onKeyDown={(event) => onKey(event, item.id)}
         onDragStart={(event) => { if (!editable) return; setDragging(item.id); event.dataTransfer?.setData('text/plain', item.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move' }}
         onDragEnd={() => { setDragging(undefined); setDrop(undefined) }}
@@ -164,8 +172,9 @@ export function NavigationEditor({ items, onChange, supports, icons, editable, r
           {node.type === 'page' && <code>{node.path ?? node.file}</code>}
           {node.type === 'link' && <code>{node.href}</code>}
           {node.type === 'api' && <code>{node.spec}</code>}
-          {node.type === 'group' && <small>{item.children?.length ?? 0} item{(item.children?.length ?? 0) === 1 ? '' : 's'}</small>}
+          {node.type === 'group' && <small>{item.children?.length ?? 0} {childNoun}{(item.children?.length ?? 0) === 1 ? '' : 's'}</small>}
         </span>
+        {rowMeta?.(item)}
         {'hidden' in node && node.hidden && <span class="nav-tree-flag">Hidden</span>}
         {editable && <span class="nav-tree-actions" onClick={(event) => event.stopPropagation()}>
           <button type="button" aria-label={`Move ${itemLabel(item)} up`} title="Move up (Alt+↑)" onClick={() => change(shiftItem(items, item.id, -1))}><Icon name="chevronUp" size={14} /></button>

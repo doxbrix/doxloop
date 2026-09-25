@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { DoxloopError } from './errors.js'
 import { pathExists, readJson } from './fs.js'
 import { matchesGlob } from './globs.js'
-import type { EvidenceMap, PageEvidence, PageEvidenceSource } from './types.js'
+import type { EvidenceMap, PageEvidence, PageEvidenceSource, SyncState } from './types.js'
 
 export const EVIDENCE_MAP_FILE = join('.doxloop', 'evidence-map.json')
 
@@ -55,6 +55,32 @@ export async function writeEvidenceMap(root: string, map: EvidenceMap): Promise<
     `${JSON.stringify({ schemaVersion: 1, pages }, null, 2)}\n`,
     'utf8',
   )
+}
+
+/**
+ * A run that ends by recording the sync baseline has just verified its pages
+ * against that baseline. Stamp each verified page with the revision it was
+ * checked against, so coverage and drift can tell "verified at the current
+ * baseline" from "verified at some point"; without it every generated page
+ * counted as unverified. Existing stamps are kept. Returns the pages stamped.
+ */
+export async function stampVerifiedRevisions(root: string, state: SyncState): Promise<number> {
+  const map = await readEvidenceMap(root)
+  if (!map) return 0
+  let stamped = 0
+  for (const evidence of Object.values(map.pages)) {
+    if (evidence.confidence !== 'verified') continue
+    let changed = false
+    for (const entry of evidence.sources) {
+      const record = state.sources[entry.source]
+      if (!record?.commit || evidence.verifiedAt?.[entry.source]) continue
+      evidence.verifiedAt = { ...evidence.verifiedAt, [entry.source]: record.commit }
+      changed = true
+    }
+    if (changed) stamped += 1
+  }
+  if (stamped > 0) await writeEvidenceMap(root, map)
+  return stamped
 }
 
 /**

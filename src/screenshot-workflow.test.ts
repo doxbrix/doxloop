@@ -422,6 +422,48 @@ describe('screenshot workflow', () => {
     expect(result.summary.message).toContain('another guide already shows')
   })
 
+  test('does not report one shared file as a repeat of itself', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
+    roots.push(root)
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    const png = new PNG({ width: 640, height: 360 })
+    for (let index = 0; index < png.data.length; index += 4) {
+      png.data[index] = (index / 4) % 251
+      png.data[index + 1] = Math.floor(index / (4 * 640)) % 255
+      png.data[index + 2] = 90
+      png.data[index + 3] = 255
+    }
+    const plan = screenshotPlan()
+    plan.pages.push({ ...plan.pages[0]!, id: 'tour', path: 'tour', title: 'Product tour' })
+    const file = 'assets/guides/planning/users-list.png'
+    await mkdir(join(root, 'assets', 'guides', 'planning'), { recursive: true })
+    await writeFile(join(root, file), PNG.sync.write(png))
+    const guides = []
+    for (const name of ['invite-member', 'tour']) {
+      await writeFile(join(root, `${name}.mdx`), `1. Open **Users**.\n\n![Users list](/${file})\n`)
+      guides.push({
+        page: name,
+        steps: [{
+          id: '01',
+          action: 'Open Users from the sidebar.',
+          expectedState: 'The users list is shown.',
+          purpose: 'Show where users are managed.',
+          capture: true,
+          target: 'Users list',
+          file,
+          alt: 'Users list in the admin dashboard',
+          status: 'verified',
+          checks: { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true },
+        }],
+      })
+    }
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, guides }))
+
+    const result = await validateScreenshotManifest(root, plan, 'enabled')
+    expect(result.summary.status).toBe('verified')
+    expect(result.summary.message ?? '').not.toContain('another guide already shows')
+  })
+
   test('leaves an unclaimed image alone when no step number matches it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
     roots.push(root)
@@ -694,6 +736,54 @@ describe('screenshot workflow', () => {
     await expect(validateScreenshotManifest(root, screenshotPlan(), 'enabled')).resolves.toMatchObject({
       summary: { status: 'verified', captured: 3 },
     })
+  })
+
+  test('a capture file shared by two steps is kept for the step that shows it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
+    roots.push(root)
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    await mkdir(join(root, 'assets', 'guides', 'planning'), { recursive: true })
+    const file = 'assets/guides/planning/editor.png'
+    const png = new PNG({ width: 64, height: 36 }); png.data.fill(40)
+    await writeFile(join(root, file), PNG.sync.write(png))
+    await writeFile(join(root, 'invite-member.mdx'), `<Steps>\n<Step title="Open">Open it.\n\n![Editor](/${file})</Step>\n<Step title="Next">Next.</Step>\n</Steps>\n`)
+    const step = (id: string) => ({ id, action: 'Act.', expectedState: 'Visible.', purpose: 'Prove it.', capture: true, target: 'Editor', file, alt: 'Editor', status: 'verified',
+      checks: { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true } })
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, guides: [{ page: 'invite-member', steps: [step('01'), step('02')] }] }))
+    await expect(collapseDuplicateCaptures(root, screenshotPlan())).resolves.toEqual([file])
+    // The repeat became text-only, but the image and its reference stay for step 1.
+    await expect(readFile(join(root, file))).resolves.toBeTruthy()
+    expect(await readFile(join(root, 'invite-member.mdx'), 'utf8')).toContain(`![Editor](/${file})`)
+  })
+
+  test('does not place a repeated screen, or a second image in a step that already shows one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-screenshots-'))
+    roots.push(root)
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    await mkdir(join(root, 'assets', 'guides', 'invite-member'), { recursive: true })
+    const files = ['01-open.png', '02-form.png', '03-same.png'].map((name) => `assets/guides/invite-member/${name}`)
+    const image = (seed: number) => { const png = new PNG({ width: 64, height: 36 }); png.data.fill(seed); return PNG.sync.write(png) }
+    await writeFile(join(root, files[0]!), image(10))
+    await writeFile(join(root, files[1]!), image(80))
+    await writeFile(join(root, files[2]!), image(10)) // same pixels as the first, under another name
+    await writeFile(join(root, 'invite-member.mdx'), [
+      '<Steps>',
+      `<Step title="Open settings">Open Team settings.\n\n![Team settings](/${files[0]})</Step>`,
+      '<Step title="Open the form">Select Invite member.\n\n![Dialog](/elsewhere.png)</Step>',
+      '<Step title="Send">Select Send.</Step>',
+      '</Steps>',
+      '',
+    ].join('\n'))
+    await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({
+      schemaVersion: 1,
+      guides: [{ page: 'invite-member', steps: files.map((file, index) => ({
+        id: `0${index + 1}`, action: 'Act.', expectedState: 'Visible.', purpose: 'Prove it.',
+        capture: true, target: 'Dialog', file, alt: `Step ${index + 1}`, status: 'verified',
+        checks: { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true },
+      })) }],
+    }))
+    // 02 would land in step 2, which already has an image; 03 repeats the first screen.
+    await expect(embedMissingCaptures(root, screenshotPlan())).resolves.toEqual([])
   })
 
   test('reports every capture problem in one pass', async () => {

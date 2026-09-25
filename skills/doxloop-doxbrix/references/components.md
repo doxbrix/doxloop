@@ -125,6 +125,12 @@ graph TD; A[Start] --> B[Complete];
 <Math>e = mc^2</Math>
 ```
 
+Diagrams are scaled to the content width, so a wide one becomes unreadably
+small. Keep every level of a `graph TD` to at most three or four nodes; when
+a decision has more outcomes, draw it `graph LR` (it grows downward instead)
+or split it into two diagrams, and keep node labels to a few words. A table
+often reads better than a diagram with six or more branches.
+
 ```mdx
 <ApiEndpoint method="POST" path="/users" baseUrl="https://api.example.com" summary="Create a user">
 <Param name="name" in="body" type="string" required>Display name</Param>

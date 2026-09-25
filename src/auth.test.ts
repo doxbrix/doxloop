@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { apiUrl, authenticatedRequest, whoami } from './auth.js'
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { apiUrl, authenticatedRequest, loadUserConfig, saveToken, signedInServers, tokenFor, whoami } from './auth.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -85,5 +88,38 @@ describe('API URL security', () => {
     ).rejects.toThrow(
       'The underlying exception is recorded in the Doxbrix server logs under this request ID.',
     )
+  })
+})
+
+describe('per-server sign-in', () => {
+  test('signing in to a second server keeps the first and never sends a token to the wrong server', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'doxloop-auth-'))
+    vi.stubEnv('XDG_CONFIG_HOME', home)
+    vi.stubEnv('DOXLOOP_TOKEN', '')
+    vi.stubEnv('DOXBRIX_TOKEN', '')
+    delete process.env.DOXLOOP_TOKEN
+    delete process.env.DOXBRIX_TOKEN
+    try {
+      // A file from before per-server tokens: one token for localhost.
+      await mkdir(join(home, 'doxloop'), { recursive: true })
+      await writeFile(join(home, 'doxloop', 'config.json'), JSON.stringify({ apiUrl: 'http://localhost:3000', token: 'dxb_local' }))
+      let config = await loadUserConfig()
+      expect(tokenFor(config, 'http://localhost:3000')).toBe('dxb_local')
+      expect(tokenFor(config, 'https://app.doxbrix.com')).toBeUndefined()
+
+      await saveToken('dxb_prod', 'https://app.doxbrix.com')
+      config = await loadUserConfig()
+      expect(tokenFor(config, 'https://app.doxbrix.com')).toBe('dxb_prod')
+      expect(tokenFor(config, 'http://localhost:3000')).toBe('dxb_local')
+      expect(signedInServers(config).sort()).toEqual(['http://localhost:3000', 'https://app.doxbrix.com'])
+      expect(JSON.parse(await readFile(join(home, 'doxloop', 'config.json'), 'utf8')).apiUrl).toBe('https://app.doxbrix.com')
+
+      const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ok: true }))
+      await authenticatedRequest('/api/v1/me', { method: 'GET' }, 'http://localhost:3000')
+      expect(new Headers((fetch.mock.calls[0]![1] as RequestInit).headers).get('Authorization')).toBe('Bearer dxb_local')
+      await expect(authenticatedRequest('/api/v1/me', { method: 'GET' }, 'https://other.example.test')).rejects.toThrow('Not signed in to other.example.test')
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
   })
 })

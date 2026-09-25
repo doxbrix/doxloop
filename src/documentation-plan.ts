@@ -1023,7 +1023,10 @@ async function runPlannerWithBudget(
               }
             },
             onProgress: (done, total, task, outcome) => {
-              emitWorkflowStage('building-coverage', `Research ${done}/${total}: ${task.label} ${outcome === 'cached' ? 'reused' : outcome}`, 'running', { done, total })
+              // The row shows what is still in progress; which session just ended belongs in the log.
+              process.stdout.write(`Research ${done}/${total}: ${task.label} ${outcome === 'cached' ? 'reused' : outcome}\n`)
+              const left = total - done
+              emitWorkflowStage('building-coverage', left > 0 ? `Researching · ${left} session${left === 1 ? '' : 's'} still running` : 'Research finished · writing the plan', 'running', { done, total })
             },
             log: (line) => process.stdout.write(`${line}\n`),
           }).catch((error: unknown) => {
@@ -1247,10 +1250,37 @@ export function applyPlanPatch(base: unknown, patch: unknown): unknown {
     if (!known.has(pageId(page)) && !removed.has(pageId(page)!)) pages.push(page)
   }
   const next: Record<string, unknown> = { ...first, pages }
-  for (const key of ['capabilities', 'navigation', 'existingDocumentation', 'questions', 'exclusions', 'outcomes', 'audiences', 'terminology', 'instructions', 'summary']) {
+  for (const key of ['capabilities', 'navigation', 'questions', 'exclusions', 'outcomes', 'audiences', 'terminology', 'instructions', 'summary']) {
     if (key in delta) next[key] = delta[key]
   }
+  if ('existingDocumentation' in delta) next.existingDocumentation = mergeExistingDocumentation(first.existingDocumentation, delta.existingDocumentation)
   return next
+}
+
+/**
+ * Agents resend an existing-documentation assessment with only the pages
+ * they re-placed. Merge per source and per crawled page path, so a revision
+ * that moves two pages does not drop the other thirty-five dispositions.
+ */
+function mergeExistingDocumentation(base: unknown, patch: unknown): unknown {
+  if (!Array.isArray(patch)) return patch
+  if (!Array.isArray(base)) return patch
+  const sourceOf = (item: unknown): string | undefined => { const value = record(item).source; return typeof value === 'string' ? value : undefined }
+  const pathOf = (item: unknown): string | undefined => { const value = record(item).path; return typeof value === 'string' ? value : undefined }
+  const merged = base.map((assessment) => {
+    const update = patch.find((item) => sourceOf(item) === sourceOf(assessment))
+    if (!update) return assessment
+    const previous = record(assessment); const next = record(update)
+    const basePages = Array.isArray(previous.pages) ? previous.pages : []
+    const patchPages = Array.isArray(next.pages) ? next.pages : []
+    const byPath = new Map(patchPages.filter((page) => pathOf(page)).map((page) => [pathOf(page)!, page]))
+    const pages = basePages.map((page) => byPath.get(pathOf(page) ?? '') ?? page)
+    const known = new Set(basePages.map(pathOf))
+    for (const page of patchPages) if (!known.has(pathOf(page))) pages.push(page)
+    return { ...previous, ...next, pages }
+  })
+  for (const assessment of patch) if (!base.some((item) => sourceOf(item) === sourceOf(assessment))) merged.push(assessment)
+  return merged
 }
 
 /**
@@ -1904,6 +1934,7 @@ function normalizePlanShape(raw: unknown, base: DocumentationPlan): Pick<Documen
       : page,
   )
   if (pages.length === 0) throw new DoxloopError('A documentation plan must contain at least one page for the current run.')
+  if ((base.target?.generator ?? 'doxbrix') === 'doxbrix') uniquePageFileNames(pages)
   const questionsRaw = Array.isArray(value.questions) ? value.questions : base.questions
   const questions = questionsRaw.slice(0, 3).map((question, index) => normalizeQuestion(question, index)).filter((question) =>
     normalizeScreenshotIntent(base.execution.screenshots) === 'disabled' || !isCapturePreparationQuestion(question),
@@ -2305,10 +2336,41 @@ export function screenshotCoverageAdvisory(
   return `Only ${visualPages.length} of ${procedural.length} procedural pages has application screenshots. If the application should show more, it was probably sitting on its initial or empty state while planning ran: open the screens you want documented — sign in, select a workspace, or load example data — and plan again. Otherwise approve this plan and the remaining pages stay text-first.`
 }
 
+/**
+ * Top-level folders a site build writes to (build, dist, out, site, _build)
+ * are never documentation: proposals skip them, so a page planned there would
+ * be written and then silently left out. Move such a page to a content folder.
+ */
+const RESERVED_CONTENT_FOLDERS: Record<string, string> = { build: 'develop', dist: 'distribution', out: 'output', site: 'website', _build: 'building' }
+export function contentSafePath(path: string): string {
+  const [first, ...rest] = path.split('/')
+  const replacement = first ? RESERVED_CONTENT_FOLDERS[first] : undefined
+  return replacement ? [replacement, ...rest].join('/') : path
+}
+
+/**
+ * Doxbrix serves a page at its file name, so two planned pages called
+ * "troubleshooting" in different folders would publish as one. Later pages
+ * with a taken name get their folder in front of it ("embed/embed-troubleshooting").
+ */
+export function uniquePageFileNames(pages: Array<{ path: string }>): void {
+  const taken = new Set<string>()
+  for (const page of pages) {
+    const parts = page.path.split('/')
+    const name = parts.at(-1)!
+    if (name === 'index' || !taken.has(name)) { taken.add(name); continue }
+    const folder = parts.length > 1 ? parts.at(-2)! : 'more'
+    let candidate = `${folder}-${name}`
+    for (let n = 2; taken.has(candidate); n += 1) candidate = `${folder}-${name}-${n}`
+    page.path = [...parts.slice(0, -1), candidate].join('/')
+    taken.add(candidate)
+  }
+}
+
 function normalizePage(raw: unknown, index: number): DocumentationPlanPage {
   const page = record(raw)
   const title = requiredText(page.title, `Page ${index + 1} title`)
-  const path = requiredText(page.path, `Page ${index + 1} path`).replaceAll('\\', '/').replace(/^\/+/, '')
+  const path = contentSafePath(requiredText(page.path, `Page ${index + 1} path`).replaceAll('\\', '/').replace(/^\/+/, ''))
   if (!path || path.split('/').includes('..')) throw new DoxloopError(`Page path "${path}" is not a safe relative path.`)
   const priority: DocumentationPlanPagePriority = page.priority === 'next' || page.priority === 'later' ? page.priority : 'must-have'
   const action: DocumentationPlanPageAction = page.action === 'update' || page.action === 'preserve' || page.action === 'remove' ? page.action : 'create'
