@@ -3,7 +3,7 @@ import { lookup } from 'node:dns/promises'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
-import { parseDocument } from 'yaml'
+import { parseDocument, stringify as stringifyYaml } from 'yaml'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
 import { isSpecUrl } from './project.js'
@@ -344,6 +344,28 @@ async function writeRemoteCache(root: string, url: string, loaded: LoadedOpenApi
   const path = remoteCachePath(root, url)
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, `${JSON.stringify({ url, content: loaded.content, hash: loaded.hash, etag: loaded.etag, lastModified: loaded.lastModified }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  // Writing agents run without network access and cannot read the URL; they
+  // read this plain copy of the specification instead.
+  await writeFile(remoteOpenApiCopyPath(root, url, loaded.content), loaded.content, { encoding: 'utf8', mode: 0o600 })
+}
+
+/** Where the plain-text copy of a remote specification is kept for agents to read. */
+export function remoteOpenApiCopyPath(root: string, url: string, content?: string): string {
+  const json = content !== undefined ? content.trimStart().startsWith('{') : /\.json(?:$|[?#])/i.test(url)
+  return join(root, OPENAPI_CACHE_DIRECTORY, `${createHash('sha256').update(url).digest('hex')}.spec.${json ? 'json' : 'yaml'}`)
+}
+
+/** Make sure a remote specification has a readable local copy; returns its path, or undefined for local specs. */
+export async function ensureRemoteOpenApiCopy(root: string, source: SourceBinding): Promise<string | undefined> {
+  if (!isSpecUrl(source.path)) return undefined
+  const cached = await readRemoteCache(root, source.path)
+  if (cached) {
+    const copy = remoteOpenApiCopyPath(root, source.path, cached.content)
+    if (!(await pathExists(copy))) await writeFile(copy, cached.content, { encoding: 'utf8', mode: 0o600 })
+    return copy
+  }
+  const loaded = await loadOpenApiSource(root, source)
+  return remoteOpenApiCopyPath(root, source.path, loaded.content)
 }
 
 function remoteCachePath(root: string, url: string): string {
@@ -355,3 +377,69 @@ function record(value: unknown): Record<string, unknown> { return isRecord(value
 function isRecord(value: unknown): value is Record<string, any> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value) }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : [] }
 function text(value: unknown): string | undefined { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
+
+const OPERATION_LABEL = /^(get|put|post|delete|patch|options|head|trace)\s+(\/\S*)/i
+
+/**
+ * The part of a contract one citation names: an operation (`POST /users`,
+ * also reached through an error label such as `POST /users 422`), a schema,
+ * or a security scheme, with every component it references inlined below it
+ * so the writer sees request and response bodies without opening the spec.
+ * A citation that names nothing specific gets the contract's index instead.
+ */
+export function openApiExcerpt(document: Record<string, unknown>, citation: { path: string; label?: string }, budget: number): { text: string; truncated: boolean } | undefined {
+  const components = record(document.components)
+  const definitions = record(document.definitions)
+  const selected: Record<string, unknown> = {}
+  const wanted = [citation.label, citation.path].filter((value): value is string => Boolean(value?.trim())).map((value) => value.trim())
+  for (const value of wanted) {
+    const operation = OPERATION_LABEL.exec(value)
+    if (operation) {
+      const item = record(record(document.paths)[operation[2]!])[operation[1]!.toLowerCase()]
+      if (isRecord(item)) { selected[`${operation[1]!.toUpperCase()} ${operation[2]}`] = item; break }
+    }
+    const name = value.replace(/^(?:Schema |schema:)/, '')
+    const schema = record(components.schemas)[name] ?? definitions[name]
+    if (isRecord(schema)) { selected[`Schema ${name}`] = schema; break }
+    const scheme = record(components.securitySchemes)[name] ?? record(document.securityDefinitions)[name]
+    if (isRecord(scheme)) { selected[`Security scheme ${name}`] = scheme; break }
+  }
+  if (Object.keys(selected).length === 0) {
+    const index = {
+      info: document.info,
+      servers: document.servers ?? (document.host ? [`${document.host}${text(document.basePath) ?? ''}`] : undefined),
+      security: document.security,
+      securitySchemes: components.securitySchemes ?? document.securityDefinitions,
+      operations: Object.fromEntries(Object.entries(record(document.paths)).flatMap(([path, item]) => METHODS.filter((method) => isRecord(record(item)[method])).map((method) => [`${method.toUpperCase()} ${path}`, text(record(record(item)[method]).summary) ?? ''] as const))),
+    }
+    return clip(stringifyYaml(index, { lineWidth: 0 }), budget)
+  }
+  // Inline referenced components, breadth first, until the budget is spent.
+  const referenced: Record<string, unknown> = {}
+  const queue = [...collectRefs(selected)]
+  while (queue.length > 0 && Object.keys(referenced).length < 40) {
+    const ref = queue.shift()!
+    if (ref in referenced) continue
+    const target = ref.replace(/^#\//, '').split('/').reduce<unknown>((node, key) => record(node)[key.replace(/~1/g, '/').replace(/~0/g, '~')], document)
+    if (target === undefined) continue
+    referenced[ref] = target
+    queue.push(...collectRefs(target))
+  }
+  const body = { ...selected, ...(Object.keys(referenced).length > 0 ? { 'Referenced components': referenced } : {}) }
+  return clip(stringifyYaml(body, { lineWidth: 0 }), budget)
+}
+
+function collectRefs(value: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) for (const item of value) collectRefs(item, found)
+  else if (isRecord(value)) for (const [key, item] of Object.entries(value)) {
+    if (key === '$ref' && typeof item === 'string' && item.startsWith('#/')) found.add(item)
+    else collectRefs(item, found)
+  }
+  return found
+}
+
+function clip(value: string, budget: number): { text: string; truncated: boolean } {
+  if (value.length <= budget) return { text: value, truncated: false }
+  const cut = value.slice(0, budget)
+  return { text: cut.slice(0, Math.max(cut.lastIndexOf('\n'), budget - 200)), truncated: true }
+}

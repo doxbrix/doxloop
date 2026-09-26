@@ -56,6 +56,7 @@ import { changedSourcePaths, collectSourceChanges, formatSourceChanges, sourceSn
 import { lineHunks, textLines } from './text-diff.js'
 import { formatValidation, isStarterContent, validateProject } from './validation.js'
 import type {
+  DocumentationPlanExecution,
   ValidationIssue,
   AgentUsage,
   AgentName,
@@ -1184,10 +1185,29 @@ export async function reviseSyncRun(root: string, id: string, input: ReviseSyncR
       ...(editRequest ? { historyRequest: instruction } : {
         request: `Revise only the selected proposal scope below. Preserve every other proposed file exactly as it is.\n\nSelected files:\n${scope}${hunkScope}\n\nReviewer instruction:\n${instruction}`,
       }),
-      ...(project.defaultAgent ? { agent: project.defaultAgent } : {}),
+      // The revision runs on the model and reasoning the proposal was written
+      // with. Passing only the agent let Codex fall back to its own default
+      // model, which a real run's installed CLI could not use at all.
+      ...revisionAgent(project, plan?.id === run.planId ? plan : undefined),
       screenshots: 'disabled',
     },
   })
+}
+
+function revisionAgent(project: DoxloopProject, plan: DocumentationPlan | undefined): { agent?: AgentName; model?: string; reasoning?: NonNullable<DocumentationPlanExecution['reasoning']>; effort?: NonNullable<DocumentationPlanExecution['effort']> } {
+  const execution = plan?.execution
+  const agent = execution?.agent ?? project.defaultAgent
+  if (!agent) return {}
+  if (execution && execution.agent === agent) {
+    return {
+      agent,
+      ...(execution.model ? { model: execution.model } : {}),
+      ...(execution.reasoning ? { reasoning: execution.reasoning } : {}),
+      ...(execution.effort ? { effort: execution.effort } : {}),
+    }
+  }
+  const model = projectDefaultModel(project, agent)
+  return { agent, ...(model ? { model } : {}) }
 }
 
 export async function readSyncRunChangeContent(root: string, id: string, changeId: string): Promise<{ content: string; path: string; fingerprint: string; evidenceDisposition: 'preserved' | 'needs-review' }> {

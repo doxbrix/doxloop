@@ -124,5 +124,29 @@ test('links a page to research findings through the plan capabilities that name 
   expect(text).toContain('Labels are created from the Labels page')
   expect(text).toContain('func CreateLabel')
   expect(text).not.toContain('Nope.')
+
 })
 
+test('packs the cited operation of an API contract with the schemas it references', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'doxloop-evidence-pack-'))
+  roots.push(root)
+  await mkdir(join(root, 'product', 'specs'), { recursive: true })
+  const spec = ['openapi: 3.1.0', 'info: { title: Conduit, version: 1.0.0 }', 'components:', '  schemas:', '    User: { type: object, properties: { email: { type: string } } }', 'paths:', '  /users/login:', '    post:', '      summary: Existing user login', '      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }', '      responses: { "200": { description: OK } }', '  /tags:', '    get:', '      summary: Get tags', '      responses: { "200": { description: OK } }', ''].join('\n')
+  await writeFile(join(root, 'product', 'specs', 'openapi.yml'), spec)
+  await writeFile(join(root, 'api.yaml'), spec)
+  const sources: SourceBinding[] = [
+    { name: 'product', path: join(root, 'product') },
+    { name: 'api', path: join(root, 'api.yaml'), kind: 'openapi' } as SourceBinding,
+  ]
+  const pages = [
+    page('login', [{ source: 'product', path: 'specs/openapi.yml', kind: 'operation', label: 'POST /users/login' }]),
+    page('overview', [{ source: 'api', path: 'api.yaml' }]),
+  ]
+  const result = await writeEvidencePack(root, { sources }, {} as DocumentationPlan, pages)
+  expect(result.missing).toEqual([])
+  const text = await readFile(join(root, result.file!), 'utf8')
+  expect(text).toContain('POST /users/login')
+  expect(text).toContain('#/components/schemas/User')
+  expect(text).toContain('Referenced components')
+  expect(text).toContain('GET /tags: Get tags')
+})

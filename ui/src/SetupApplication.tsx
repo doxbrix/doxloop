@@ -361,7 +361,7 @@ export function SetupApplication({ state, act, error, onContinue, onCancel }: { 
   const readinessIssue = (readiness: ApplicationReadiness): string =>
     readiness.status === 'authentication-required'
       ? `Your application shows a sign-in page first${readiness.signInPath ? ` (${readiness.signInPath})` : ''}. Choose "Sign in with browser" and sign in once, or enter a test account below. You can also choose "Continue without signing in" — then screenshots only show the sign-in pages.`
-      : /^Application URL/.test(readiness.message) ? readiness.message : `${readiness.message} Start the application and continue again, or choose No for screenshots.`
+      : /^Application URL/.test(readiness.message) ? readiness.message : `${readiness.message} Start the application and continue again, or turn off product screenshots.`
   const sourceType = form.sourceKind === 'openapi' ? 'openapi' : form.sourceLocation === 'git' ? 'git' : 'local'
   const updateSourceType = (value: string) => {
     if (value === 'openapi') {

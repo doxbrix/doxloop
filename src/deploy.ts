@@ -7,6 +7,7 @@ import {
   authenticatedRequestOptional,
 } from './auth.js'
 import { DoxloopError } from './errors.js'
+import { pushDeploymentBundle } from './bundle-upload.js'
 import { listFiles, resolveContainedDirectory } from './fs.js'
 import { recordDeployment } from './history.js'
 import { deployGeneratedSite } from './artifact-deploy.js'
@@ -192,16 +193,13 @@ export async function deploy(options: {
     }
 
     const publishing = steps.start('Publishing to Doxbrix')
-    const pushed = await authenticatedRequest<{ result: PushReport }>(
-      `/api/v1/projects/${encodeURIComponent(target.slug)}/bundle`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // A deployment bundle is the complete documentation snapshot. Asking
-        // Doxbrix to replace the previous snapshot prevents pages and menu
-        // items removed locally from surviving on the published site.
-        body: JSON.stringify({ ...bundle, publish: true, replace: true }),
-      },
+    const pushed = await pushDeploymentBundle<{ result: PushReport }>(
+      target.slug,
+      bundle,
+      // A deployment bundle is the complete documentation snapshot. Asking
+      // Doxbrix to replace the previous snapshot prevents pages and menu
+      // items removed locally from surviving on the published site.
+      { publish: true, replace: true },
       options.apiUrl,
     )
     const report = pushed.result

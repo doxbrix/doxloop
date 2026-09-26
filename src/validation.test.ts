@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { scaffoldProject } from './project.js'
-import { validateProject } from './validation.js'
+import { validateProject, validateShellExamples } from './validation.js'
 
 const roots: string[] = []
 
@@ -775,4 +775,10 @@ describe('API endpoint response bodies', () => {
     expect(duplicate?.severity).toBe('error')
     expect(duplicate?.message).toContain('embed/embed-troubleshooting')
   })
+})
+
+test('rejects shell examples that assign a read-only shell variable', () => {
+  const page = '# Quickstart\n\n```bash\nBASE_URL="https://api.example.com"\nUID="$(date +%s)"\n```\n\n```bash\nRUN_ID="$(date +%s)"\necho "$UID"\n```\n'
+  const issues = validateShellExamples(page, 'quickstart.mdx')
+  expect(issues).toEqual([expect.objectContaining({ severity: 'error', code: 'shell-readonly-variable', message: expect.stringContaining('Line 5') })])
 })

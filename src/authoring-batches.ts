@@ -402,6 +402,7 @@ const SUGGESTION_LABELS: Record<string, string> = {
   'thin-procedure': 'procedures missing parts',
   'missing-diagram': 'missing diagrams',
   'api-endpoint-param-example': 'missing parameter examples',
+  'api-endpoint-missing': 'endpoints without a reference block',
 }
 
 function plural(count: number, noun: string): string {

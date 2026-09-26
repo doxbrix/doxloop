@@ -61,6 +61,8 @@ import {
   startRequest,
   syncPageRegistry,
 } from './history.js'
+import { ensureRemoteOpenApiCopy } from './openapi.js'
+import { contractCoverageIssues } from './api-coverage.js'
 import { isSpecUrl, loadProject, sourceKind } from './project.js'
 import { monitorRemoteSources } from './remote-monitor.js'
 import { persistReviewReport } from './review-report.js'
@@ -235,6 +237,13 @@ export async function runAuthor(options: {
   // Required screenshots relax to best effort when capture cannot start, so a
   // missing browser or an unreachable application never stops the writing.
   let screenshotIntent = options.screenshots ?? 'auto'
+  const specCopies: Record<string, string> = {}
+  for (const source of project.sources.filter((item) => (item.kind ?? 'directory') === 'openapi')) {
+    try {
+      const copy = await ensureRemoteOpenApiCopy(options.root, source)
+      if (copy) specCopies[source.name] = copy
+    } catch { /* Discovery already reported an unreachable specification. */ }
+  }
   const buildPrompt = (sources: SourceBinding[]): string => authorPrompt(
     options.mode,
     sources,
@@ -247,6 +256,7 @@ export async function runAuthor(options: {
     project.application,
     currentCliCommand(),
     describeCaptureAuth(captureAuth),
+    specCopies,
   )
   if (options.print) {
     process.stdout.write(`${buildPrompt(project.sources)}\n`)
@@ -722,6 +732,12 @@ export async function runAuthor(options: {
     const files = await planPageFiles(options.root, plan, pages)
     let issues = await repairAndValidate(pages, files, { includeWarnings: true })
     if (issues === undefined) return
+    if (project.generator === 'doxbrix') {
+      const missing = await contractCoverageIssues(options.root, files)
+      const orphaned = missing.filter((issue) => !issue.file)
+      if (orphaned.length > 0) say(`Final check: ${orphaned.length} API operation${orphaned.length === 1 ? '' : 's'} in the contract ${orphaned.length === 1 ? 'is' : 'are'} not mentioned on any page (${orphaned.map((issue) => /'s (\S+ \S+) has/.exec(issue.message)?.[1]).join(', ')}).`)
+      issues = [...issues, ...missing.filter((issue) => issue.file)]
+    }
     if (issues.length === 0) {
       say(`Final check: ${files.length} page${files.length === 1 ? '' : 's'} pass validation with no depth warnings.`)
       return
@@ -1692,6 +1708,7 @@ export function authorPrompt(
   application?: ApplicationConfig,
   cliCommand = 'doxloop',
   captureAuth: CaptureAuthMode = 'none',
+  specCopies: Record<string, string> = {},
 ): string {
   const sourceText =
     sources.length === 0
@@ -1699,7 +1716,7 @@ export function authorPrompt(
       : `Research only these configured sources when needed:\n${sources
           .map((source) =>
             (source.kind ?? 'directory') === 'openapi'
-              ? `- ${source.name}: OpenAPI specification at ${source.path} — read it as authoritative API evidence for endpoints, parameters, schemas, and examples.`
+              ? `- ${source.name}: OpenAPI specification at ${source.path}${specCopies[source.name] ? ` (you have no network access: read the downloaded copy at ${specCopies[source.name]})` : ''} — read it as authoritative API evidence for endpoints, parameters, schemas, and examples.`
               : (source.kind ?? 'directory') === 'docs-site'
                 ? `- ${source.name}: existing documentation site ${source.site?.url ?? source.path}, crawled into the read-only Markdown snapshot at ${source.path}${source.site ? ` (${source.site.pages} pages; index.md lists every page with its original URL)` : ''}. This is the documentation being rewritten: read it for reader intent, terminology, structure, and knowledge that code cannot show, but never copy its prose verbatim.`
               : source.remote

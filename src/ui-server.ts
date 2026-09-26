@@ -245,6 +245,22 @@ const UI_JOB_LOG_DIRECTORY = join('.doxloop', 'ui-job-logs')
 // The CLI gets the agent's own grace period plus a margin to write its exit.
 const JOB_STOP_GRACE_MS = AGENT_STOP_GRACE_MS + 5_000
 
+/**
+ * The setup wizard creates a project in a subfolder of the directory the
+ * control center was started from. Started there again, the control center
+ * showed an empty wizard as if the project were gone; it now reopens the
+ * most recently used project inside that directory.
+ */
+async function recentProjectInside(cwd: string): Promise<string | undefined> {
+  const parent = resolve(cwd)
+  for (const project of await listRecentProjects()) {
+    if (project.missing || !project.path.startsWith(`${parent}${sep}`)) continue
+    const root = await optionalProjectRoot(project.path)
+    if (root) return root
+  }
+  return undefined
+}
+
 export async function startUiServer(options: UiServerOptions): Promise<void> {
   const host = options.host ?? '127.0.0.1'
   if (host !== '127.0.0.1' && host !== 'localhost') {
@@ -254,7 +270,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
   const page = normalizeInitialPage(options.page)
   const root = options.project
     ? await findProjectRoot(resolve(options.cwd, options.project))
-    : await optionalProjectRoot(options.cwd)
+    : await optionalProjectRoot(options.cwd) ?? await recentProjectInside(options.cwd)
   const { jobs, recovered: recoveredJobs } = root ? await loadRuntimeJobs(root) : { jobs: new Map<string, UiJob>(), recovered: false }
   const runtime: UiRuntime = {
     mintlifyImports: new MintlifyImports(),

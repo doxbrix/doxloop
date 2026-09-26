@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { writeEvidenceMap } from './evidence.js'
 import { scaffoldProject } from './project.js'
-import { buildSourceIntelligence, formatSourceIntelligence } from './source-intelligence.js'
+import { buildSourceIntelligence, contractPartDocumented, evidenceMatches, formatSourceIntelligence } from './source-intelligence.js'
 
 const parents: string[] = []
 afterEach(async () => Promise.all(parents.splice(0).map((path) => rm(path, { recursive: true, force: true }))))
@@ -74,4 +74,28 @@ test('evidence paths with route-group brackets are found on disk and no unrelate
   const weak = report.evidenceDiagnostics.filter((issue) => issue.code === 'weak-relation')
   expect(weak.length).toBeLessThanOrEqual(1)
   expect(weak.every((issue) => !issue.suggestion.includes('such as "product"'))).toBe(true)
+})
+
+describe('API contract coverage', () => {
+  test('a page citing the spec file documents only the operations it names', () => {
+    const operation = { source: 'api', path: 'openapi.yml', kind: 'operation' as const, label: 'POST /users/login', contract: true as const }
+    const error = { source: 'api', path: 'openapi.yml', kind: 'error' as const, label: 'POST /users/login 422', contract: true as const }
+    expect(evidenceMatches(operation, 'openapi.yml')).toBe(false)
+    expect(evidenceMatches(operation, 'POST /users/login')).toBe(true)
+    expect(evidenceMatches(error, 'POST /users/login')).toBe(true)
+    expect(evidenceMatches({ ...operation, contract: undefined } as never, 'openapi.yml')).toBe(true)
+  })
+})
+
+
+describe('API contract coverage from page content', () => {
+  test('a page citing the spec documents only what its text covers', () => {
+    const page = '<ApiEndpoint method="POST" path="/users/login" baseUrl="https://api.example.com">\n<Response status={401} contentType="application/json">{}</Response>\n</ApiEndpoint>\nThe body wraps a LoginUser object. Send the Token header.'
+    expect(contractPartDocumented({ kind: 'operation', label: 'POST /users/login' }, page)).toBe(true)
+    expect(contractPartDocumented({ kind: 'operation', label: 'POST /users' }, page)).toBe(false)
+    expect(contractPartDocumented({ kind: 'error', label: 'POST /users/login 401' }, page)).toBe(true)
+    expect(contractPartDocumented({ kind: 'error', label: 'POST /users/login 422' }, page)).toBe(false)
+    expect(contractPartDocumented({ kind: 'export', label: 'Schema LoginUser' }, page)).toBe(true)
+    expect(contractPartDocumented({ kind: 'authentication', label: 'Token' }, page)).toBe(true)
+  })
 })

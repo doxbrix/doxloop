@@ -218,4 +218,50 @@ describe('product code is inventoried before supporting files', () => {
     expect(result.evidence.filter((item) => item.kind === 'event')).toEqual([])
     expect(result.uiLabelCatalogs).toEqual(['src/lang/en.json'])
   })
+
+  test('reads an OpenAPI contract kept inside a repository, with its error responses, and skips fixture specs', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-discovery-'))
+    roots.push(parent)
+    const source = join(parent, 'product')
+    await mkdir(join(source, 'specs', 'api'), { recursive: true })
+    await mkdir(join(source, 'tests', 'fixtures'), { recursive: true })
+    await writeFile(join(source, 'specs', 'api', 'openapi.yml'), CONTRACT)
+    await writeFile(join(source, 'tests', 'fixtures', 'openapi.yaml'), CONTRACT.replace('/tags', '/fixture-only'))
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), sources: [{ name: 'product', path: '../product' }] })
+    const evidence = (await discoverDocumentationSources(root)).inventory.sources[0]!.evidence
+    const contract = evidence.filter((item) => item.contract)
+    expect(contract).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'operation', label: 'POST /users/login', path: 'specs/api/openapi.yml' }),
+      expect.objectContaining({ kind: 'operation', label: 'GET /tags' }),
+      expect.objectContaining({ kind: 'error', label: 'POST /users/login 401' }),
+      expect.objectContaining({ kind: 'error', label: 'POST /users/login 422' }),
+      expect.objectContaining({ kind: 'authentication', label: 'Token' }),
+      expect.objectContaining({ kind: 'export', label: 'Schema User' }),
+    ]))
+    expect(evidence.some((item) => item.label.includes('/fixture-only'))).toBe(false)
+  })
 })
+
+const CONTRACT = `openapi: 3.1.0
+info: { title: Conduit API, version: 2.0.0 }
+servers: [{ url: https://api.example.com/api }]
+components:
+  securitySchemes:
+    Token: { type: apiKey, in: header, name: Authorization }
+  schemas:
+    User: { type: object, properties: { email: { type: string }, token: { type: string } } }
+    Login: { type: object, properties: { user: { $ref: '#/components/schemas/User' } } }
+paths:
+  /users/login:
+    post:
+      summary: Existing user login
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Login' } } } }
+      responses:
+        '200': { description: OK }
+        '401': { description: Unauthorized }
+        '422': { description: Unexpected error }
+  /tags:
+    get:
+      summary: Get tags
+      responses: { '200': { description: OK } }
+`

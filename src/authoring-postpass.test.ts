@@ -533,6 +533,48 @@ describe('authoring post-pass', () => {
     ]))
   })
 
+  test('the end-of-run pass restores planned sections the writer renamed or mixed, in their planned spaces', async () => {
+    const root = await scaffold()
+    const config = await siteConfig(root)
+    // What a real run left: the articles section renamed and filed under the
+    // contract space, the contract section renamed "Reference" with tags in
+    // it, and troubleshooting inside the backend section.
+    config.spaces = [
+      { name: 'Build', slug: 'build', nav: [{ type: 'group', label: 'Start here', items: [{ type: 'page', file: 'overview', title: 'Overview' }] }] },
+      { name: 'Contract', slug: 'contract', nav: [
+        { type: 'group', label: 'Articles and discussions', items: [{ type: 'page', file: 'articles/list', title: 'List' }, { type: 'page', file: 'articles/create', title: 'Create' }] },
+        { type: 'group', label: 'Reference', items: [{ type: 'page', file: 'tags', title: 'Tags' }, { type: 'page', file: 'errors', title: 'Errors' }, { type: 'page', file: 'pagination', title: 'Pagination' }] },
+      ] },
+      { name: 'Verify', slug: 'verify', nav: [{ type: 'group', label: 'Backend', items: [{ type: 'page', file: 'hurl', title: 'Hurl' }, { type: 'page', file: 'troubleshooting', title: 'Troubleshooting' }] }] },
+    ]
+    await writeFile(join(root, 'docs.json'), `${JSON.stringify(config, null, 2)}\n`)
+    const files = [['overview', 'Overview'], ['articles/list', 'List'], ['articles/create', 'Create'], ['tags', 'Tags'], ['errors', 'Errors'], ['pagination', 'Pagination'], ['hurl', 'Hurl'], ['troubleshooting', 'Troubleshooting']] as const
+    for (const [file, title] of files) await write(root, `${file}.mdx`, `---\ntitle: "${title}"\ndescription: "${title}."\n---\n\n# ${title}\n`)
+    await rm(join(root, 'index.mdx'), { force: true }).catch(() => undefined)
+    const documentationPlan = {
+      ...plan(files.map(([file, title]) => page({ id: file.replace('/', '-'), path: file, title })), []),
+      navigation: { top: ['Build', 'Contract', 'Verify'], sections: [
+        { id: 'start', title: 'Start here', space: 'Build', pageIds: ['overview'] },
+        { id: 'articles', title: 'Articles and interactions', space: 'Build', pageIds: ['articles-list', 'articles-create', 'tags'] },
+        { id: 'contract', title: 'Shared contract', space: 'Contract', pageIds: ['errors', 'pagination'] },
+        { id: 'backend', title: 'Backend', space: 'Verify', pageIds: ['hurl'] },
+        { id: 'diagnostics', title: 'Diagnostics', space: 'Verify', pageIds: ['troubleshooting'] },
+      ] },
+    } as unknown as DocumentationPlan
+    const report = await run(root, documentationPlan, documentationPlan.pages, { pruneEmptySpaces: true })
+    const saved = await siteConfig(root)
+    const layout = saved.spaces.map((space) => [space.name, space.nav.map((node) => node.type === 'group' ? [node.label, (node.items ?? []).map((item) => item.type === 'page' ? item.file : '')] : [])])
+    expect(layout).toEqual([
+      ['Build', [['Start here', ['overview']], ['Articles and interactions', ['articles/list', 'articles/create', 'tags']]]],
+      ['Contract', [['Shared contract', ['errors', 'pagination']]]],
+      ['Verify', [['Backend', ['hurl']], ['Diagnostics', ['troubleshooting']]]],
+    ])
+    expect(report.repairs).toEqual(expect.arrayContaining([
+      'docs.json: renamed navigation group "Articles and discussions" to "Articles and interactions", the plan section its pages belong to.',
+      'docs.json: renamed navigation group "Reference" to "Shared contract", the plan section its pages belong to.',
+    ]))
+  })
+
   test('renames new pages written as .md to .mdx and keeps evidence and navigation pointing at them', async () => {
     const root = await scaffold()
     await write(root, 'guides/inbox.md', '---\ntitle: "Inbox"\ndescription: "Read it."\n---\n\n# Inbox\n')

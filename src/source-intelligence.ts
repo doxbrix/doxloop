@@ -1,4 +1,5 @@
-import { lstat } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
+import { documentedOperations } from './api-coverage.js'
 import { basename, resolve } from 'node:path'
 import { assertPublicContract } from './contract-validation.js'
 import { coverageJourneyId, coverageSignalId, coveragePageId, readCoverageResolutions, type CoverageResolutions } from './coverage-resolutions.js'
@@ -45,6 +46,7 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
     computeDrift(root, project),
   ])
   const live = new Set(files.map((file) => relativePath(root, file)))
+  const contents = await pageContents(root, files)
   const map = rawMap ? { ...rawMap, pages: Object.fromEntries(Object.entries(rawMap.pages).filter(([page]) => live.has(page))) } : undefined
   const stale = new Set(drift.pages.map((page) => page.page))
   const currentVerification = (page: string, evidence: NonNullable<typeof map>['pages'][string]): boolean => evidence.confidence === 'verified' && evidence.sources.length > 0 && drift.status !== 'unknown' && !stale.has(page) && evidence.sources.every((entry) => {
@@ -69,7 +71,7 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
   const plan = plans.find((item) => ['generated', 'generating', 'approved'].includes(item.status))
   const signals = inventory.sources.flatMap((source) => source.evidence)
   const exclusions = new Set(plan?.capabilities.filter((item) => item.disposition === 'excluded').flatMap((item) => [item.id, item.title, ...item.evidence.map((entry) => entry.label ?? entry.path)]) ?? [])
-  const signalMetrics = SURFACES.slice(0, 7).map((surface) => coverageForSignals(surface, signals, map, plan?.capabilities ?? [], exclusions, resolutions))
+  const signalMetrics = SURFACES.slice(0, 7).map((surface) => coverageForSignals(surface, signals, map, plan?.capabilities ?? [], exclusions, resolutions, contents))
   const journeys = project.documentation.priorityOutcomes ?? []
   const plannedOutcomes = new Set(plan?.outcomes.map(normalize) ?? [])
   const mappedPages = map ? Object.values(map.pages) : []
@@ -111,7 +113,7 @@ export async function buildSourceIntelligence(root: string): Promise<SourceIntel
   const groups = inventory.sources.map((source): CoverageGroup => {
     const relevant = source.evidence.filter((item) => ['command', 'export', 'operation', 'route', 'configuration', 'authentication', 'authorization', 'error', 'event', 'integration'].includes(item.kind))
     const included = relevant.filter((item) => !isSignalExcluded(item, exclusions, resolutions))
-    const documented = included.filter((item) => isSignalDocumented(item, map)).length
+    const documented = included.filter((item) => isSignalDocumented(item, map, contents)).length
     return { source: source.name, ...(source.scope ? { scope: source.scope } : {}), documented, total: included.length, percent: percentage(documented, included.length), status: included.length === 0 ? 'unknown' : 'measured' }
   })
   const report: SourceIntelligenceReport = {
@@ -144,16 +146,16 @@ export function formatSourceIntelligence(report: SourceIntelligenceReport): stri
   return lines.join('\n')
 }
 
-function coverageForSignals(surface: typeof SURFACES[number], signals: DiscoveryEvidence[], map: EvidenceMap | undefined, capabilities: NonNullable<Awaited<ReturnType<typeof listDocumentationPlans>>>[number]['capabilities'], exclusions: Set<string>, resolutions: CoverageResolutions): CoverageMetric {
+function coverageForSignals(surface: typeof SURFACES[number], signals: DiscoveryEvidence[], map: EvidenceMap | undefined, capabilities: NonNullable<Awaited<ReturnType<typeof listDocumentationPlans>>>[number]['capabilities'], exclusions: Set<string>, resolutions: CoverageResolutions, contents: Map<string, string> = new Map()): CoverageMetric {
   const candidates = signals.filter((item) => surface.kinds?.includes(item.kind))
   const excluded = candidates.filter((item) => isSignalExcluded(item, exclusions, resolutions))
   const included = candidates.filter((item) => !excluded.includes(item))
-  const documented = included.filter((item) => isSignalDocumented(item, map)).length
+  const documented = included.filter((item) => isSignalDocumented(item, map, contents)).length
   const items = candidates.map((item): CoverageItem => {
     const id = coverageSignalId(item.source, item.kind, item.path, item.label)
     const resolution = resolutions.items[id]
     const isExcluded = excluded.includes(item)
-    const isDocumented = !isExcluded && isSignalDocumented(item, map)
+    const isDocumented = !isExcluded && isSignalDocumented(item, map, contents)
     return {
       id,
       surface: surface.id,
@@ -177,16 +179,54 @@ function isSignalPlanned(signal: DiscoveryEvidence, capabilities: NonNullable<Aw
   return capabilities.some((capability) => capability.disposition === 'planned' && capability.pageIds.length > 0 && capability.evidence.some((item) => item.source === signal.source && (item.label === signal.label || item.path === signal.path)))
 }
 
-function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefined): boolean {
-  return Object.values(map?.pages ?? {}).some((page) => page.sources.some((entry) => entry.source === signal.source && [...(entry.paths ?? []), ...(entry.operations ?? [])].some((identifier) => evidenceMatches(signal, identifier))))
+function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefined, contents: Map<string, string> = new Map()): boolean {
+  return Object.entries(map?.pages ?? {}).some(([page, evidence]) => evidence.sources.some((entry) => {
+    if (entry.source !== signal.source) return false
+    const identifiers = [...(entry.paths ?? []), ...(entry.operations ?? [])]
+    if (identifiers.some((identifier) => evidenceMatches(signal, identifier))) return true
+    // Writers cite the contract file, not each operation. A page that cites
+    // the spec documents the operations, schemas, schemes, and error statuses
+    // its own text covers, and no others.
+    if (!signal.contract || !identifiers.some((identifier) => identifier === signal.path || matchesGlob(signal.path, identifier))) return false
+    const content = contents.get(page)
+    return content !== undefined && contractPartDocumented(signal, content)
+  }))
 }
 
-function evidenceMatches(signal: DiscoveryEvidence, identifier: string): boolean {
+/** Whether a page's text documents one row of an API contract. */
+export function contractPartDocumented(signal: Pick<DiscoveryEvidence, 'kind' | 'label'>, content: string): boolean {
+  const operation = (label: string) => {
+    const [method = '', ...rest] = label.split(' ')
+    const path = rest.join(' ')
+    return documentedOperations(content).includes(`${method} ${path}`) || content.includes(`${method} ${path}`)
+  }
+  if (signal.kind === 'operation' || signal.kind === 'integration') return /^[A-Z]+ \//.test(signal.label) && operation(signal.label)
+  if (signal.kind === 'error') {
+    const match = /^(\S+ \S+) (\d{3}|\dXX)$/i.exec(signal.label)
+    return Boolean(match && operation(match[1]!) && new RegExp(`\\b${match[2]}\\b`).test(content))
+  }
+  const name = signal.label.replace(/^(?:Schema |Webhook )/, '')
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(content)
+}
+
+async function pageContents(root: string, files: string[]): Promise<Map<string, string>> {
+  const contents = new Map<string, string>()
+  await Promise.all(files.map(async (file) => {
+    try { contents.set(relativePath(root, file), await readFile(file, 'utf8')) } catch { /* A page removed mid-scan. */ }
+  }))
+  return contents
+}
+
+export function evidenceMatches(signal: DiscoveryEvidence, identifier: string): boolean {
   // Keyword signals stand for a folder: a page citing any file in it covers it.
   if (KEYWORD_SIGNAL_KINDS.has(signal.kind)) {
     if (signalModule(identifier) === signal.path || identifier === signal.path || identifier.startsWith(`${signal.path}/`)) return true
   }
-  return identifier === signal.label || identifier === signal.path || matchesGlob(signal.path, identifier) || (signal.kind === 'export' && identifier === `schema:${signal.label.replace(/^Schema /, '')}`)
+  const schema = signal.kind === 'export' && (identifier === `schema:${signal.label.replace(/^Schema /, '')}` || identifier === signal.label.replace(/^Schema /, ''))
+  // Every row of an API contract shares the spec's path; a page citing the
+  // spec file documents only the operations and schemas it names.
+  if (signal.contract) return identifier === signal.label || schema || (signal.kind === 'error' && signal.label.startsWith(`${identifier} `))
+  return identifier === signal.label || identifier === signal.path || matchesGlob(signal.path, identifier) || schema
 }
 
 function metric(surface: typeof SURFACES[number], documented: number, total: number, excluded: number, items: CoverageItem[]): CoverageMetric {

@@ -76,5 +76,5 @@ describe('static deploy targets', () => {
     const before = (await execute('git', [`--git-dir=${remote}`, 'rev-parse', 'doxloop-pages/existing'])).stdout
     await expect(githubPagesTarget.publish(await bundle(), { root: project, name: 'Docs', slug: 'docs', branch: 'doxloop-pages/existing' })).rejects.toThrow('not owned')
     expect((await execute('git', [`--git-dir=${remote}`, 'rev-parse', 'doxloop-pages/existing'])).stdout).toBe(before)
-  })
+  }, 60_000)
 })

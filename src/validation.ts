@@ -89,6 +89,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
       issues.push(...validateDoxbrixComponents(raw, file))
     }
     issues.push(...validateProfessionalContent(page.body, raw, file))
+    issues.push(...validateShellExamples(raw, file))
     const planned = planTypes.get(file.replace(/\.[^./]+$/, ''))
     issues.push(...validatePageDepth(page.body, file, planned?.type))
     if (planned?.diagram === 'required' && !hasDiagram(raw)) {
@@ -1011,6 +1012,30 @@ const MINIMUM_STEPS = 3
  * never errors: a genuinely small surface may legitimately produce a short
  * page, and the authoring contract tells the agent to resolve each one.
  */
+/**
+ * Shell variables a script cannot assign. A generated quickstart opened with
+ * `UID="$(date +%s)"` to make a unique username; bash stops with "UID:
+ * readonly variable" and zsh tries to change the user ID, so the very first
+ * command a reader copies failed.
+ */
+const READONLY_SHELL_VARIABLES = ['UID', 'EUID', 'PPID', 'GID', 'EGID', 'BASHPID', 'BASH_VERSINFO', 'SHELLOPTS', 'BASHOPTS']
+const SHELL_FENCE = /^(```|~~~)\s*(?:bash|sh|shell|zsh|console)\b[^\n]*\n([\s\S]*?)^\1\s*$/gm
+
+export function validateShellExamples(raw: string, file: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const assignment = new RegExp(`(?:^|[;&|]\\s*|\\b(?:export|local|declare|readonly)\\s+)(${READONLY_SHELL_VARIABLES.join('|')})=`, 'm')
+  for (const match of raw.matchAll(SHELL_FENCE)) {
+    const fenceLine = raw.slice(0, match.index).split('\n').length
+    for (const [offset, line] of match[2]!.split('\n').entries()) {
+      const found = assignment.exec(line.replace(/^\s*\$\s+/, '').trimStart())
+      if (!found) continue
+      issues.push(error('shell-readonly-variable', `Line ${fenceLine + offset + 1}: the shell example assigns ${found[1]}, a read-only shell variable; the command fails when a reader runs it. Use another name, such as RUN_ID or SUFFIX.`, file))
+      break
+    }
+  }
+  return issues
+}
+
 export function validatePageDepth(body: string, file: string, planType?: string): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   // A generated glossary is a list of short definitions by design; the

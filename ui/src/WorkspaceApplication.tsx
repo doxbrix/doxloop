@@ -1372,7 +1372,7 @@ function Authoring({ state, act, streamConnected, onError }: { state: UiState; a
           {activeRun && <Button size="sm" tone="danger" icon="stop" aria-label="Stop update" onClick={() => void act(() => post(`/api/jobs/${activeRun.id}/cancel`), 'Update stopped')}>Stop</Button>}
         </div>
       </header>
-      {activityOpen && currentRun && <div class="panel-body flush"><AuthoringLiveLog job={currentRun} act={act} hideStop /></div>}
+      {activityOpen && currentRun && <div class="panel-body flush"><AuthoringLiveLog job={currentRun} act={act} hideStop captures={Boolean(state.project?.application)} /></div>}
       {activityOpen && !currentRun && <div class="authoring-live-empty">Starting the planning agent…</div>}
     </section>}
     <Panel class="history-panel pl-history" title="Update history" flush>
@@ -1777,6 +1777,8 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
       </section>}
       {!planningFailedEmpty && <Panel class="pl-facts" flush>
         <div class="vrows">
+          {/* An API or library with no application has nothing to capture; the row only restated "No screenshots". */}
+          {!(captureReadiness?.configured === false && plannedCaptures === 0) && <>
           <div class="vrow">
             <span class="vrow-label">Application screenshots<small>{plannedCaptures > 0 ? `${plannedCaptures} planned across ${visualPages.length} page${visualPages.length === 1 ? '' : 's'}` : 'No application screenshots planned'}{captureReadiness?.status === 'authentication-required' && screenshotIntent !== 'disabled' ? ' · needs sign-in' : ''}</small></span>
             <span class="vrow-value">
@@ -1798,8 +1800,12 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
             {visualPages.length > 0 && <button type="button" class="btn link" aria-expanded={captureDetailsOpen} onClick={() => setCaptureDetailsOpen(!captureDetailsOpen)}>{captureDetailsOpen ? 'Hide planned screenshots' : `Show planned screenshots for ${visualPages.length} page${visualPages.length === 1 ? '' : 's'}`}</button>}
             {captureDetailsOpen && visualPages.length > 0 && <ul class="plan-screenshot-pages">{visualPages.map((page) => <li key={page.id}><span class="plan-screenshot-page-icon"><Icon name="camera" size={14} /></span><span><strong>{page.title}</strong><small>{page.visuals?.startPath ? <code>{page.visuals.startPath}</code> : <em>Starting route needed</em>}{page.visuals?.rationale && <> · {page.visuals.rationale}</>}</small></span><b>{page.visuals?.estimatedCaptures} {screenshotIntent === 'enabled' ? 'required' : (page.visuals?.estimatedCaptures ?? 0) === 1 ? 'candidate' : 'candidates'}</b></li>)}</ul>}
             {screenshotIntent === 'enabled' && visualPages.length === 0 && <Note tone="bad">Required screenshot mode needs at least one visible UI guide. Open a page and choose “Require screenshots,” or change this run to Automatic.</Note>}
-            {plan.advisories?.filter((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))).map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
             {capturePlanned && incompleteCapturePages.length > 0 && <Note tone={captureRequired ? 'bad' : 'info'}>{captureRequired ? 'Add' : 'For better automatic capture, add'} a starting route, capture workflow, and one meaningful capture-sequence line per planned screenshot for {incompleteCapturePages.map((page) => page.title).join(', ')}{captureRequired ? ' before approval.' : '. Documentation generation can continue if those optional captures are skipped.'}</Note>}
+          </div>}
+          </>}
+          {/* Plan advisories are not about screenshots; they showed only while screenshots were on. */}
+          {(plan.advisories ?? []).some((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))) && <div class="pl-fact-detail">
+            {plan.advisories?.filter((advisory) => !(screenshotCoverage && /procedural pages? ha(s|ve) application screenshots/.test(advisory))).map((advisory) => <Note key={advisory} tone="info">{advisory}</Note>)}
           </div>}
           <div class="vrow">
             <span class="vrow-label">Batch limits<small>Approval and proposal validation enforce these maxima.</small></span>
@@ -2159,7 +2165,7 @@ function stageDetailText(stage: UiJob['stages'][number]): string {
   return Number.isNaN(finished) ? '' : elapsedText(finished - started)
 }
 
-function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = false }: { job: UiJob; act: Action; stopLabel?: string; hideStop?: boolean }) {
+function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = false, captures = true }: { job: UiJob; act: Action; stopLabel?: string; hideStop?: boolean; captures?: boolean }) {
   const log = useRef<HTMLPreElement>(null)
   const agent = job.agent ? agentLabel(job.agent) : 'Agent'
   const [tab, setTab] = useState<'log' | 'captures'>('log')
@@ -2179,7 +2185,7 @@ function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = fals
         {activity.latestNote && <p><strong>{activity.latestNote.session}</strong><span>{activity.latestNote.text.length > 240 ? `${activity.latestNote.text.slice(0, 237)}…` : activity.latestNote.text}</span></p>}
         <ul>
           {activity.sessions.length > 0 && <li><Icon name="bot" size={14} />{activity.sessions.join(' · ')}</li>}
-          <li><Icon name="camera" size={14} />{activity.screenshots} screenshot{activity.screenshots === 1 ? '' : 's'} captured</li>
+          {(captures || activity.screenshots > 0) && <li><Icon name="camera" size={14} />{activity.screenshots} screenshot{activity.screenshots === 1 ? '' : 's'} captured</li>}
           <li><Icon name="file" size={14} />{activity.sourceReads} source read{activity.sourceReads === 1 ? '' : 's'}</li>
         </ul>
       </div>
@@ -2189,12 +2195,12 @@ function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = fals
         <span><Icon name="bot" size={14} />{agent}</span>
         <span><Icon name="clock" size={14} />Last output {timeText(job.lastOutputAt ?? job.startedAt)}</span>
         <span class="authoring-live-actions">
-          <Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} />
+          {captures && <Segmented value={tab} onChange={setTab} items={[['log', 'Log'], ['captures', 'Screenshots']] as const} />}
           {job.status === 'running' && !hideStop && <Button size="sm" tone="danger" icon="stop" onClick={() => void act(() => post(`/api/jobs/${job.id}/cancel`), 'Update stopped')}>{stopLabel}</Button>}
           {job.status !== 'running' && job.retryable && <Button size="sm" icon="refresh" onClick={() => void act(() => post(`/api/jobs/${job.id}/retry`), 'Workflow restarted')}>Retry stage</Button>}
         </span>
       </div>
-      {tab === 'log'
+      {tab === 'log' || !captures
         ? <pre ref={log} class="terminal live-terminal pl-log-lines" aria-live="polite">{job.lines.length > 0 ? displayLogLines(job.lines).join('\n') : `Starting ${agent}…`}</pre>
         : <div class="pl-log-captures"><CaptureGallery live={job.status === 'running'} plan={job.type === 'plan:propose' || job.type === 'plan:revise' ? job.planId : undefined} /></div>}
       <div class="pl-log-foot"><a class="btn link" href={`/api/jobs/${job.id}/log`} target="_blank" rel="noreferrer">Open full log <Icon name="arrowRight" size={14} /></a></div>
@@ -2796,7 +2802,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
                 </div>
                 <Badge tone={streamConnected ? 'good' : 'warn'}>{streamConnected ? 'Live' : 'Reconnecting…'}</Badge>
               </header>
-              <AuthoringLiveLog job={activeJob} act={act} stopLabel="Stop" />
+              <AuthoringLiveLog job={activeJob} act={act} stopLabel="Stop" captures={Boolean(state.project?.application)} />
             </section>
               </>}
               {activeJob && otherPageWhileRunning && <div class="page-agent-other-run"><p>An edit is running on another page.</p><Button onClick={() => { setSelectedPaths([...activePaths]); updateUrl(activePaths, activeRun?.id ?? runId) }}>Show the edit</Button></div>}
@@ -2898,8 +2904,11 @@ function groupPageSummaries(pages: PageSummary[]): Array<[string, PageSummary[]]
 }
 
 /** What a Review row is, in words: a plan's documentation, or a source update. */
-export function proposalRowTitle(run: Pick<Proposal, 'planId' | 'changes' | 'summary' | 'authoringMode'>): string {
+export function proposalRowTitle(run: Pick<Proposal, 'planId' | 'changes' | 'summary' | 'authoringMode'> & { revisionOf?: string; status?: string }): string {
   const pages = run.changes.filter((change) => change.category === 'page' && change.kind !== 'deleted').length
+  // A revision that failed leaves the proposal it revised untouched; titled
+  // like a plan run it read as a second, empty "New documentation" proposal.
+  if (run.revisionOf && run.status === 'failed') return 'Agent revision that did not finish · the proposal it revised is unchanged'
   if (run.planId) return `${run.authoringMode === 'create' ? 'New documentation' : 'Documentation update'} from the approved plan · ${pages} page${pages === 1 ? '' : 's'}`
   return run.summary || 'Documentation update'
 }
@@ -3510,7 +3519,7 @@ function Proposals({ state, act, onError }: { state: UiState; act: Action; onErr
             </div>}
             {runningRevision && <section class="proposal-revision-live" aria-label="Agent revision in progress">
               <header><Icon name="bot" size={15} /><strong>{workflowActivityLabel(runningRevision.type)}</strong><small>The proposal updates when the agent finishes.</small></header>
-              <AuthoringLiveLog job={runningRevision} act={act} stopLabel="Stop" />
+              <AuthoringLiveLog job={runningRevision} act={act} stopLabel="Stop" captures={Boolean(state.project?.application)} />
             </section>}
             {selected.status === 'awaiting-review' && !selected.archivedAt && (selected.validation?.errors ?? 0) > 0 && <div class="proposal-lifecycle-notice failed">
               <Icon name="alert" size={15} />

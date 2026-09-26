@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { matchesAnyGlob } from './globs.js'
 import { readDocsSiteManifest } from './docs-site.js'
-import { loadOpenApiSource } from './openapi.js'
+import { loadOpenApiSource, parseOpenApi, type LoadedOpenApi } from './openapi.js'
 import { loadPages, loadProject, sourceKind } from './project.js'
 import { sourceSnapshotFingerprints } from './sync.js'
 import type { DoxloopProject, SourceBinding, SourceKind } from './types.js'
@@ -71,6 +71,13 @@ export interface DiscoveryEvidence {
   kind: DiscoveryEvidenceKind
   label: string
   line?: number
+  /**
+   * Set on rows read from an API contract (an OpenAPI or Swagger file). They
+   * all share the spec's path, so only the operation, schema, or scheme
+   * named in the label documents them; citing the spec file as a whole must
+   * not mark the entire API as covered.
+   */
+  contract?: true
 }
 
 export interface SourceDiscoveryResult {
@@ -301,6 +308,7 @@ async function discoverSource(
     languages.add(languageForExtension(extension))
     inspectTextFile(source.name, sourcePath, content, evidence, packageNames, exportsArePublic(sourcePath, packageFolders) ? entryPoints : noEntryPoints)
   }
+  evidence.push(...await repositoryOpenApiEvidence(source.name, inspectable, warnings))
   const truncated = inspectable.length > MAX_FILES_PER_SOURCE || budgetExhausted
   if (inspectable.length > MAX_FILES_PER_SOURCE) warnings.push(`Inventory inspected ${filesScanned} of ${inspectable.length} inspectable files; product code was read first and supporting files were cut off.`)
   if (budgetExhausted) warnings.push(`Inventory text budget reached after ${filesScanned} of ${inspectable.length} inspectable files; product code was read first.`)
@@ -323,23 +331,7 @@ async function discoverSource(
 
 async function discoverOpenApiSource(root: string, source: SourceBinding, revision: string | null): Promise<SourceDiscoveryResult> {
   const loaded = await loadOpenApiSource(root, source)
-  const evidence: DiscoveryEvidence[] = [
-    { source: source.name, path: portable(source.path), kind: 'package', label: loaded.summary.title },
-    ...Object.keys(loaded.snapshot.operations).map((label): DiscoveryEvidence => ({ source: source.name, path: portable(source.path), kind: 'operation', label })),
-    ...Object.keys(loaded.snapshot.schemas).map((schema): DiscoveryEvidence => ({ source: source.name, path: portable(source.path), kind: 'export', label: `Schema ${schema}` })),
-    ...loaded.summary.securitySchemes.map((scheme): DiscoveryEvidence => ({ source: source.name, path: portable(source.path), kind: 'authentication', label: scheme })),
-    ...Object.entries(loaded.snapshot.operations).flatMap(([operation, details]): DiscoveryEvidence[] => {
-      try {
-        const responses = JSON.parse(details.responses) as Record<string, unknown>
-        return Object.keys(responses).filter((status) => /^[45]\d\d$/.test(status)).map((status) => ({ source: source.name, path: portable(source.path), kind: 'error', label: `${operation} ${status}` }))
-      } catch { return [] }
-    }),
-    ...Object.keys(loaded.snapshot.operations).filter((operation) => /webhook|event|callback/i.test(operation)).map((operation): DiscoveryEvidence => ({ source: source.name, path: portable(source.path), kind: 'integration', label: operation })),
-    ...Object.keys(record(record(loaded.document).webhooks)).flatMap((webhook): DiscoveryEvidence[] => [
-      { source: source.name, path: portable(source.path), kind: 'event', label: webhook },
-      { source: source.name, path: portable(source.path), kind: 'integration', label: `Webhook ${webhook}` },
-    ]),
-  ]
+  const evidence = openApiEvidence(source.name, portable(source.path), loaded)
   return {
     name: source.name,
     kind: 'openapi',
@@ -355,6 +347,65 @@ async function discoverOpenApiSource(root: string, source: SourceBinding, revisi
     warnings: [],
     ...(source.scope ? { scope: source.scope } : {}),
   }
+}
+
+/**
+ * Signals for one API contract: the product, every operation, schema,
+ * security scheme, documented 4xx/5xx response, and webhook. Shared by
+ * OpenAPI sources and by specs found inside a repository.
+ */
+export function openApiEvidence(source: string, path: string, loaded: Pick<LoadedOpenApi, 'document' | 'summary' | 'snapshot'>): DiscoveryEvidence[] {
+  const contract = (kind: DiscoveryEvidenceKind, label: string): DiscoveryEvidence => ({ source, path, kind, label, contract: true })
+  const paths = record(loaded.document.paths)
+  const errors: DiscoveryEvidence[] = []
+  for (const operation of Object.keys(loaded.snapshot.operations)) {
+    const [method = '', ...rest] = operation.split(' ')
+    const responses = record(record(record(paths[rest.join(' ')])[method.toLowerCase()]).responses)
+    for (const status of Object.keys(responses)) if (/^[45](?:\d\d|XX)$/i.test(status)) errors.push(contract('error', `${operation} ${status}`))
+  }
+  return [
+    { source, path, kind: 'package', label: loaded.summary.title },
+    ...Object.keys(loaded.snapshot.operations).map((label) => contract('operation', label)),
+    ...Object.keys(loaded.snapshot.schemas).map((schema) => contract('export', `Schema ${schema}`)),
+    ...loaded.summary.securitySchemes.map((scheme) => contract('authentication', scheme)),
+    ...errors,
+    ...Object.keys(loaded.snapshot.operations).filter((operation) => /webhook|event|callback/i.test(operation)).map((operation) => contract('integration', operation)),
+    ...Object.keys(record(loaded.document.webhooks)).flatMap((webhook) => [contract('event', webhook), contract('integration', `Webhook ${webhook}`)]),
+  ]
+}
+
+/**
+ * OpenAPI and Swagger files kept inside a repository. RealWorld keeps its
+ * contract at `specs/api/openapi.yml`; classified by folder it is a test
+ * file and yielded nothing, so an API-only product added as a repository
+ * showed no operations at all. Test fixtures and vendored specs are not the
+ * product's contract.
+ */
+const OPENAPI_FILE_NAME = /(?:^|\/)(?:[^/]*(?:openapi|swagger)[^/]*|api)\.(?:ya?ml|json)$/i
+const OPENAPI_NOISE_PATH = /(^|\/)(?:__tests__|tests?|testdata|fixtures?|mocks?|__mocks__|node_modules|vendor|third[_-]?party|examples?|samples?)(\/|$)/i
+const OPENAPI_HEADER = /^\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?\d/m
+const MAX_OPENAPI_FILES_PER_SOURCE = 5
+
+async function repositoryOpenApiEvidence(source: string, files: Array<{ path: string; sourcePath: string }>, warnings: string[]): Promise<DiscoveryEvidence[]> {
+  const evidence: DiscoveryEvidence[] = []
+  let found = 0
+  for (const { path, sourcePath } of files) {
+    if (found >= MAX_OPENAPI_FILES_PER_SOURCE) break
+    if (!OPENAPI_FILE_NAME.test(sourcePath) || OPENAPI_NOISE_PATH.test(sourcePath)) continue
+    let content: string
+    try {
+      if ((await lstat(path)).size > 5 * 1024 * 1024) continue
+      content = await readFile(path, 'utf8')
+    } catch { continue }
+    if (!OPENAPI_HEADER.test(content.slice(0, 4096))) continue
+    try {
+      evidence.push(...openApiEvidence(source, sourcePath, parseOpenApi(content, sourcePath)))
+      found += 1
+    } catch (error) {
+      warnings.push(`API contract ${sourcePath} could not be read: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return evidence
 }
 
 /**
@@ -746,7 +797,8 @@ export function groupKeywordSignals(items: DiscoveryEvidence[]): DiscoveryEviden
   const groups = new Map<string, { item: DiscoveryEvidence; keywords: Set<string> }>()
   const out: DiscoveryEvidence[] = []
   for (const item of items) {
-    if (!KEYWORD_SIGNAL_KINDS.has(item.kind)) { out.push(item); continue }
+    // A contract's security schemes and webhooks are exact names, not keyword hits.
+    if (!KEYWORD_SIGNAL_KINDS.has(item.kind) || item.contract) { out.push(item); continue }
     const folder = signalModule(item.path)
     const key = `${item.source}\0${item.kind}\0${folder}`
     const keyword = item.kind === 'event' ? item.label.slice(0, 40) : keywordOf(item.label)

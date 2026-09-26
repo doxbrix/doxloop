@@ -10,6 +10,7 @@
  */
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
+import { loadOpenApiSource, openApiExcerpt, parseOpenApi } from './openapi.js'
 import type { DocumentationPlan, DocumentationPlanEvidence, DocumentationPlanPage, DoxloopProject, SourceBinding } from './types.js'
 
 export interface EvidencePackOptions {
@@ -87,6 +88,7 @@ export async function writeEvidencePack(
       }
     } catch { /* No discovery cache on legacy plans. */ }
   }
+  const contracts = new Map<string, Record<string, unknown> | null>()
   let packBytes = 0
   for (const page of pages) {
     const research = researchFor(page, plan.capabilities ?? [], capabilities)
@@ -103,8 +105,13 @@ export async function writeEvidencePack(
         result.missing.push(`${citation.source}:${citation.path}`)
         continue
       }
-      const absolute = resolve(isAbsolute(source.path) ? source.path : join(workspace, source.path), citation.path)
-      const excerpt = await readExcerpt(absolute, citation, source, limits, keywords)
+      const kind = source.kind ?? 'directory'
+      // An OpenAPI source's path is the spec itself (often a URL), so a
+      // citation is a part of the contract, never a file under it.
+      const absolute = kind === 'openapi' ? source.path : resolve(isAbsolute(source.path) ? source.path : join(workspace, source.path), citation.path)
+      const excerpt = kind === 'openapi' || CONTRACT_FILE.test(citation.path)
+        ? await contractExcerpt(kind === 'openapi' ? undefined : absolute, source, citation, contracts, options.researchRoot ?? workspace, limits.excerptBytes) ?? (kind === 'openapi' ? undefined : await readExcerpt(absolute, citation, source, limits, keywords))
+        : await readExcerpt(absolute, citation, source, limits, keywords)
       if (!excerpt) {
         result.missing.push(`${citation.source}:${citation.path}`)
         continue
@@ -147,6 +154,38 @@ export async function writeEvidencePack(
   result.bytes = content.length
   return result
 }
+
+const CONTRACT_FILE = /(?:^|\/)(?:[^/]*(?:openapi|swagger)[^/]*|api)\.(?:ya?ml|json)$/i
+
+/** The cited part of an API contract, parsed once per pack. */
+async function contractExcerpt(
+  file: string | undefined,
+  source: SourceBinding,
+  citation: Citation,
+  contracts: Map<string, Record<string, unknown> | null>,
+  root: string,
+  budget: number,
+): Promise<{ text: string; truncated: boolean; language: string; range?: string } | undefined> {
+  const key = file ?? `${source.name}\0${source.path}`
+  if (!contracts.has(key)) {
+    try {
+      contracts.set(key, file ? parseOpenApi(await readFile(file, 'utf8'), citation.path).document : (await loadOpenApiSource(root, source)).document)
+    } catch {
+      contracts.set(key, null)
+    }
+  }
+  const document = contracts.get(key)
+  if (!document) return undefined
+  // A spec inside a repository cited without naming an operation or schema
+  // reads better as the file itself; an OpenAPI source always gets a
+  // contract view (its index when nothing specific is named).
+  const named = CONTRACT_PART.test(citation.label ?? '') || CONTRACT_PART.test(citation.path)
+  if (file && !named) return undefined
+  const excerpt = openApiExcerpt(document, citation, budget)
+  return excerpt && { ...excerpt, language: 'yaml' }
+}
+
+const CONTRACT_PART = /^(?:get|put|post|delete|patch|options|head|trace)\s+\/|^Schema |^schema:/i
 
 interface Citation extends DocumentationPlanEvidence {
   /** Whole-page snapshot cited through an existing-documentation disposition. */

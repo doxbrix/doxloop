@@ -666,6 +666,59 @@ async function repairDoxbrixNavigation(
     }
   }
 
+  // The writer names groups too. A group holding most of one planned
+  // section's pages under another label ("Articles and discussions" for the
+  // planned "Articles and interactions", "Reference" for "Shared contract")
+  // escaped every rule below, so the approved structure never reached the
+  // site. Such a group takes its section's title; a planned page filed under
+  // another planned section's group then moves to its own section.
+  if (pruneEmptySpaces && plannedSections.length > 0) {
+    const sectionKeys = new Set(plannedSections.map((section) => key(section.title)))
+    const areaKeys = new Set((plan.navigation?.top ?? []).map(key))
+    const sectionIds = plannedSections.map((section) => ({ section, ids: new Set(section.pageIds.map((id) => navIdByPlanId.get(id)).filter((id): id is string => Boolean(id))) }))
+    const pagesOf = (nodes: DoxbrixNavNode[]): string[] => nodes.flatMap((node) => node.type === 'page' ? [navFileId(node.file)] : node.type === 'group' ? pagesOf(node.items ?? []) : [])
+    const groupsOf = (nodes: DoxbrixNavNode[]): DoxbrixGroup[] => nodes.flatMap((node) => node.type === 'group' ? [node, ...groupsOf(node.items ?? [])] : [])
+    for (const candidate of site.spaces) {
+      for (const group of groupsOf(candidate.nav)) {
+        if (sectionKeys.has(key(group.label)) || areaKeys.has(key(group.label))) continue
+        const pages = pagesOf(group.items ?? [])
+        if (pages.length < 2) continue
+        const best = sectionIds
+          .map(({ section, ids }) => ({ section, overlap: pages.filter((id) => ids.has(id)).length }))
+          .sort((left, right) => right.overlap - left.overlap)[0]
+        if (!best || best.overlap < 2 || best.overlap / pages.length < 0.6) continue
+        if (site.spaces.some((each) => findGroups(each.nav, best.section.title).length > 0)) continue
+        report.repairs.push(`${configFile}: renamed navigation group "${group.label}" to "${best.section.title}", the plan section its pages belong to.`)
+        group.label = best.section.title
+        changed = true
+      }
+    }
+    for (const { section, ids } of sectionIds) {
+      for (const candidate of site.spaces) {
+        for (const group of groupsOf(candidate.nav)) {
+          if (!sectionKeys.has(key(group.label)) || key(group.label) === key(section.title)) continue
+          const stray = (group.items ?? []).filter((node) => node.type === 'page' && ids.has(navFileId(node.file)))
+          if (stray.length === 0) continue
+          let home = site.spaces.flatMap((each) => findGroups(each.nav, section.title))[0]
+          if (!home) {
+            const space = ensurePlannedSpace(section.space) ?? candidate
+            home = { type: 'group', label: section.title, items: [] }
+            const order = plannedSections.map((item) => key(item.title))
+            const rank = order.indexOf(key(section.title))
+            const before = space.nav.findIndex((node) => node.type === 'group' && order.indexOf(key(node.label)) > rank)
+            if (before === -1) space.nav.push(home)
+            else space.nav.splice(before, 0, home)
+            report.repairs.push(`${configFile}: created navigation group "${section.title}" in space "${space.name}".`)
+          }
+          group.items = (group.items ?? []).filter((node) => !stray.includes(node))
+          home.items = [...(home.items ?? []), ...stray]
+          changed = true
+          report.repairs.push(`${configFile}: moved ${stray.map((node) => `"${node.type === 'page' ? navFileId(node.file) : ''}"`).join(', ')} from group "${group.label}" to "${section.title}", where the plan puts ${stray.length === 1 ? 'it' : 'them'}.`)
+        }
+      }
+    }
+  }
+
   // One plan section is one group, in the space the plan gives it. A section
   // split across spaces (a writer's docs.json, or an older run's repair, put
   // one of its pages under a same-named group elsewhere) is merged into the

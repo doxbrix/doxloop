@@ -61,7 +61,7 @@ export function setupCaptureProfileIssue(
 ): string | undefined {
   const baseUrl = form.applicationBaseUrl?.trim() ?? ''
   const startPath = form.applicationStartPath?.trim() ?? ''
-  if (!baseUrl) return 'Enter the application URL, or choose No for screenshots.'
+  if (!baseUrl) return 'Enter the application URL, or turn off product screenshots for an API or library without screens.'
   if (!isAbsoluteHttpUrl(baseUrl)) return 'Enter the full application URL including http:// or https://, for example http://localhost:3000.'
   if (!startPath.startsWith('/') || startPath.startsWith('//')) return 'The starting page must be a route that begins with /, for example / or /settings/team.'
   return undefined
