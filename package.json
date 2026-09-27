@@ -30,6 +30,7 @@
     "!dist/**/*.map",
     "!assets/marketing/**",
     "!assets/social/**",
+    "!assets/video/**",
     "vendor/doxbrix-import/dist",
     "vendor/doxbrix-import/LICENSE",
     "vendor/doxbrix-import/UPSTREAM.json",

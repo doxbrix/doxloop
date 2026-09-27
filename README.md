@@ -28,6 +28,14 @@
   <a href="#guides">Guides</a>
 </p>
 
+<p align="center">
+  <a href="assets/video/doxloop-video.mp4">
+    <img src="assets/video/doxloop-video-poster.jpg" alt="Watch the 2-minute Doxloop video" width="720">
+  </a>
+  <br>
+  <sub>Two minutes, one real run: PocketBase docs planned, written, reviewed, and published to Doxbrix.</sub>
+</p>
+
 ```mermaid
 flowchart LR
     A["Source code<br>or OpenAPI"] --> B["Doxloop +<br>your coding agent"]
