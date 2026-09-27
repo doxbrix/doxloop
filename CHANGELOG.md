@@ -5,6 +5,8 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-27
+
 ### Changed
 
 - **Docs get the spaces the plan asks for again.** Since authoring moved to

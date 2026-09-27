@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop-generator-docusaurus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Docusaurus generator adapter and authoring skill for Doxloop.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -41,7 +41,7 @@
     "prepack": "pnpm run typecheck && pnpm run build && pnpm run validate:skill"
   },
   "peerDependencies": {
-    "@doxbrix/doxloop": "^0.1.0"
+    "@doxbrix/doxloop": "^0.2.0"
   },
   "devDependencies": {
     "@doxbrix/doxloop": "workspace:*",

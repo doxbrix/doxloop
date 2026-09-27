@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop-generator-mkdocs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MkDocs Material generator adapter and authoring skill for Doxloop.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -44,7 +44,7 @@
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
-    "@doxbrix/doxloop": "^0.1.0"
+    "@doxbrix/doxloop": "^0.2.0"
   },
   "devDependencies": {
     "@doxbrix/doxloop": "workspace:*",
