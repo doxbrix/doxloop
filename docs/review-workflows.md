@@ -48,4 +48,4 @@ Python examples require a locally pulled digest-pinned image in `DOXLOOP_PYTHON_
 
 `node scripts/ci-existing-sites.mjs` builds representative existing Docusaurus and MkDocs sites six times each: original, accepted update, undone update, version, locale, and restored original. It checks custom routes, base paths, assets, source preservation, and collection undo. The fixtures are representative sites, not production customer audits.
 
-Real-agent evaluation observations and repeat commands live in `evals/benchmarks/`. `evals/baseline.json` records the accepted benchmark observation, keyed by mode, agent, model, and fixture. A seeded review score measures defect detection; it is distinct from generation quality. These checks are separate from the unit suite.
+Real-agent evaluation results are written to the Git-ignored `evals/results/` folder. `evals/baseline.json` records the accepted benchmark observation, keyed by mode, agent, model, and fixture. A seeded review score measures defect detection; it is distinct from generation quality. These checks are separate from the unit suite.

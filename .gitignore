@@ -31,3 +31,9 @@ PLAN-*.md
 REVIEW-*.md
 IMPLEMENTATION-*.md
 CLAUDE-*.md
+
+# Agent scratch output, internal proposals and dated benchmark records
+.codex/
+PROPOSAL-*.md
+evals/benchmarks/
+evals/fixtures/**/.doxloop/ui-jobs.json
