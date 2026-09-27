@@ -28,13 +28,7 @@
   <a href="#guides">Guides</a>
 </p>
 
-<p align="center">
-  <a href="assets/video/doxloop-video.mp4">
-    <img src="assets/video/doxloop-video-poster.jpg" alt="Watch the 2-minute Doxloop video" width="720">
-  </a>
-  <br>
-  <sub>Two minutes, one real run: PocketBase docs planned, written, reviewed, and published to Doxbrix.</sub>
-</p>
+https://github.com/user-attachments/assets/2949f435-538d-40eb-9d3d-b226664b724d
 
 ```mermaid
 flowchart LR
