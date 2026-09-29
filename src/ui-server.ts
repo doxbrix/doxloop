@@ -160,6 +160,48 @@ export interface UiServerOptions {
   page?: string
   /** Open this project instead of the one found from `cwd`. */
   project?: string
+  /** The bundled demo: tours the project and keeps publishing and scheduling on this computer off. */
+  demo?: UiDemo
+  /** Runs after the server has stopped, for example to remove a temporary demo folder. */
+  onStop?: () => Promise<void>
+}
+
+/** What the control center knows about the bundled demo it is showing. */
+export interface UiDemo {
+  /** The demo documentation project; demo behaviour applies only while it is open. */
+  root: string
+  /** The Update proposal Monitoring drafted, which the tour opens in Review. */
+  proposalId?: string
+  /** The change in that proposal the tour opens first. */
+  changeId?: string
+}
+
+/** Routes that reach beyond this computer or install a schedule are turned off in the demo. */
+const DEMO_BLOCKED_ROUTES: Record<string, string> = {
+  '/api/deploy': 'Publishing is turned off in the demo. Run `npx @doxbrix/doxloop ui` in your own documentation project to publish it.',
+  '/api/export': 'Exporting is turned off in the demo. Run `npx @doxbrix/doxloop ui` in your own documentation project to export a site.',
+  '/api/auth/login': 'Signing in to Doxbrix is turned off in the demo. Run `npx @doxbrix/doxloop ui` in your own documentation project to publish it.',
+  '/api/sync/configure': 'The demo does not install a Monitoring schedule on this computer. Choose Check now to run one Monitoring cycle.',
+  '/api/sync/off': 'The demo does not install a Monitoring schedule on this computer.',
+}
+
+/** Requests that start a coding agent: planning, writing, revising, and page edits. */
+const AGENT_ROUTES = [
+  /^\/api\/plans$/,
+  /^\/api\/plans\/[^/]+\/(revise|clarify|generate|resume|continue|retry)$/,
+  /^\/api\/proposals\/[^/]+\/(revise|regenerate|resume)$/,
+  /^\/api\/pages\/edit$/,
+  /^\/api\/author$/,
+]
+
+const DEMO_NEEDS_AGENT = 'This step runs a coding agent (Claude Code, Codex, or Gemini CLI), and none is signed in on this computer. Everything else in the demo works without one: browse the plan and pages, review, accept, or reject the update, and preview the site. To try agent steps, set up an agent under Settings → General and sign in, then try again; the demo keeps running.'
+
+/** In the demo, agent steps explain themselves when no agent can run them, instead of failing mid-run. */
+async function demoAgentUnavailable(): Promise<boolean> {
+  for (const agent of await detectAgents()) {
+    if ((await agentAuthenticationStatus(agent)).status !== 'unauthenticated') return false
+  }
+  return true
 }
 
 interface UiJob {
@@ -204,6 +246,7 @@ interface UiRuntime {
   pendingCaptureSession?: { origin: string; savedAt: string; state: CaptureStorageState } | undefined
   /** Crawls of existing documentation sites, kept in memory until a source is created from them. */
   docsSiteInspections: Map<string, DocsSiteInspection>
+  demo?: UiDemo | undefined
 }
 
 /** One crawl of an existing documentation site started from the Sources UI. */
@@ -261,7 +304,8 @@ async function recentProjectInside(cwd: string): Promise<string | undefined> {
   return undefined
 }
 
-export async function startUiServer(options: UiServerOptions): Promise<void> {
+/** Start the control center; resolves with its address once it is listening. */
+export async function startUiServer(options: UiServerOptions): Promise<string> {
   const host = options.host ?? '127.0.0.1'
   if (host !== '127.0.0.1' && host !== 'localhost') {
     throw new DoxloopError('The Doxloop UI is local-only and must bind to 127.0.0.1.')
@@ -282,6 +326,7 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     jobPersistQueue: Promise.resolve(),
     jobLogQueues: new Map(),
     docsSiteInspections: new Map(),
+    demo: options.demo,
   }
   if (recoveredJobs) await persistUiJobs(runtime)
   if (root) await rememberOpenProject(root)
@@ -295,9 +340,12 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     server.listen(port, host, resolveListen)
   })
   const url = `http://${host}:${port}/${page}`
-  process.stdout.write(
-    `Doxloop UI: ${url}\nLocal project data stays on this computer.\nPress Ctrl+C to stop.\n`,
-  )
+  // The demo prints its own introduction around the address.
+  if (!options.demo) {
+    process.stdout.write(
+      `Doxloop UI: ${url}\nLocal project data stays on this computer.\nPress Ctrl+C to stop.\n`,
+    )
+  }
   if (options.open !== false) openBrowser(url)
 
   let stopping = false
@@ -319,9 +367,11 @@ export async function startUiServer(options: UiServerOptions): Promise<void> {
     for (const response of runtime.jobSubscribers) response.end()
     runtime.jobSubscribers.clear()
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    await options.onStop?.()
   }
   process.once('SIGINT', () => void stop())
   process.once('SIGTERM', () => void stop())
+  return url
 }
 
 async function handleUiRequest(
@@ -337,6 +387,13 @@ async function handleUiRequest(
     if (url.pathname.startsWith('/api/')) {
       requireSession(request, session, port)
       if (request.method !== 'GET') requireSameOrigin(request, port)
+      if (request.method === 'POST' && demoActive(runtime)) {
+        const blocked = DEMO_BLOCKED_ROUTES[url.pathname] ?? (AGENT_ROUTES.some((route) => route.test(url.pathname)) && await demoAgentUnavailable() ? DEMO_NEEDS_AGENT : undefined)
+        if (blocked) {
+          sendJson(response, 403, { error: blocked })
+          return
+        }
+      }
       await handleApi(request, response, url, runtime)
       return
     }
@@ -1565,6 +1622,7 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
     ),
     jobs: [...runtime.jobs.values()].map(publicJob).reverse(),
     recentProjects,
+    ...(demoActive(runtime) ? { demo: { proposalId: runtime.demo!.proposalId, changeId: runtime.demo!.changeId } } : {}),
     preview: {
       running: runtime.previewJobId
         ? runtime.jobs.get(runtime.previewJobId)?.status === 'running'
@@ -1572,6 +1630,11 @@ async function buildUiState(runtime: UiRuntime): Promise<Record<string, unknown>
       ...(runtime.previewUrl ? { url: runtime.previewUrl } : {}),
     },
   }
+}
+
+/** Demo behaviour follows the demo project: switching to a real project turns it off. */
+function demoActive(runtime: UiRuntime): boolean {
+  return Boolean(runtime.demo && runtime.root && resolve(runtime.root) === resolve(runtime.demo.root))
 }
 
 async function agentState(root: string | undefined, preferred: AgentName | undefined): Promise<unknown[]> {

@@ -56,7 +56,7 @@ import type {
   SourceBinding,
   SyncRun,
 } from './types.js'
-import { assignSectionSpaces } from './plan-navigation.js'
+import { assignSectionSpaces, capNavigationSpaces, planSpaceLimit } from './plan-navigation.js'
 
 export { assignSectionSpaces }
 
@@ -1074,10 +1074,12 @@ async function runPlannerWithBudget(
     // it costs as much as the first proposal, because the agent returns the
     // whole plan again. Thin or missing screenshot coverage is reported as an
     // advisory on the review instead, where the reviewer can ask for more.
+    const spaceLimit = planSpaceLimit(current, feedback).limit
     const planningIssue = checkpoint?.pass === 'revised' ? '' : [
       initialCreatePlanCoverageIssue(proposed, current),
       existingDocumentationPlanIssue(proposed, current, project.sources),
       requiredScreenshotPlanIssue(proposed, current.execution),
+      spaceLimitPlanIssue(proposed, spaceLimit),
     ].filter((issue): issue is string => Boolean(issue)).join('\n')
     if (planningIssue) {
       emitWorkflowStage('revising-gates', 'Revising failed planning gates', 'running')
@@ -1127,6 +1129,12 @@ ${gateRevisionInstructions(planningIssue, raw, { briefed })}`
       // Replaying this reply would fail the same gate, so the next attempt plans afresh.
       await clearProposalCheckpoint(root, current.id)
       throw new DoxloopError(`The planning agent could not produce an approvable plan. ${finalPlanningIssue}`)
+    }
+    const cappedSpaces = capPlanSpaces(raw, spaceLimit)
+    raw = cappedSpaces.raw
+    if (cappedSpaces.repair) {
+      process.stdout.write(`${cappedSpaces.repair}\n`)
+      repairs.push(cappedSpaces.repair)
     }
     let applied = await applyDocumentationPlanProposal(root, current.id, raw, selected.name)
     await clearProposalCheckpoint(root, current.id)
@@ -1202,7 +1210,7 @@ export function planRevisionPatchInstructions(): string {
 
 End your reply with exactly one machine-readable block and put nothing after it. Do not use Markdown fences inside the block; close every bracket you open, and make the object's own closing brace the last character before </doxloop-plan-patch>:
 <doxloop-plan-patch>
-{ "pages": [ changed or added pages, complete ], "removePageIds": ["ids of removed pages"], "questions": [ remaining open questions, or none ], "capabilities": [ only when changed ], "navigation": { only when changed }, "existingDocumentation": [ only when changed ], "summary": "only when changed", "instructions": "only when changed" }
+{ "pages": [ changed or added pages, complete ], "removePageIds": ["ids of removed pages"], "questions": [ remaining open questions, or none ], "capabilities": [ only when changed ], "navigation": { only when changed }, "existingDocumentation": [ only when changed ], "summary": "only when changed", "instructions": "only when changed", "workspaceInstructions": "only when changed" }
 </doxloop-plan-patch>`
 }
 
@@ -1754,6 +1762,10 @@ function planningPrompt(
     : `${initialRequest}\n\nUser request:\n${current.request || 'Use the configured evidence and documentation brief to recommend the right documentation.'}`
   const screenshotIntent = normalizeScreenshotIntent(current.execution.screenshots)
   const screenshotPolicy = project.application?.screenshots?.policy ?? 'requested'
+  const spaces = planSpaceLimit(current, feedback)
+  const spaceRule = spaces.limit !== undefined
+    ? `Use at most ${spaces.limit} top-level space${spaces.limit === 1 ? '' : 's'} in total${spaces.requested ? ', the number the user asked for' : ' unless the user explicitly asks for more'}; a plan with more is merged back to ${spaces.limit} before review.`
+    : 'Keep the spaces the documentation already has unless the request changes them, and never grow past three.'
   const questionRule = current.clarification.mode === 'defaults'
     ? '- The reviewer asked you to decide open questions by their safe default instead of asking. Return an empty "questions" array: make each such decision yourself, apply it to the plan, and record it in one sentence in "instructions" so the reviewer can see what you assumed.'
     : '- Use at most three questions, only when the answer materially changes scope or reader outcomes.'
@@ -1798,7 +1810,8 @@ The JSON object must use this exact shape:`}
   "outcomes": ["concrete reader outcomes"],
   "terminology": { "preferred term": "meaning or replacement guidance" },
   "exclusions": ["explicitly out-of-scope topics"],
-  "instructions": "cross-page authoring and style guidance",
+  "instructions": "cross-page authoring and style guidance for the page writers",
+  "workspaceInstructions": "update plans only: the complete, exact navigation, space, icon, ordering, group-name, branding, or page-metadata change, or omit it",
   "experienceLevel": "beginner | intermediate | advanced | mixed",
   "preferredExamples": ["TypeScript", "curl", "other evidence-supported preferences"],
   "locale": "BCP 47 locale",
@@ -1813,7 +1826,7 @@ The JSON object must use this exact shape:`}
     "disposition": "planned | existing | excluded | needs-human"
   }],
   "navigation": {
-    "top": ["product-derived space name", "second space only when it holds at least five substantial pages"],
+    "top": ["product-derived primary space name", "another space only when it holds at least five substantial pages, within the space limit"],
     "sections": [{ "id": "getting-started", "title": "Getting started", "space": "one name from top", "pageIds": ["planned-page-id"] }]
   },
   "estimatedEffort": "small | medium | large",
@@ -1846,9 +1859,10 @@ Rules:
 - Enumerate concrete reader outcomes first, then ensure every evidence-supported outcome maps to at least one page. Put unsupported or intentionally omitted outcomes in exclusions.
 - Keep your inferred grouping, audience relevance, and recommendations in rationale. Every planned capability must map to pageIds, and every page to write must cite at least one configured source when sources are available.
 - Produce a coherent generator-neutral navigation outline. Use the persisted target only to identify generator-native navigation boundaries; do not put generator-specific syntax in page paths or section IDs.
-- Name top-level spaces after this product's reader surfaces and audiences as the evidence shows them — for example "Guides", "Tracker & API", and "Self-hosting" for an analytics product, or "Monitoring", "Status pages", and "Administration" for a monitoring tool. Those names belong to other products: never reuse an example name unless this product's own evidence uses that word, and never default to a generic "Documentation" plus "Reference" pair. Add a second or third space only when it holds at least five substantial pages of its own; otherwise keep those pages as groups inside the primary space. Give every navigation section a "space" set to exactly one name from "top", so each space you list receives its sections; a space no section names is dropped. Every navigation group needs at least two pages, and a runbook or troubleshooting page belongs with the workflows it supports, not in a reference space.
+- Name top-level spaces after this product's reader surfaces and audiences as the evidence shows them — for example "Guides", "Tracker & API", and "Self-hosting" for an analytics product, or "Monitoring", "Status pages", and "Administration" for a monitoring tool. Those names belong to other products: never reuse an example name unless this product's own evidence uses that word, and never default to a generic "Documentation" plus "Reference" pair. ${spaceRule} Add a space beyond the primary one only when it holds at least five substantial pages of its own; otherwise keep those pages as groups inside the primary space. Orientation pages (overview, concepts, quickstart, account setup) are the first groups of the primary space, never a space of their own, so the space readers land in holds the core guides rather than a handful of introductions. Give every navigation section a "space" set to exactly one name from "top", so each space you list receives its sections; a space no section names is dropped. Every navigation group needs at least two pages, and a runbook or troubleshooting page belongs with the workflows it supports, not in a reference space.
 - Give each page one distinct reader job or reference purpose. Do not hide several substantial workflows inside a generic overview or quickstart merely to keep the plan small.
 - Preserve useful existing pages during updates and identify their action explicitly.
+- When an update changes navigation (spaces, groups, order, labels), icons, branding, or page metadata, put that complete, exact change in "workspaceInstructions": Doxloop applies it in its own session after the pages are written, even when every page is preserved. "instructions" only guides the page writers and is never applied to navigation or branding.
 - Generated starter pages are scaffolding, not useful existing documentation. Any existing page containing a \`doxloop:starter-page\` marker or starter-placeholder language must appear in the current plan with action \`update\` or \`remove\`; never preserve or leave it outside the plan.
 ${questionRule}
 - Scope contract for starter: at least 3 pages to write, covering orientation, first success, and essential reference or troubleshooting when supported. Keep it deliberately small, but do not merge distinct reader jobs to stay under an arbitrary number.
@@ -1951,7 +1965,10 @@ function normalizePlanShape(raw: unknown, base: DocumentationPlan): Pick<Documen
   })
   const navigation = normalizeNavigation(value.navigation ?? base.navigation, pages)
   const existingDocumentation = normalizeExistingDocumentation(value.existingDocumentation ?? base.existingDocumentation, pages)
-  const workspaceInstructions = (textValue(value.workspaceInstructions) ?? base.workspaceInstructions)?.slice(0, 4000) || undefined
+  // An icon or ordering change names every page and group, which ran past
+  // the old 4,000-character cap on a 70-page site and reached the workspace
+  // session cut off mid-list.
+  const workspaceInstructions = (textValue(value.workspaceInstructions) ?? base.workspaceInstructions)?.slice(0, 40_000) || undefined
   return {
     productProfile: textValue(value.productProfile) ?? base.productProfile,
     summary: requiredText(value.summary ?? base.summary, 'Plan summary'),
@@ -2250,6 +2267,34 @@ export function repairMechanicalPlanIssues(raw: unknown, execution: Documentatio
   if (repairs.startPath > 0) process.stdout.write(`Normalized the start path of ${guides(repairs.startPath)} to an application-relative path.\n`)
   if (repairs.workflow > 0) process.stdout.write(`Derived the workflow of ${guides(repairs.workflow)} from the capture sequence the planner supplied.\n`)
   return { ...(raw as object), pages: next }
+}
+
+/** A plan past the space limit goes back to the planner once, which can name the merged spaces well. */
+export function spaceLimitPlanIssue(plan: Pick<DocumentationPlan, 'navigation'>, limit: number | undefined): string | undefined {
+  const top = plan.navigation?.top ?? []
+  if (limit === undefined || top.length <= limit) return undefined
+  return `The navigation uses ${top.length} top-level spaces (${top.map((name) => `"${name}"`).join(', ')}); use at most ${limit}. Merge the smaller spaces into the spaces readers would look in, keep their sections as navigation groups, name each remaining space so it describes everything it now holds, and resend the complete navigation. Orientation pages (overview, concepts, quickstart) are the first groups of the primary space.`
+}
+
+/**
+ * The deterministic backstop for the space limit: when the planner still
+ * returns too many spaces, the extra ones become groups of the kept space
+ * before them (see capNavigationSpaces) and the review says what moved.
+ */
+export function capPlanSpaces(raw: unknown, limit: number | undefined): { raw: unknown; repair?: string } {
+  if (limit === undefined || !raw || typeof raw !== 'object') return { raw }
+  const navigation = (raw as { navigation?: unknown }).navigation
+  if (!navigation || typeof navigation !== 'object') return { raw }
+  const top = stringList((navigation as { top?: unknown }).top)
+  const rawSections = (navigation as { sections?: unknown }).sections
+  const sections = (Array.isArray(rawSections) ? rawSections : []).filter((section): section is { space?: string; pageIds?: unknown[] } => Boolean(section) && typeof section === 'object')
+  const capped = capNavigationSpaces(top, sections, limit)
+  if (capped.merged.length === 0) return { raw }
+  const moves = capped.merged.map((item) => `"${item.from}" into "${item.into}"`).join(', ')
+  return {
+    raw: { ...(raw as object), navigation: { ...(navigation as object), top: capped.top, sections: capped.sections } },
+    repair: `Merged ${moves} to keep the navigation within ${limit} top-level space${limit === 1 ? '' : 's'}; their sections stay as groups. Ask for a revision to rename or regroup the spaces.`,
+  }
 }
 
 export function requiredScreenshotPlanIssue(

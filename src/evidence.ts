@@ -62,19 +62,28 @@ export async function writeEvidenceMap(root: string, map: EvidenceMap): Promise<
  * against that baseline. Stamp each verified page with the revision it was
  * checked against, so coverage and drift can tell "verified at the current
  * baseline" from "verified at some point"; without it every generated page
- * counted as unverified. Existing stamps are kept. Returns the pages stamped.
+ * counted as unverified. Existing stamps are kept, except on `unaffected`
+ * pages: drift found nothing they document in the change, so they move to the
+ * new revision. Returns the pages stamped.
  */
-export async function stampVerifiedRevisions(root: string, state: SyncState): Promise<number> {
+export async function stampVerifiedRevisions(root: string, state: SyncState, unaffected?: ReadonlySet<string>): Promise<number> {
   const map = await readEvidenceMap(root)
   if (!map) return 0
   let stamped = 0
-  for (const evidence of Object.values(map.pages)) {
+  for (const [page, evidence] of Object.entries(map.pages)) {
     if (evidence.confidence !== 'verified') continue
     let changed = false
     for (const entry of evidence.sources) {
       const record = state.sources[entry.source]
-      if (!record?.commit || evidence.verifiedAt?.[entry.source]) continue
-      evidence.verifiedAt = { ...evidence.verifiedAt, [entry.source]: record.commit }
+      // An OpenAPI source's commit is a fixed marker; drift and coverage
+      // compare its content fingerprint, so that is the revision to stamp.
+      const revision = record?.connector?.id === 'openapi' && record.contentFingerprint ? record.contentFingerprint : record?.commit
+      const existing = evidence.verifiedAt?.[entry.source]
+      // A page the source change did not touch stays verified at the new
+      // revision; without this, every update left the untouched pages
+      // counted as unverified.
+      if (!revision || (existing && !(unaffected?.has(page) && existing !== revision))) continue
+      evidence.verifiedAt = { ...evidence.verifiedAt, [entry.source]: revision }
       changed = true
     }
     if (changed) stamped += 1
@@ -126,12 +135,18 @@ function evidenceIdentifiers(
   return entries.flatMap((entry) => [...(entry.paths ?? []), ...(entry.operations ?? [])])
 }
 
+const API_IDENTIFIER = /^(?:[A-Z*]+\s+\/|schema:|security:)/
+
 /**
  * A recorded path may be an exact file, a directory, or a glob. A bare
  * directory is treated as everything below it so `src/routes` keeps matching
  * after a new file is added to it.
  */
 function evidenceMatches(path: string, pattern: string): boolean {
+  // An API operation or schema identifier is not a directory: `POST /store/order`
+  // must not match `POST /store/order/{orderId}/cancel`. New operations reach
+  // the pages of the resource they extend through drift's own rule instead.
+  if (API_IDENTIFIER.test(pattern)) return matchesGlob(path, pattern)
   return matchesGlob(path, pattern) || matchesGlob(path, `${pattern}/**`)
 }
 

@@ -51,11 +51,18 @@ project.
 
 Doxloop requires Node.js 22.13 or later. Install Google Chrome for application screenshots and sign-in capture; text-only authoring does not need a browser.
 
-Try the bundled demo first, without an agent or a model charge:
+Take the two-minute tour first, without an agent or a model charge:
 
 ```sh
 npx @doxbrix/doxloop demo
 ```
+
+The demo opens the control center on a finished project in a temporary folder:
+Pet Store API documentation that Claude Code planned and wrote from an OpenAPI
+specification, plus the update Monitoring drafted when the API changed. A guided
+tour walks through sources, the plan, the pages, the pending update in Review,
+and publishing. Accept the update, ask the agent for a revision, or open the
+preview; the temporary folder is removed when you press Ctrl+C.
 
 Then adopt an existing documentation folder in the setup wizard, or create a new project. Run the read-only documentation audit before requesting an update. Start with the five-page preset: review the plan and its page, screenshot, and time caps before generation. Planning and writing are separate agent runs; each may take several minutes and uses your agent subscription or billing. Doxloop reports observed durations when comparable completed runs exist; a time cap is not a price quote.
 

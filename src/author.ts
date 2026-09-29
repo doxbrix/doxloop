@@ -1,4 +1,5 @@
-import { stampVerifiedRevisions } from './evidence.js'
+import { readEvidenceMap, stampVerifiedRevisions } from './evidence.js'
+import { computeDrift } from './drift.js'
 import { pathExists } from './fs.js'
 import { UsageBudget, isAccountLimit } from './usage-budget.js'
 import { adoptPlanningCaptures } from './planning-captures.js'
@@ -1229,10 +1230,16 @@ Finish with a short summary of what you changed and anything the instruction ask
       })
       return 1
     }
+    // Measured against the previous baseline, before it is replaced: pages
+    // drift does not name were unaffected by the source change.
+    const previousDrift = options.recordOperationalState === false ? undefined : await computeDrift(options.root, completedProject).catch(() => undefined)
     const state = options.recordOperationalState === false
       ? undefined
       : await recordSyncState(options.root, completedProject.sources)
-    if (state) await stampVerifiedRevisions(options.root, state)
+    const unaffected = previousDrift && previousDrift.status !== 'unknown' && previousDrift.trackedPages > 0
+      ? new Set(Object.keys((await readEvidenceMap(options.root))?.pages ?? {}).filter((page) => !previousDrift.pages.some((stale) => stale.page === page)))
+      : undefined
+    if (state) await stampVerifiedRevisions(options.root, state, unaffected)
     const recorded = state ? Object.keys(state.sources).length : 0
     if (recorded > 0) {
       process.stdout.write(

@@ -9,12 +9,13 @@
  * session ends. The cache directory is never part of a proposal.
  */
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { basename, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { PNG } from 'pngjs'
 import { pathExists } from './fs.js'
 import { readEvidenceMap, writeEvidenceMap } from './evidence.js'
 import { seedEvidence } from './authoring-postpass.js'
+import { parseOpenApi } from './openapi.js'
 import { preferredPageExtension } from './page-extension.js'
 import { SCREENSHOT_MANIFEST_FILE, dominantColorShare } from './screenshot-workflow.js'
 import type { AuthoringBatch } from './authoring-batches.js'
@@ -366,12 +367,14 @@ export async function reconcileEvidenceSlice(
   const roots = new Map(sources.map((source) => [source.name, resolve(isAbsolute(source.path) ? source.path : join(workspace, source.path))]))
   const contentDir = plan.target?.contentDir || ''
   const extension = preferredPageExtension(plan.target)
+  const specifications = await specificationSurfaces(roots)
   const result = { pages: 0, droppedPaths: 0 }
   const next: Record<string, PageEvidence> = {}
   for (const page of pages) {
-    const expected = join(contentDir, `${page.path}${extension}`).replaceAll('\\', '/')
-    const stem = expected.replace(/\.[^.]+$/, '')
-    const key = Object.keys(written).find((file) => file === expected || file.replace(/\.[^.]+$/, '') === stem) ?? expected
+    const planned = join(contentDir, `${page.path}${extension}`).replaceAll('\\', '/')
+    const expected = await plannedPageFile(workspace, contentDir, page.path, extension, planned)
+    const stems = new Set([planned, expected].map((file) => file.replace(/\.[^.]+$/, '')))
+    const key = Object.keys(written).find((file) => file === expected || stems.has(file.replace(/\.[^.]+$/, ''))) ?? expected
     const agent = written[key] ?? {}
     const merged = new Map<string, Set<string>>()
     const add = (source: string, paths: Iterable<string>): void => {
@@ -384,8 +387,13 @@ export async function reconcileEvidenceSlice(
     for (const entry of Array.isArray(agent.sources) ? agent.sources : []) {
       if (!entry || typeof entry.source !== 'string' || !roots.has(entry.source)) continue
       const kept: string[] = []
+      const specification = specifications.get(entry.source)
       for (const candidate of entry.paths ?? []) {
         if (typeof candidate !== 'string') continue
+        // A source that is one specification file has no paths below it; the
+        // agent naming that file means it read the contract, and the page is
+        // tied to the operations it documents instead (see below).
+        if (specification && (candidate === specification.file || candidate === '.' || candidate === '')) { agentNamedPath = true; continue }
         const absolute = resolve(roots.get(entry.source)!, candidate)
         if (relative(roots.get(entry.source)!, absolute).startsWith('..')) { result.droppedPaths += 1; continue }
         if (/[*?[]/.test(candidate) || await pathExists(absolute)) kept.push(candidate.replaceAll('\\', '/'))
@@ -397,9 +405,30 @@ export async function reconcileEvidenceSlice(
     // Reads are attributed only when neither the plan nor the agent named a
     // path for the page: a batch session reads for several pages at once, and
     // a path on every page makes every change look relevant.
-    if ([...merged.values()].every((set) => set.size === 0)) for (const [source, set] of reads) add(source, set)
+    if ([...merged.values()].every((set) => set.size === 0)) for (const [source, set] of reads) if (!specifications.has(source)) add(source, set)
+    // Drift reports an OpenAPI change as operation and schema identifiers, so
+    // a page is tied to exactly the ones it documents: those the agent or the
+    // plan named, and those its text mentions. Without them a page matched
+    // every change to the specification.
+    const operations = new Map<string, string[]>()
+    if (specifications.size > 0) {
+      const body = await readFile(join(workspace, expected), 'utf8').catch(() => '')
+      const agentOperations = (Array.isArray(agent.sources) ? agent.sources : []).flatMap((entry) => Array.isArray(entry?.operations) ? entry.operations.filter((item): item is string => typeof item === 'string') : [])
+      const claims = Array.isArray(agent.claims) ? agent.claims.filter((claim): claim is string => typeof claim === 'string') : []
+      const text = [body, ...claims, ...agentOperations, ...(page.evidence ?? []), ...(page.evidenceDetails ?? []).map((detail) => `${detail?.label ?? ''} ${detail?.path ?? ''}`)].join('\n')
+      for (const [source, specification] of specifications) {
+        const mentioned = mentionedSurface(text, specification)
+        if (mentioned.length === 0) continue
+        operations.set(source, mentioned)
+        if (!merged.has(source)) merged.set(source, new Set())
+      }
+    }
     const entry: PageEvidence = {
-      sources: [...merged].map(([source, set]) => (set.size > 0 ? { source, paths: [...set].sort() } : { source })),
+      sources: [...merged].map(([source, set]) => ({
+        source,
+        ...(set.size > 0 ? { paths: [...set].sort() } : {}),
+        ...(operations.get(source)?.length ? { operations: operations.get(source)! } : {}),
+      })),
       // The agent's confidence stands only when it named a real file it read; a
       // "verified" over no path is the word, not the check.
       confidence: agentNamedPath && (agent.confidence === 'verified' || agent.confidence === 'inferred' || agent.confidence === 'needs-human') ? agent.confidence : 'inferred',
@@ -410,10 +439,62 @@ export async function reconcileEvidenceSlice(
       const verification = Object.fromEntries(Object.entries(agent.claimVerification).filter(([claim, state]) => claims.includes(claim) && ['verified', 'inferred', 'contradicted', 'needs-human'].includes(String(state))))
       if (Object.keys(verification).length > 0) entry.claimVerification = verification as NonNullable<PageEvidence['claimVerification']>
     }
-    next[key] = entry
+    next[expected] = entry
     result.pages += 1
   }
   await writeFile(path, `${JSON.stringify({ schemaVersion: 1, pages: next }, null, 2)}\n`, 'utf8')
   return result
+}
+
+/**
+ * The file a planned page was written to. A planned landing page
+ * (`guides/index`, `overview`) is written where the site keeps its index, as
+ * `planPageFiles` resolves it, so its evidence must be recorded there too.
+ */
+async function plannedPageFile(workspace: string, contentDir: string, path: string, extension: string, planned: string): Promise<string> {
+  if (await pathExists(join(workspace, planned))) return planned
+  const candidates = [join(contentDir, path, `index${extension}`)]
+  if (/^(?:index|overview|home|start-here)$/i.test(path.split('/').pop() ?? '')) candidates.push(join(contentDir, `index${extension}`))
+  for (const candidate of candidates) {
+    if (await pathExists(join(workspace, candidate))) return candidate.replaceAll('\\', '/')
+  }
+  return planned
+}
+
+interface SpecificationSurface {
+  /** The specification's file name, which is how an agent cites it. */
+  file: string
+  operations: string[]
+  schemas: string[]
+}
+
+/** Operations and schemas of every source that is a single OpenAPI file. */
+async function specificationSurfaces(roots: ReadonlyMap<string, string>): Promise<Map<string, SpecificationSurface>> {
+  const surfaces = new Map<string, SpecificationSurface>()
+  for (const [source, root] of roots) {
+    try {
+      if (!(await stat(root)).isFile()) continue
+      const { snapshot } = parseOpenApi(await readFile(root, 'utf8'))
+      surfaces.set(source, { file: basename(root), operations: Object.keys(snapshot.operations), schemas: Object.keys(snapshot.schemas) })
+    } catch { /* not a readable specification file */ }
+  }
+  return surfaces
+}
+
+/**
+ * The operations (`GET /pet/{petId}`) and schemas (`schema:Order`) a text
+ * mentions. An operation must not continue into a longer path, so
+ * `POST /pet` does not match inside `POST /pet/{petId}`. A schema counts
+ * only in code or as a named object or schema, because schema names such as
+ * `Pet` are also ordinary words.
+ */
+export function mentionedSurface(text: string, surface: Pick<SpecificationSurface, 'operations' | 'schemas'>): string[] {
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const operations = surface.operations.filter((operation) => {
+    const [method, path] = operation.split(' ')
+    return new RegExp(`(^|[^A-Za-z])${escape(method!)}\\s+\`?${escape(path!)}(?![\\w/{-])`, 'i').test(text)
+  })
+  const schemas = surface.schemas.filter((schema) => new RegExp(`\`${escape(schema)}\`|\\b${escape(schema)}\\s+(object|schema|model)s?\\b|#/components/schemas/${escape(schema)}\\b`).test(text))
+  return [...operations.sort(), ...schemas.sort().map((schema) => `schema:${schema}`)]
 }
 

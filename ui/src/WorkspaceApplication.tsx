@@ -31,6 +31,7 @@ import { AgentCapabilityMatrix } from './agent-capabilities'
 import { ProposalRationaleDrawer, ProposalRenderedDiff, ProposalSourceDiff } from './proposal-diff'
 import { AssetLibrary, AssetPicker, readFileAsBase64 } from './AssetLibrary'
 import { BrandingPanel } from './BrandingPanel'
+import { DemoBadge, DemoTour, reopenDemoTour } from './DemoTour'
 import { GlossaryPanel, PageMetadataForm, ReleaseTemplateFields, TermsEditor, recordFromTerms, termsFromRecord, type ReleaseTemplateForm } from './content-types'
 import { NavigationView, PlanNavigationEditor } from './NavigationView'
 import { defaultReviewChange, hunkStateKey, proposalDecisionCounts, reviewFileGroups, screenshotCoverageText } from './review-presentation'
@@ -399,6 +400,7 @@ export function WorkspaceApplication({
             <strong class="workspace-screen-title">{page === 'authoring' ? `${authoringNavigationLabel} documentation` : PAGE_TITLES[page]}</strong>
           </div>}
         <span class="workspace-navbar-spacer" />
+        {state.demo && <DemoBadge onOpen={reopenDemoTour} />}
         {runningJobs > 0 && <button type="button" class="workspace-activity-chip" title="Open running task progress" aria-label={`${runningJobs} task${runningJobs === 1 ? '' : 's'} running. Open progress`} onClick={() => { const job = state.jobs.find((item) => item.status === 'running' && !item.type.includes('preview')); const id = job?.type.match(/^proposal:(?:revise|resume):(.+)$/)?.[1]; if (id) location.assign(`/review?proposal=${encodeURIComponent(id)}`); else { navigate(job?.type.startsWith('page-edit:') ? 'pages' : 'authoring'); } }}><i />{runningJobs === 1 ? '1 task running' : `${runningJobs} tasks running`}</button>}
         <button type="button" class="workspace-search-button" aria-label="Search or jump to (⌘K)" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /><span>Search or jump to…</span><kbd>⌘K</kbd></button>
         <button type="button" class="workspace-preview-primary" aria-label="Preview docs in a new tab" aria-busy={previewNotice?.state === 'starting'} disabled={previewNotice?.state === 'starting'} onClick={() => void openPreview()}>{previewNotice?.state === 'starting' ? <span class="spinner" /> : <Icon name="preview" size={15} />}<strong>{previewNotice?.state === 'starting' ? 'Starting preview…' : 'Preview docs'}</strong><Icon name="external" size={12} /></button>
@@ -431,6 +433,7 @@ export function WorkspaceApplication({
         </div>
       </div>
     </main>
+    {state.demo && <DemoTour proposalId={state.demo.proposalId} changeId={state.demo.changeId} page={page} navigate={navigate} onNewProject={onNewProject} />}
   </div>
 }
 
@@ -510,7 +513,7 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
         <div><dt>Coding agent</dt><dd><i class={`ov-dot ${agentTone}`} />{agent ? `${agentLabel(agent.name)} ${agentSignInLabel(agent.authentication.status)}` : 'None detected'}</dd><button type="button" class="ov-fact-link" onClick={() => navigate('settings', { section: 'general' })}>Agent settings</button></div>
         <div><dt>Activity</dt><dd><i class={`ov-dot ${running ? 'info' : 'neutral'}`} />{running ? `${running} task${running === 1 ? '' : 's'} running` : 'Idle'}</dd></div>
         <div><dt>Last checked</dt><dd>{latestTimestamp ? timeText(latestTimestamp) : 'Not yet'}</dd></div>
-        {state.root && <div><dt>Project folder</dt><dd title={state.root}><code>{state.root}</code></dd></div>}
+        {state.root && <div><dt>Project folder</dt><dd title={state.root}>{state.demo ? 'Temporary demo folder, removed when you stop the demo' : <code>{state.root}</code>}</dd></div>}
       </dl>
     </section>
 
@@ -981,7 +984,7 @@ function DocumentationFreshness({ value, navigate, sync, onConfigure }: { value:
   const drift = driftState(value)
   const monitoringRow = <div class="vrow">
     <span class="vrow-label">Monitoring</span>
-    <span class="vrow-value">{sync.on.length ? monitoringSummary(sync) : 'Not configured'}<Button tone="link" onClick={onConfigure}>Configure</Button></span>
+    <span class="vrow-value">{sync.on.length ? monitoringSummary(sync) : sync.mode !== 'check' ? 'On demand · Check now drafts an update for review' : 'Not configured'}<Button tone="link" onClick={onConfigure}>Configure</Button></span>
   </div>
   if (!drift.ok) {
     return <Panel class="freshness-panel unknown" title="Freshness" flush>
@@ -4036,6 +4039,7 @@ function Publish({ state, act, streamConnected, onError }: { state: UiState; act
 
     <PageHeader kicker="Publish" title="Publish" description={published ? 'Your documentation is live on Doxbrix.' : 'Your documentation, live on Doxbrix.'} />
     {deploymentSync.stale && <StaleFormNotice onResync={deploymentSync.resync} />}
+    {state.demo && <Note>This is the demo workspace, so publishing is turned off. The checklist below is real: in your own project, sign in once and publish in one step, or export a static site to host anywhere.</Note>}
 
     {/* Connect: signed out, or signing in. */}
     {!signedIn && (signingIn

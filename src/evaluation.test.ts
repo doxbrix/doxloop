@@ -2,16 +2,16 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { createDemoWorkspace, type DemoWorkspace } from './demo.js'
+import { createPulseWorkspace, type PulseWorkspace } from './pulse.fixture.js'
 import { approveEvaluationBaseline, evaluateWorkspace } from './evaluation.js'
 
-const demos: DemoWorkspace[] = []
+const demos: PulseWorkspace[] = []
 const temporary: string[] = []
 afterEach(async () => { await Promise.all([...demos.splice(0).map((demo) => demo.cleanup()), ...temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))]) })
 
 describe('documentation evaluations', () => {
   test('scores update locality and blocks a regression beyond the approved threshold', async () => {
-    const demo = await createDemoWorkspace(); demos.push(demo)
+    const demo = await createPulseWorkspace(); demos.push(demo)
     const parent = await mkdtemp(join(tmpdir(), 'doxloop-evaluation-before-')); temporary.push(parent)
     const before = join(parent, 'project'); await cp(demo.root, before, { recursive: true })
     const baseline = await evaluateWorkspace(demo.root, { mode: 'generation', maximumPages: 7 })

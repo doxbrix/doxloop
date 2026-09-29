@@ -5,6 +5,83 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+### Changed
+
+- **`doxloop demo` opens the real control center.** It used to open a static
+  preview of seven stub pages. It now unpacks a finished Pet Store API project
+  into a temporary folder and opens it in the control center with a short
+  guided tour. Claude Code planned and wrote its pages from the Pet Store
+  OpenAPI specification, and after the API moved to 1.1.0, Monitoring drafted
+  an update that waits in Review with its diffs, rationale, and evidence.
+  Publishing, exporting, and installing a schedule are turned off in the demo;
+  everything else works, and the temporary folder is removed on Ctrl+C. A
+  Demo badge in the top bar reopens the tour. Steps that need a coding agent
+  (planning, writing, revising) explain what they need instead of failing
+  when no agent is signed in. The control center starts on port 4317, or the
+  next free port. Use `--no-ui` to unpack and validate without a server
+  (`--no-preview` still works).
+- **New documentation sets use at most three top-level spaces.** A plan split
+  into six spaces left "Get started" with three pages beside five thin tabs.
+  A new plan now uses at most three spaces unless the request names a number
+  ("use 5 spaces", "four top-level tabs"). An update keeps the spaces the
+  site already has unless the request names a number. Orientation pages
+  (overview, concepts, quickstart) become the first groups of the primary
+  space instead of a space of their own. When a planner returns too many
+  spaces, it is asked once to merge them. If the plan still has too many,
+  Doxloop merges the extra spaces into groups of the space before them,
+  keeps every section's title, order and pages, and says in the plan review
+  what moved.
+- **Update plans can change navigation, icons and branding without
+  rewriting pages.** Plans now carry these changes in a separate
+  `workspaceInstructions` field. Doxloop applies it after the pages are
+  written, even when every page is preserved. Before, a request such as
+  "reorder the sidebar" could be lost in the page writers' instructions. The
+  field's limit rose from 4,000 to 40,000 characters, so an icon or ordering
+  change that names every page of a 70-page site is no longer cut off
+  mid-list.
+- **Monitoring updates explain why each page changed.** A proposal
+  Monitoring drafted used a generic reason for every page. Each page's
+  rationale in Review now names the source change that made it stale, for
+  example "pet-store-api changed since this page was verified: the Order
+  schema changed; POST /store/order/{orderId}/cancel was added". A page the
+  agent edited only for consistency says so.
+
+### Fixed
+
+- **Generating from a local OpenAPI file no longer stops after the first
+  batch.** When the agent cited the specification file, Doxloop looked for it
+  below itself (`openapi.json/openapi.json`) and the run failed with
+  `ENOTDIR`. A path below a file now counts as missing.
+- **OpenAPI pages go stale only when what they document changes.** Page
+  evidence for an OpenAPI source kept file paths only, so every page matched
+  every change to the specification. Each page now records the operations
+  (`GET /pet/findByTags`) and schemas (`schema:Order`) it documents, so a
+  change names the pages that describe it. A new operation marks the pages
+  of the resource it extends as stale: `POST /store/order/{orderId}/cancel`
+  is flagged on the pages that document `/store/order/{orderId}`. Evidence
+  for `POST /store/order` no longer matches that longer path, and a page
+  whose evidence names the specification's operations now counts toward
+  contract coverage.
+- **Pages an update did not touch stay verified.** After every update, pages
+  the source change did not affect were counted as unverified, so coverage
+  kept dropping. They now move to the new revision. For an OpenAPI source,
+  the revision is the specification's content fingerprint, so pages stay
+  verified across specification edits.
+- **Evidence for landing pages is recorded against the right file.** A
+  planned landing page such as `guides/index` or `overview` is written to the
+  site's index file. Its evidence was recorded under the planned path, so
+  the page looked unsupported.
+- **Sidebar icons line up.** Writers set an icon in every page's frontmatter
+  but only on a few navigation entries, so most sidebar rows sat unaligned
+  beside the ones with an icon. A navigation entry without an icon now takes
+  the one its page declares. A page with no icon the sidebar can draw
+  (`shield-check`), placed beside siblings that have icons, gets the generic
+  page icon.
+- **Publishing no longer mistakes a heading for an access token.** The token
+  check matched any `dxb_` text, so the anchor of a documented error such as
+  "provide a dxb_ Personal Access Token" blocked the deploy of a page that
+  holds no token. It now matches only the real token format.
+
 ## 0.2.0 - 2026-09-27
 
 ### Changed

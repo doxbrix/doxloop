@@ -95,7 +95,10 @@ export async function pathExists(path: string): Promise<boolean> {
     await lstat(path)
     return true
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    // ENOTDIR means a parent segment is a file, as in `openapi.json/x`:
+    // nothing can exist below it.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false
     throw error
   }
 }

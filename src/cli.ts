@@ -33,7 +33,8 @@ import {
   runSyncSetupWizard,
 } from './autosync.js'
 import { deploy } from './deploy.js'
-import { createDemoWorkspace } from './demo.js'
+import { availableDemoPort, createDemoWorkspace } from './demo.js'
+import { readJson } from './fs.js'
 import {
   continueDocumentationPlanGeneration,
   generateApprovedDocumentationPlan,
@@ -162,29 +163,8 @@ async function main(): Promise<number> {
       process.stdout.write(`${formatDoctorReport(report)}\n`)
       return report.ready ? 0 : 1
     }
-    case 'demo': {
-      const demo = await createDemoWorkspace()
-      const keep = booleanFlag(args, 'keep')
-      process.stdout.write(`Doxloop demo is ready.\n\n  Workspace:  ${demo.root}\n  Plan:       generated (${demo.plan.pages.length} pages)\n  Evidence:   ${demo.validation.pages.length} verified pages\n  Validation: ${demo.validation.errors} errors, ${demo.validation.warnings} warnings\n  Review:     ${demo.review.score}/100 (${demo.review.hardGates})\n\n`)
-      if (booleanFlag(args, 'no-preview')) {
-        process.stdout.write(`${keep ? `The demo was kept at ${demo.root}.` : 'The isolated demo has been cleaned up.'}\n`)
-        if (!keep) await demo.cleanup()
-        return 0
-      }
-      if (!keep) {
-        const cleanup = () => void demo.cleanup()
-        process.once('SIGINT', cleanup)
-        process.once('SIGTERM', cleanup)
-      }
-      process.stdout.write('Opening the finished documentation preview. Press Ctrl+C to stop and clean up.\n')
-      try {
-        await startPreview({ root: demo.root, host: '127.0.0.1', port: numberFlag(args, 'port', 4321), open: !booleanFlag(args, 'no-open') })
-      } catch (error) {
-        if (!keep) await demo.cleanup()
-        throw error
-      }
-      return 0
-    }
+    case 'demo':
+      return demoCommand(args, cwd)
     case 'create':
       if (
         flag(args, 'source') !== undefined ||
@@ -1236,7 +1216,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     generator: [],
     doctor: ['source', 'output', 'agent'],
     audit: ['format', 'backfill-evidence'],
-    demo: ['port', 'no-open', 'no-preview', 'keep'],
+    demo: ['port', 'no-open', 'no-ui', 'no-preview', 'keep'],
     create: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots', 'source', 'spec', 'docs', 'output'],
     update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
@@ -1386,14 +1366,16 @@ function help(command?: string): string {
   if (command === 'demo') {
     return `Usage: doxloop demo [options]
 
-Create a complete bundled documentation project in an isolated temporary
-directory, then open its local preview. No agent sign-in, repository, commit,
-or network source is required, and the current directory is never modified.
+Open the control center on a finished example project in an isolated temporary
+folder, with a short guided tour. Claude Code wrote its documentation from the
+Pet Store OpenAPI specification; then the API changed and Monitoring drafted an
+update that waits in Review. No agent sign-in, repository, or model charge is
+needed, and the current directory is never modified.
 
 Options:
-  --port <port>            Preview port (default: 4321)
-  --no-open                Start the preview without opening a browser
-  --no-preview             Validate the showcase without starting a server
+  --port <port>            Preferred control center port (default: 4317, or the next free one)
+  --no-open                Start the control center without opening a browser
+  --no-ui                  Unpack and validate the example without starting a server
   --keep                   Keep the temporary workspace after the demo
 
 Try without installing:
@@ -1801,7 +1783,7 @@ Usage:
   doxloop <command> [options]
 
 Author:
-  demo       Try a safe, complete example in a temporary workspace
+  demo       Tour a finished example project in a temporary workspace
   init       Create a documentation project
   create     Ask an agent to create documentation
   update     Maintain docs after product changes
@@ -1845,7 +1827,7 @@ Global options:
   -v, --version      Show version
 
 Get started:
-  npx @doxbrix/doxloop demo           Preview a complete example safely
+  npx @doxbrix/doxloop demo           Tour a finished example project safely
   doxloop init                       Answer a few questions interactively
   doxloop create                     Create docs from saved project settings
   doxloop settings                   View or change project settings
@@ -1869,3 +1851,44 @@ main()
     )
     process.exitCode = 1
   })
+
+async function demoCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const keep = booleanFlag(args, 'keep')
+  const demo = await createDemoWorkspace()
+  const release = async (): Promise<void> => {
+    if (keep) process.stdout.write(`\nThe demo workspace was kept at ${demo.root}.\n`)
+    else await demo.cleanup()
+  }
+  const version = await readJson<{ info?: { version?: string } }>(join(demo.product, 'openapi.json')).then((spec) => spec.info?.version).catch(() => undefined)
+  const pages = demo.validation.pages.length
+  const rows: Array<[string, string]> = [
+    ['Pet Store API docs', `${pages} pages Claude Code wrote from the OpenAPI specification`],
+    ['Validation', `${demo.validation.errors} errors, ${demo.validation.warnings} warning${demo.validation.warnings === 1 ? '' : 's'}`],
+    ...(demo.pendingProposal
+      ? [['API change detected', `Monitoring drafted an update for ${version ? `version ${version}` : 'the new specification'}: ${demo.pendingProposal.files} file${demo.pendingProposal.files === 1 ? '' : 's'} wait in Review`] as [string, string]]
+      : []),
+  ]
+  const width = Math.max(...rows.map(([label]) => label.length))
+  process.stdout.write(`\nDoxloop demo\n\n${rows.map(([label, detail]) => `  ✓ ${label.padEnd(width)}  ${detail}`).join('\n')}\n\n`)
+  if (booleanFlag(args, 'no-ui') || booleanFlag(args, 'no-preview')) {
+    await release()
+    if (!keep) process.stdout.write('The temporary demo workspace has been removed.\n')
+    return 0
+  }
+  const port = await availableDemoPort(numberFlag(args, 'port', 4317))
+  try {
+    const url = await startUiServer({
+      cwd,
+      port,
+      project: demo.root,
+      open: !booleanFlag(args, 'no-open'),
+      demo: { root: demo.root, ...(demo.pendingProposal ? { proposalId: demo.pendingProposal.id, ...(demo.pendingProposal.focusChange ? { changeId: demo.pendingProposal.focusChange } : {}) } : {}) },
+      onStop: release,
+    })
+    process.stdout.write(`  Control center  ${url}\n\n  Everything runs on this computer. No agent or model runs unless you ask for one.\n  Press Ctrl+C to stop${keep ? '.' : ' and remove the temporary workspace.'}\n`)
+  } catch (error) {
+    await release()
+    throw error
+  }
+  return 0
+}

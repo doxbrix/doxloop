@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { createDemoWorkspace, type DemoWorkspace } from './demo.js'
+import { createPulseWorkspace, type PulseWorkspace } from './pulse.fixture.js'
 import { evaluateWorkspace } from './evaluation.js'
 import { loadProject } from './project.js'
 import { reverifyClaims, VERIFICATION_METADATA_FILE } from './quality-claims.js'
@@ -10,10 +10,10 @@ import { runQuality } from './quality-gates.js'
 import { fixDocumentation } from './quality-lint.js'
 import { checkExternalLinks } from './quality-links.js'
 
-const demos: DemoWorkspace[] = []
+const demos: PulseWorkspace[] = []
 afterEach(async () => { await Promise.all(demos.splice(0).map((demo) => demo.cleanup())) })
 
-async function demo(): Promise<DemoWorkspace> { const value = await createDemoWorkspace(); demos.push(value); return value }
+async function demo(): Promise<PulseWorkspace> { const value = await createPulseWorkspace(); demos.push(value); return value }
 
 describe('release quality contract', () => {
   test('orchestrates every non-rendered gate and persists a versioned report', async () => {

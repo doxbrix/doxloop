@@ -187,7 +187,9 @@ function isSignalDocumented(signal: DiscoveryEvidence, map: EvidenceMap | undefi
     // Writers cite the contract file, not each operation. A page that cites
     // the spec documents the operations, schemas, schemes, and error statuses
     // its own text covers, and no others.
-    if (!signal.contract || !identifiers.some((identifier) => identifier === signal.path || matchesGlob(signal.path, identifier))) return false
+    // Evidence that names the contract's operations, or the whole source, cites it too.
+    const citesContract = identifiers.length === 0 || (entry.operations?.length ?? 0) > 0 || identifiers.some((identifier) => identifier === signal.path || matchesGlob(signal.path, identifier))
+    if (!signal.contract || !citesContract) return false
     const content = contents.get(page)
     return content !== undefined && contractPartDocumented(signal, content)
   }))

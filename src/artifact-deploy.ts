@@ -252,7 +252,11 @@ export async function packageStaticOutput(root: string): Promise<{
       ].filter(
         (value): value is string => Boolean(value && value.length >= 12),
       )
-      if (activeTokens.some((token) => text.includes(token)) || /\bdxb_[A-Za-z0-9_-]{20,}\b/.test(text)) {
+      // Doxbrix tokens are `dxb_` and 48 hex characters. The pattern once
+      // allowed `-` and `_`, so the heading anchor of a documented error such
+      // as "provide a dxb_ Personal Access Token" (`…-dxb_-personal-access-…`)
+      // blocked the deploy of a page that holds no token.
+      if (activeTokens.some((token) => text.includes(token)) || /\bdxb_[A-Za-z0-9]{32,}\b/.test(text)) {
         throw new DoxloopError(`Build output appears to contain a deployment access token: ${path}`)
       }
       entries[path] = new Uint8Array(data)

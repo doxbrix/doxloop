@@ -118,7 +118,7 @@ describe('authoring post-pass', () => {
     expect(group(nav, 'Get started')!.items).toEqual([
       { type: 'page', file: 'index', title: 'Overview', icon: 'compass' },
       { type: 'page', file: 'quickstart', title: 'Quickstart', icon: 'bolt' },
-      { type: 'page', file: 'guides/setup', title: 'Setup' },
+      { type: 'page', file: 'guides/setup', title: 'Setup', icon: 'file' },
     ])
     expect(group(nav, 'Guides')).toEqual({ type: 'group', label: 'Guides', items: [{ type: 'page', file: 'guides/auth', title: 'Auth' }] })
     expect(nav.at(-1)).toEqual({ type: 'page', file: 'reference/cli', title: 'CLI' })
@@ -128,6 +128,37 @@ describe('authoring post-pass', () => {
       'docs.json: added "guides/auth" to group "Guides".',
       'docs.json: added "reference/cli" to space "Documentation".',
       'docs.json: removed "legacy" from navigation because the plan deletes it.',
+    ]))
+  })
+
+  test('gives navigation entries without an icon the drawable icon their page declares, and keeps icons already set', async () => {
+    const root = await scaffold()
+    await write(root, 'guides/setup.mdx', '---\ntitle: "Setup"\nicon: "wrench"\n---\n\n# Setup\n')
+    await write(root, 'guides/auth.mdx', '---\ntitle: "Auth"\nicon: "key"\n---\n\n# Auth\n')
+    await write(root, 'guides/plain.mdx', '---\ntitle: "Plain"\nicon: "shield-check"\n---\n\n# Plain\n')
+    const config = await siteConfig(root)
+    config.spaces[0]!.nav.push({ type: 'group', label: 'Guides', items: [
+      { type: 'page', file: 'guides/setup', title: 'Setup' },
+      { type: 'page', file: 'guides/auth', title: 'Auth', icon: 'lock' },
+      { type: 'page', file: 'guides/plain', title: 'Plain' },
+    ] })
+    await writeFile(join(root, 'docs.json'), `${JSON.stringify(config, null, 2)}\n`)
+    const documentationPlan = plan([
+      page({ id: 'setup', path: 'guides/setup', title: 'Setup' }),
+      page({ id: 'auth', path: 'guides/auth', title: 'Auth' }),
+      page({ id: 'plain', path: 'guides/plain', title: 'Plain' }),
+    ], [{ id: 'guides', title: 'Guides', pageIds: ['setup', 'auth', 'plain'] }])
+
+    const report = await run(root, documentationPlan)
+
+    expect(group((await siteConfig(root)).spaces[0]!.nav, 'Guides')!.items).toEqual([
+      { type: 'page', file: 'guides/setup', title: 'Setup', icon: 'wrench' },
+      { type: 'page', file: 'guides/auth', title: 'Auth', icon: 'lock' },
+      { type: 'page', file: 'guides/plain', title: 'Plain', icon: 'file' },
+    ])
+    expect(report.repairs).toEqual(expect.arrayContaining([
+      'docs.json: gave 1 navigation entry the icon its page declares.',
+      'docs.json: gave 1 navigation entry with no drawable icon the page icon, so it lines up with its group.',
     ]))
   })
 

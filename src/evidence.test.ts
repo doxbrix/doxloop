@@ -194,4 +194,22 @@ describe('stampVerifiedRevisions', () => {
     expect(map!.pages['c.mdx']!.verifiedAt).toEqual({ app: 'older' })
     await rm(root, { recursive: true, force: true })
   })
+
+  test('stamps an OpenAPI source by fingerprint and moves pages the change did not touch to it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-stamp-openapi-'))
+    await mkdir(join(root, '.doxloop'), { recursive: true })
+    await writeEvidenceMap(root, { schemaVersion: 1, pages: {
+      'fresh.mdx': { sources: [{ source: 'api', operations: ['POST /pet'] }], confidence: 'verified' },
+      'untouched.mdx': { sources: [{ source: 'api', operations: ['GET /user/login'] }], confidence: 'verified', verifiedAt: { api: 'v1-hash' } },
+      'stale.mdx': { sources: [{ source: 'api', operations: ['GET /pet/findByTags'] }], confidence: 'verified', verifiedAt: { api: 'v1-hash' } },
+    } } as never)
+    const state = { schemaVersion: 1, sources: { api: { commit: 'openapi-spec', recordedAt: 'now', contentFingerprint: 'v2-hash', connector: { id: 'openapi', version: 1 } } } }
+    const stamped = await stampVerifiedRevisions(root, state as never, new Set(['fresh.mdx', 'untouched.mdx']))
+    const map = await readEvidenceMap(root)
+    expect(stamped).toBe(2)
+    expect(map!.pages['fresh.mdx']!.verifiedAt).toEqual({ api: 'v2-hash' })
+    expect(map!.pages['untouched.mdx']!.verifiedAt).toEqual({ api: 'v2-hash' })
+    expect(map!.pages['stale.mdx']!.verifiedAt).toEqual({ api: 'v1-hash' })
+    await rm(root, { recursive: true, force: true })
+  })
 })

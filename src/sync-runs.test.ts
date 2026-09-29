@@ -6,7 +6,7 @@ import { isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import { computeDrift } from './drift.js'
-import { pendingProposalPaths, resolvedByPendingChanges } from './sync-runs.js'
+import { driftReason, pendingProposalPaths, resolvedByPendingChanges } from './sync-runs.js'
 import { writeEvidenceMap } from './evidence.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { loadProject, scaffoldProject } from './project.js'
@@ -977,5 +977,22 @@ describe('accepting one file of a proposal at a time', () => {
     expect(resolvedByPendingChanges({ code: 'broken-link', file: 'guides/a.mdx', message: 'Local link target does not exist: /guides/b#section' }, pendingProposalPaths([{ path: 'guides/b.mdx', hunks: [{ id: 'x' }] }]))).toBe(true)
     expect(resolvedByPendingChanges({ code: 'unnavigated-page', file: 'guides/a.mdx' }, pendingProposalPaths([changes[1]!]))).toBe(false)
     expect(resolvedByPendingChanges({ code: 'starter-content', file: 'index.mdx' }, new Set())).toBe(false)
+  })
+})
+
+describe('driftReason', () => {
+  const apiDiff = { operations: { added: ['POST /store/order/{orderId}/cancel'], removed: [], changed: [{ id: 'GET /pet/findByTags', facets: [] }] }, schemas: { added: [], removed: [], changed: [{ id: 'Order' }] }, securitySchemes: { added: [], removed: [], changed: [] } }
+  const options = {
+    drift: { status: 'stale', trackedPages: 2, sources: [], notes: [], pages: [{ page: 'orders.mdx', reasons: [{ source: 'api', paths: ['POST /store/order/{orderId}/cancel', 'schema:Order'] }] }] },
+    sourceChanges: [{ name: 'api', path: '../api/openapi.json', kind: 'spec-changed', head: 'b', summary: {}, apiDiff, changedIdentifiers: [] }],
+  } as unknown as Parameters<typeof driftReason>[1]
+
+  test('names what changed in the source for a page Monitoring updates', () => {
+    expect(driftReason({ path: 'orders.mdx', title: 'Place orders', category: 'page' }, options)).toBe('api changed since this page was verified: POST /store/order/{orderId}/cancel was added; the Order schema changed. Update “Place orders” to match.')
+  })
+
+  test('explains a page drift did not name as a consistency edit, and leaves supporting files alone', () => {
+    expect(driftReason({ path: 'other.mdx', title: 'Other', category: 'page' }, options)).toBe('Kept consistent with the pages the api change made stale; this page does not document anything that changed.')
+    expect(driftReason({ path: 'orders.mdx', title: 'Place orders', category: 'navigation' }, options)).toBeUndefined()
   })
 })

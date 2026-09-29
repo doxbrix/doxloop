@@ -7,7 +7,7 @@ import { isStarterContent } from './validation.js'
 import { removeImageReference } from './screenshot-workflow.js'
 import { EVIDENCE_MAP_FILE, readEvidenceMap, writeEvidenceMap } from './evidence.js'
 import { pathExists, resolveContainedDirectory } from './fs.js'
-import { readNavigation } from './navigation.js'
+import { DOXBRIX_NAV_ICONS, readNavigation } from './navigation.js'
 import { ROOT_CONTENT_IGNORED_DIRECTORIES, loadPages, loadSiteConfig, pageId, relativePath, siteConfigPath } from './project.js'
 import { preferredPageExtension } from './page-extension.js'
 import type {
@@ -772,6 +772,49 @@ async function repairDoxbrixNavigation(
       changed = true
       report.repairs.push(`${configFile}: ordered the sections in space "${space.name}" as the plan lists them.`)
     }
+  }
+
+  // The sidebar draws a page's icon from its navigation entry, not from the
+  // page's frontmatter. Writers set the frontmatter icon on every page but
+  // the entry on only a few, so most sidebar rows sat unaligned beside the
+  // ones with an icon. An entry without an icon takes the one its page
+  // declares, for every page in navigation: a navigation-only update writes
+  // no page but still leaves the sidebar it rebuilt.
+  {
+    const contentRoot = resolve(root, project.contentDir || '')
+    const drawable = new Set<string>(DOXBRIX_NAV_ICONS)
+    let filled = 0
+    let generic = 0
+    const fill = async (nodes: DoxbrixNavNode[]): Promise<void> => {
+      for (const node of nodes) {
+        if (node.type === 'group') await fill(node.items ?? [])
+        if (node.type !== 'page' || node.icon) continue
+        const file = isInside(contentRoot, resolve(contentRoot, node.file)) ? await findPageFile(contentRoot, navFileId(node.file), ['.mdx', '.md']) : undefined
+        const icon = file ? matter(await readFile(file, 'utf8').catch(() => '')).data.icon : undefined
+        // A name the sidebar cannot draw ("shield-check") would still leave the row bare.
+        if (typeof icon !== 'string' || !drawable.has(icon.trim())) continue
+        node.icon = icon.trim()
+        filled += 1
+      }
+    }
+    for (const space of site.spaces) await fill(space.nav)
+    // A page with no drawable icon beside siblings that have one still breaks
+    // the column; it takes the generic page icon.
+    const align = (nodes: DoxbrixNavNode[]): void => {
+      const pages = nodes.filter((node): node is Extract<DoxbrixNavNode, { type: 'page' }> => node.type === 'page')
+      if (pages.some((node) => node.icon)) {
+        for (const node of pages) {
+          if (node.icon) continue
+          node.icon = 'file'
+          generic += 1
+        }
+      }
+      for (const node of nodes) if (node.type === 'group') align(node.items ?? [])
+    }
+    for (const space of site.spaces) align(space.nav)
+    if (filled > 0) report.repairs.push(`${configFile}: gave ${filled} navigation entr${filled === 1 ? 'y' : 'ies'} the icon ${filled === 1 ? 'its page declares' : 'their pages declare'}.`)
+    if (generic > 0) report.repairs.push(`${configFile}: gave ${generic} navigation entr${generic === 1 ? 'y' : 'ies'} with no drawable icon the page icon, so ${generic === 1 ? 'it lines' : 'they line'} up with ${generic === 1 ? 'its' : 'their'} group.`)
+    if (filled + generic > 0) changed = true
   }
 
   // A group the writer opened for an area but never filled — one it created

@@ -474,6 +474,8 @@ export interface UiState {
   jobs: UiJob[]
   preview?: { running: boolean; url?: string }
   recentProjects?: RecentProject[]
+  /** Present only while `doxloop demo` shows its bundled project. */
+  demo?: { proposalId?: string; changeId?: string }
 }
 
 export interface PageSummary {

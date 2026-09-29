@@ -1977,7 +1977,7 @@ async function enrichProposalRationales(
     return {
       ...change,
       rationale: {
-        reason: planPage?.rationale || changeReason(change),
+        reason: planPage?.rationale || (options.plan || options.authoring?.request ? undefined : driftReason(change, options)) || changeReason(change),
         evidence,
         affectedInterfaces: [...new Set(capabilities.flatMap((capability) => [capability.title, ...capability.evidence.flatMap((item) => item.label ? [item.label] : [])]))],
         claims: {
@@ -2446,6 +2446,35 @@ function emptyRationale(kind: SyncFileChange['kind'] | undefined): SyncFileChang
     assumptions: ['Detailed rationale was not recorded for this legacy proposal.'],
     authorship: 'agent',
   }
+}
+
+/**
+ * A proposal Monitoring drafted has no request to point to; its reason is the
+ * source change that made the page stale, named the way drift reported it.
+ */
+export function driftReason(change: Pick<SyncFileChange, 'path' | 'title' | 'category'>, options: Pick<CreateSyncRunOptions, 'drift' | 'sourceChanges'>): string | undefined {
+  if (change.category !== 'page') return undefined
+  const reasons = options.drift.pages.find((page) => page.page === change.path)?.reasons.filter((reason) => reason.paths.length > 0) ?? []
+  if (reasons.length === 0) {
+    // Drift did not name this page, but the agent kept it consistent with
+    // the ones it did; say so rather than pointing to a request that does not exist.
+    const sources = [...new Set(options.drift.pages.flatMap((page) => page.reasons.map((reason) => reason.source)))].join(', ')
+    return options.drift.pages.length > 0 && sources ? `Kept consistent with the pages the ${sources} change made stale; this page does not document anything that changed.` : undefined
+  }
+  const parts = reasons.flatMap((reason) => {
+    const source = options.sourceChanges.find((item) => item.name === reason.source)
+    const diff = source?.kind === 'spec-changed' ? source.apiDiff : undefined
+    const describe = (identifier: string): string => {
+      const label = identifier.startsWith('schema:') ? `the ${identifier.slice(7)} schema` : identifier.startsWith('security:') ? `the ${identifier.slice(9)} security scheme` : identifier
+      const bare = identifier.replace(/^(schema|security):/, '')
+      if (diff?.operations.added.includes(identifier) || diff?.schemas.added.includes(bare)) return `${label} was added`
+      if (diff?.operations.removed.includes(identifier) || diff?.schemas.removed.includes(bare)) return `${label} was removed`
+      return `${label} changed`
+    }
+    return reason.paths.slice(0, 4).map(describe).concat(reason.paths.length > 4 ? [`${reason.paths.length - 4} more changed`] : [])
+  })
+  const sources = [...new Set(reasons.map((reason) => reason.source))].join(', ')
+  return `${sources} changed since this page was verified: ${parts.join('; ')}. Update “${change.title}” to match.`
 }
 
 function changeReason(change: SyncFileChange): string {

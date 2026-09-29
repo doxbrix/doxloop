@@ -67,6 +67,11 @@ export async function computeDriftFromChanges(
     }
 
     const matched = pagesForChange(map, change.name, changedPaths)
+    if (change.kind === 'spec-changed') {
+      for (const [page, paths] of pagesForAddedOperations(map, change.name, change.apiDiff.operations.added.filter((id) => changedPaths.includes(id)))) {
+        matched.set(page, [...new Set([...(matched.get(page) ?? []), ...paths])])
+      }
+    }
     for (const [page, paths] of matched) {
       const reasons = reasonsByPage.get(page) ?? []
       reasons.push({
@@ -197,4 +202,38 @@ export function formatDrift(result: DriftResult): string {
   if (result.status === 'stale') lines.push('Fix with: doxloop update')
 
   return lines.join('\n').trimEnd()
+}
+
+/**
+ * A new operation is mentioned by no page yet, so it matches no evidence. It
+ * belongs beside the operations of the resource it extends:
+ * `POST /store/order/{orderId}/cancel` goes stale on the pages that document
+ * `/store/order/{orderId}`, falling back to `/store/order` and so on, and
+ * never to the API root.
+ */
+export function pagesForAddedOperations(map: EvidenceMap, source: string, added: readonly string[]): Map<string, string[]> {
+  const documented = new Map<string, Set<string>>()
+  for (const [page, evidence] of Object.entries(map.pages)) {
+    for (const entry of evidence.sources) {
+      if (entry.source !== source) continue
+      for (const operation of entry.operations ?? []) {
+        const path = operation.match(/^[A-Z]+\s+(\/\S*)$/)?.[1]
+        if (!path) continue
+        const pages = documented.get(path) ?? new Set<string>()
+        pages.add(page)
+        documented.set(path, pages)
+      }
+    }
+  }
+  const matches = new Map<string, string[]>()
+  for (const operation of added) {
+    const segments = (operation.match(/^[A-Z]+\s+(\/\S*)$/)?.[1] ?? '').split('/').filter(Boolean)
+    for (let length = segments.length; length >= 1; length -= 1) {
+      const pages = documented.get(`/${segments.slice(0, length).join('/')}`)
+      if (!pages || pages.size === 0) continue
+      for (const page of pages) matches.set(page, [...(matches.get(page) ?? []), operation])
+      break
+    }
+  }
+  return matches
 }

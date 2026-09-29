@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
-import { computeDrift, formatDrift } from './drift.js'
-import { writeEvidenceMap } from './evidence.js'
+import { computeDrift, formatDrift, pagesForAddedOperations } from './drift.js'
+import { pagesForChange, writeEvidenceMap } from './evidence.js'
 import { loadProject, saveProjectSettings, scaffoldProject } from './project.js'
 import { recordSyncState } from './sync.js'
 import type { DoxloopProject, EvidenceMap, SyncConfig } from './types.js'
@@ -259,5 +259,34 @@ describe('formatDrift', () => {
     expect(formatDrift(await computeDrift(root, project))).toBe(
       'Documentation is current with the recorded source baseline.',
     )
+  })
+})
+
+describe('pagesForAddedOperations', () => {
+  const map: EvidenceMap = {
+    schemaVersion: 1,
+    pages: {
+      'orders.mdx': { sources: [{ source: 'api', operations: ['GET /store/order/{orderId}', 'POST /store/order'] }] },
+      'store.mdx': { sources: [{ source: 'api', operations: ['DELETE /store/order/{orderId}', 'GET /store/inventory'] }] },
+      'pets.mdx': { sources: [{ source: 'api', operations: ['POST /pet'] }] },
+      'other.mdx': { sources: [{ source: 'other', operations: ['GET /store/order/{orderId}'] }] },
+    },
+  }
+
+  test('ties a new operation to the pages that document the resource it extends', () => {
+    expect(pagesForAddedOperations(map, 'api', ['POST /store/order/{orderId}/cancel'])).toEqual(new Map([
+      ['orders.mdx', ['POST /store/order/{orderId}/cancel']],
+      ['store.mdx', ['POST /store/order/{orderId}/cancel']],
+    ]))
+  })
+
+  test('matches API identifiers exactly, unlike folders', () => {
+    expect([...pagesForChange(map, 'api', ['POST /store/order/{orderId}/cancel']).keys()]).toEqual([])
+    expect([...pagesForChange(map, 'api', ['POST /store/order']).keys()]).toEqual(['orders.mdx'])
+  })
+
+  test('falls back to the nearest documented parent, never the API root', () => {
+    expect([...pagesForAddedOperations(map, 'api', ['GET /pet/{petId}/photos']).keys()]).toEqual(['pets.mdx'])
+    expect(pagesForAddedOperations(map, 'api', ['GET /vets'])).toEqual(new Map())
   })
 })

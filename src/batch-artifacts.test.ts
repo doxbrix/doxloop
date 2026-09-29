@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { attributeReadsToSources, createLock, mergeBatchArtifacts, normalizeCaptureManifest, normalizeCaptureSteps, pathsInToolCall, reconcileEvidenceSlice, runPool, writeBatchArtifacts } from './batch-artifacts.js'
+import { attributeReadsToSources, createLock, mentionedSurface, mergeBatchArtifacts, normalizeCaptureManifest, normalizeCaptureSteps, pathsInToolCall, reconcileEvidenceSlice, runPool, writeBatchArtifacts } from './batch-artifacts.js'
 import { PNG } from 'pngjs'
 import { readEvidenceMap, writeEvidenceMap } from './evidence.js'
 import { SCREENSHOT_MANIFEST_FILE } from './screenshot-workflow.js'
@@ -190,6 +190,59 @@ describe('evidence ownership', () => {
     // No plan citation and nothing the agent named: what the session read stands in, at inferred confidence.
     expect(saved.pages['guides/b.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/read-in-session.ts'] }], confidence: 'inferred', claims: ['B does Y.'] })
     expect(saved.pages['guides/c.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/read-in-session.ts'] }], confidence: 'inferred' })
+  })
+
+  test('ties pages of a single-file OpenAPI source to the operations and schemas they document', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-reconcile-openapi-'))
+    const product = await mkdtemp(join(tmpdir(), 'doxloop-reconcile-spec-'))
+    const spec = join(product, 'openapi.json')
+    await writeFile(spec, JSON.stringify({
+      openapi: '3.0.4', info: { title: 'Store', version: '1.0.0' },
+      paths: {
+        '/pet': { post: { operationId: 'addPet', responses: { 200: { description: 'ok' } } } },
+        '/pet/{petId}': { get: { operationId: 'getPet', responses: { 200: { description: 'ok' } } } },
+        '/store/order': { post: { operationId: 'placeOrder', responses: { 200: { description: 'ok' } } } },
+      },
+      components: { schemas: { Order: { type: 'object' }, Pet: { type: 'object' } } },
+    }))
+    await mkdir(join(root, '.doxloop/cache'), { recursive: true })
+    await writeFile(join(root, 'orders.mdx'), '# Orders\n\nSend `POST /store/order` with an `Order` body. The Pet Store API returns it.\n')
+    const slice = '.doxloop/cache/evidence-batch-1.json'
+    // The agent cites the specification file itself, which used to be joined
+    // below the file (`openapi.json/openapi.json`) and crash with ENOTDIR.
+    await writeFile(join(root, slice), JSON.stringify({ schemaVersion: 1, pages: {
+      'orders.mdx': { sources: [{ source: 'api', paths: ['openapi.json'] }], confidence: 'verified', claims: ['GET /pet/{petId} returns one pet.'] },
+    } }))
+    const withTarget = { ...plan, target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: [] } } as unknown as DocumentationPlan
+    const result = await reconcileEvidenceSlice(root, slice, withTarget, [{ ...pageOf('orders'), evidenceDetails: [] }] as DocumentationPlan['pages'], [{ name: 'api', path: spec }], new Map([['api', new Set([''])]]))
+    expect(result).toEqual({ pages: 1, droppedPaths: 0 })
+    const saved = JSON.parse(await readFile(join(root, slice), 'utf8'))
+    expect(saved.pages['orders.mdx']).toEqual({
+      sources: [{ source: 'api', operations: ['GET /pet/{petId}', 'POST /store/order', 'schema:Order'] }],
+      confidence: 'verified',
+      claims: ['GET /pet/{petId} returns one pet.'],
+    })
+  })
+
+  test('records a planned landing page under the index file it was written to', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'doxloop-reconcile-landing-'))
+    await mkdir(join(root, '.doxloop/cache'), { recursive: true })
+    await writeFile(join(root, 'index.mdx'), '# Overview\n')
+    const slice = '.doxloop/cache/evidence-batch-1.json'
+    await writeFile(join(root, slice), JSON.stringify({ schemaVersion: 1, pages: { 'guides/index.mdx': { sources: [{ source: 'app', paths: ['README.md'] }], confidence: 'verified' } } }))
+    await writeFile(join(root, 'README.md'), 'readme')
+    const withTarget = { ...plan, target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: [] } } as unknown as DocumentationPlan
+    await reconcileEvidenceSlice(root, slice, withTarget, [{ ...pageOf('guides/index'), evidenceDetails: [] }] as DocumentationPlan['pages'], [{ name: 'app', path: root }], new Map())
+    const saved = JSON.parse(await readFile(join(root, slice), 'utf8'))
+    expect(Object.keys(saved.pages)).toEqual(['index.mdx'])
+    expect(saved.pages['index.mdx'].sources).toEqual([{ source: 'app', paths: ['README.md'] }])
+  })
+
+  test('matches whole operations and only code-like schema mentions', () => {
+    const surface = { operations: ['POST /pet', 'POST /pet/{petId}', 'GET /pet/findByTags', 'DELETE /store/order/{orderId}'], schemas: ['Order', 'Pet', 'ApiResponse'] }
+    expect(mentionedSurface('Call `POST /pet/{petId}`. The `Order` object belongs to the Pet Store API.', surface)).toEqual(['POST /pet/{petId}', 'schema:Order'])
+    expect(mentionedSurface('Use POST /pet to add one, or GET /pet/findByTags?tags=a to search.', surface)).toEqual(['GET /pet/findByTags', 'POST /pet'])
+    expect(mentionedSurface('curl -X DELETE https://example.com/store/order/5 returns an ApiResponse schema.', surface)).toEqual(['schema:ApiResponse'])
   })
 })
 
