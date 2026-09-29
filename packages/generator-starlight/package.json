@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop-generator-starlight",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Starlight generator adapter and authoring skill for Doxloop.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",

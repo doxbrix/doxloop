@@ -5,6 +5,8 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-29
+
 ### Changed
 
 - **`doxloop demo` opens the real control center.** It used to open a static

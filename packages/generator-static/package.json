@@ -1,6 +1,6 @@
 {
   "name": "@doxbrix/doxloop-generator-static",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Prebuilt static HTML adapter and authoring skill for Doxloop.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
