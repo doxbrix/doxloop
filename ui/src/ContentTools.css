@@ -165,3 +165,20 @@
   .asset-library-body.with-detail { grid-template-columns: 1fr; }
   .asset-detail { position: static; }
 }
+
+/* Screenshots against the application */
+.screenshot-drift { display: grid; gap: 12px; margin: 14px 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--subtle, #f7f9fb); }
+.screenshot-drift > header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.screenshot-drift h3 { margin: 0; color: var(--heading); font-size: 14px; font-weight: 700; }
+.screenshot-drift p { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 19px; max-width: 72ch; }
+.screenshot-drift-actions, .screenshot-drift-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.screenshot-drift-progress { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.screenshot-drift-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.screenshot-drift-list > li { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.screenshot-drift-copy { display: grid; gap: 3px; min-width: 0; }
+.screenshot-drift-copy small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.screenshot-drift-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.screenshot-drift-images figure { margin: 0; display: grid; gap: 4px; }
+.screenshot-drift-images img { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.screenshot-drift-images figcaption { color: var(--muted); font-size: 12px; }
+.screenshot-drift-item-actions a { font-size: 13px; }

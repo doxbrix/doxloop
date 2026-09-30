@@ -72,7 +72,7 @@ export async function adoptPlanningCaptures(root: string, workspace: string, pla
         const file = join(assetRoot, 'planning', `${plan.id}-${createHash('sha256').update(bytes).digest('hex').slice(0, 16)}.png`).replaceAll('\\', '/')
         await mkdir(join(workspace, assetRoot, 'planning'), { recursive: true })
         await copyFile(source, join(workspace, file))
-        Object.assign(step, { file, alt: capture.alt, status: 'verified', target: typeof step.action === 'string' && step.action ? step.action : capture.action, checks: capture.checks, observedState: capture.state, observedLabels: capture.labels })
+        Object.assign(step, { file, alt: capture.alt, status: 'verified', target: typeof step.action === 'string' && step.action ? step.action : capture.action, checks: capture.checks, observedState: capture.state, observedLabels: capture.labels, ...(typeof capture.route === 'string' && capture.route.trim() ? { route: capture.route.trim() } : {}) })
         catalog.push({ ...capture, file })
         reused += 1
       } catch { /* Missing or corrupt images remain planned for the capture stage. */ }

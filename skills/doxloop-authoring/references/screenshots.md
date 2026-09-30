@@ -110,7 +110,10 @@ image:
    `__doxloopRemoveScreenshotHighlight()`; the 3 px ring and numbered step
    marker are baked into the PNG and must not cover labels or values;
 6. capture to the manifest filename, confirm the call succeeded, mark the row
-   `verified`, embed the image, and move to the next row.
+   `verified`, record its `route` (the screen's address path relative to the
+   application URL, such as `/settings/profile` or `/#/collections`, so
+   Doxloop can re-check the screenshot when the product changes), embed the
+   image, and move to the next row.
 
 Prefer a viewport or cropped stable region over a very tall full page and keep
 the chrome and labels that orient the reader. If a capture is wrong, replace it

@@ -115,6 +115,8 @@ import {
 } from './remote-source.js'
 import { readPageClaimEvidence } from './claim-evidence.js'
 import { testPageExamples } from './example-runs.js'
+import { readDriftReport, refreshScreenshots } from './screenshot-drift.js'
+import { readScreenshotLedger } from './screenshot-ledger.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
@@ -1378,6 +1380,45 @@ async function handleApi(
     const root = requireProject(runtime)
     const plan = url.searchParams.get('plan')
     sendJson(response, 200, { captures: plan ? await listPlanCaptures(root, plan) : await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/screenshots') {
+    // Recorded product screenshots and the last check against the application.
+    const root = requireProject(runtime)
+    const ledger = await readScreenshotLedger(root)
+    sendJson(response, 200, {
+      recorded: ledger.screenshots.length,
+      recapturable: ledger.screenshots.filter((record) => record.route).length,
+      application: (await loadProject(root)).application?.baseUrl ?? null,
+      report: await readDriftReport(root) ?? null,
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/screenshots/check') {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const body = recordBody(await readJsonBody(request))
+    const args = ['screenshots', 'check', '--cwd', root]
+    for (const file of stringArray(body.files)) args.push('--file', file)
+    sendJson(response, 202, publicJob(startCliJob(runtime, 'screenshots:check', args, root)))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/screenshots/refresh') {
+    assertNoActiveDocumentationJob(runtime)
+    sendJson(response, 200, await refreshScreenshots(requireProject(runtime), stringArray(recordBody(await readJsonBody(request)).files)))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/screenshots/capture') {
+    // Only the fresh capture or difference image the last check recorded for a file.
+    const root = requireProject(runtime)
+    const result = (await readDriftReport(root))?.results.find((item) => item.file === url.searchParams.get('file'))
+    const cached = url.searchParams.get('kind') === 'diff' ? result?.diff : result?.candidate
+    const image = cached ? assertInside(root, resolve(root, cached)) : undefined
+    if (!image || extname(image).toLowerCase() !== '.png' || !(await pathExists(image))) {
+      sendJson(response, 404, { error: 'That capture is no longer available. Check the screenshots again.' })
+      return
+    }
+    send(response, 200, 'image/png', await readFile(image), { ...baseHeaders(), 'Cache-Control': 'no-store' })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/captures/file') {

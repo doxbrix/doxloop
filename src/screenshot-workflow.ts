@@ -76,6 +76,12 @@ interface ScreenshotManifestStep {
   target?: string
   file?: string
   alt?: string
+  /**
+   * The application route the screenshot shows (`/settings/profile`,
+   * `/_/#/collections`), relative to the application URL. Recorded so the
+   * screenshot can be re-captured and compared later without an agent.
+   */
+  route?: string
   /** `planned` is the staged, not-yet-attempted state Doxloop writes up front. */
   status: 'planned' | 'verified' | 'text-only' | 'failed'
   textOnlyReason?: string

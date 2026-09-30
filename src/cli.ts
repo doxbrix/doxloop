@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkScreenshotDrift, readDriftReport, refreshScreenshots } from './screenshot-drift.js'
 import { replayRun } from './proposal-replay.js'
 import { auditDocumentation, backfillEvidence } from './workspace-tools.js'
 
@@ -188,6 +189,8 @@ async function main(): Promise<number> {
       return pagesCommand(args, cwd)
     case 'replay':
       return replayCommand(args, cwd)
+    case 'screenshots':
+      return screenshotsCommand(args, cwd)
     case 'capture': {
       const root = await findProjectRoot(cwd)
       await capture({ root, urls: args.positionals })
@@ -869,6 +872,27 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
   return 0
 }
 
+async function screenshotsCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const action = args.positionals[0]
+  const root = await findProjectRoot(cwd)
+  const files = flags(args, 'file')
+  if (action === 'check') {
+    const report = await checkScreenshotDrift(root, { ...(files.length > 0 ? { files } : {}), log: (line) => process.stdout.write(`${line}\n`) })
+    if (flag(args, 'format') === 'json') process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    const count = (outcome: string) => report.results.filter((result) => result.outcome === outcome).length
+    process.stdout.write(`\nChecked ${report.results.length} of ${report.recorded} recorded screenshot${report.recorded === 1 ? '' : 's'}: ${count('changed')} changed, ${count('unchanged')} unchanged, ${count('sign-in')} behind sign-in, ${count('unreachable')} unreachable, ${count('no-route')} without a route.\n`)
+    return 0
+  }
+  if (action === 'refresh') {
+    const report = await readDriftReport(root)
+    const chosen = files.length > 0 ? files : (report?.results ?? []).filter((result) => result.outcome === 'changed').map((result) => result.file)
+    const { replaced } = await refreshScreenshots(root, chosen)
+    process.stdout.write(`Replaced ${replaced.length} screenshot${replaced.length === 1 ? '' : 's'} with fresh captures.\n`)
+    return 0
+  }
+  throw new UsageError('Usage: doxloop screenshots <check|refresh> [--file <image>]...')
+}
+
 async function replayCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const target = args.positionals[0]
   if (!target || args.positionals.length > 1) throw new UsageError('Usage: doxloop replay <run-directory> [--keep] [--format text|json]')
@@ -1245,6 +1269,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     whoami: ['api-url'],
     deploy: ['dry-run', 'public', 'name', 'slug', 'api-url', 'target', 'site-id', 'project-id', 'team-id', 'branch', 'base-path'],
     export: ['out', 'zip', 'base-path', 'site-url'],
+    screenshots: ['file', 'format'],
   }
   if (args.command === undefined) {
     assertAllowedFlags(args, new Set())
@@ -1584,6 +1609,26 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'screenshots') {
+    return `Usage: doxloop screenshots <check|refresh> [--file <image>]... [options]
+
+check     Re-capture every recorded screenshot at its route in the running
+          application and compare it with the image the documentation shows.
+          Changed screenshots are listed with a fresh capture; nothing in the
+          project changes.
+refresh   Replace the named changed screenshots (or all changed ones) with
+          their fresh captures, as one undoable edit.
+
+Screenshots are recorded in .doxloop/screenshots.json when a documentation run
+captures them. Sign-in uses the saved session or credentials from
+Settings → Visual evidence.
+
+Options:
+  --file <image>      Only this project-relative image (repeatable)
+  --format json       Print the report as JSON
+  --cwd <directory>   Run from this project directory
+`
+  }
   if (command === 'replay') {
     return `Usage: doxloop replay <run-directory> [options]
 
@@ -1802,6 +1847,7 @@ Maintain:
   check      Report documentation stale since the last source change
   coverage   Report source health, coverage, and evidence precision
   replay     Re-run the end-of-generation checks over a recorded run
+  screenshots Check product screenshots against the running application
   sync       Set up and run automatic documentation maintenance
 
 Visual:

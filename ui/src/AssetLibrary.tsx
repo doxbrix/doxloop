@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { api, post } from './api'
 import { Button, Empty, Input, Note } from './components'
 import { Icon } from './icons'
+import { ScreenshotDrift } from './ScreenshotDrift'
 import type { AssetEntry, AssetLibraryData } from './types'
 
 type Action = <T>(run: () => Promise<T>, success?: string, reload?: boolean) => Promise<T | undefined>
@@ -118,6 +119,7 @@ export function AssetLibrary({ act, onError, onChanged }: { act: Action; onError
         <Button tone="primary" icon="plus" busy={busy} onClick={() => uploadInput.current?.click()}>Upload</Button>
       </div>
     </header>
+    <ScreenshotDrift act={act} onChanged={() => { void load(); onChanged?.() }} />
     <div class={`asset-library-body ${selected ? 'with-detail' : ''}`} onDragOver={(event) => { event.preventDefault() }} onDrop={(event) => { event.preventDefault(); void upload([...(event.dataTransfer?.files ?? [])]) }}>
       <div class="asset-grid" role="list">
         {loading ? <div class="page-list-empty"><span class="spinner" />Loading assets…</div>

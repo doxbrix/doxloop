@@ -71,6 +71,7 @@ interface ManifestStep {
   target?: string
   file?: string
   alt?: string
+  route?: string
   status: 'planned' | 'verified' | 'text-only' | 'failed'
   textOnlyReason?: string
   checks?: {
@@ -349,6 +350,7 @@ async function captureOne(options: {
   step.file = file
   step.target = step.action
   step.alt = step.expectedState
+  step.route = requestedPath
   step.checks = { expectedStateConfirmed: true, privacyReviewed: true, legibilityReviewed: true, meaningful: true }
   delete step.textOnlyReason
   return { file }
@@ -451,11 +453,18 @@ interface BrowserContext {
   close(): Promise<void>
 }
 
-async function openBrowser(input: DeterministicCaptureInput): Promise<{
+export interface CaptureBrowser {
   capturePage: (url: string) => Promise<CapturedPage>
   signIn: (loginUrl: string, credentials: { username: string; password: string }) => Promise<boolean>
   close(): Promise<void>
-}> {
+}
+
+/**
+ * The headless browser deterministic capture uses, signed in with the saved
+ * session when there is one. Screenshot re-checks open the same browser so a
+ * re-capture matches the original's viewport and settling.
+ */
+export async function openBrowser(input: Pick<DeterministicCaptureInput, 'project' | 'storageStatePath'>): Promise<CaptureBrowser> {
   const playwright = await ensurePlaywright()
   const browser = await playwright.chromium.launch({ headless: true })
   const viewport = input.project.application?.screenshots?.viewport ?? DEFAULT_VIEWPORT
