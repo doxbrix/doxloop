@@ -9,6 +9,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { agentFailureDetail, agentFailureKind, describeAgentFailure } from './agent-failure.js'
+import { contradictedClaimIssues } from './claim-evidence.js'
 import { formatSleep, monotonicNow, SleepDetector } from './monotonic-clock.js'
 import { CLAUDE_ISOLATION_ARGUMENTS, codexIsolationArguments, codexUserMcpServers } from './agent-isolation.js'
 import { AGENT_LOG_HEARTBEAT_MS, createAgentLogFormatter, formatAgentUsage, mergeAgentUsage, type AgentLogFormatter } from './agent-log.js'
@@ -767,6 +768,9 @@ export async function runAuthor(options: {
       if (orphaned.length > 0) say(`Final check: ${orphaned.length} API operation${orphaned.length === 1 ? '' : 's'} in the contract ${orphaned.length === 1 ? 'is' : 'are'} not mentioned on any page (${orphaned.map((issue) => /'s (\S+ \S+) has/.exec(issue.message)?.[1]).join(', ')}).`)
       issues = [...issues, ...missing.filter((issue) => issue.file)]
     }
+    // A claim whose cited evidence names a different status code, flag,
+    // variable, or version goes to the fix pass with the lines to check.
+    issues = [...issues, ...await contradictedClaimIssues(options.root, project, files).catch(() => [])]
     if (issues.length === 0) {
       say(`Final check: ${files.length} page${files.length === 1 ? '' : 's'} pass validation with no depth warnings.`)
       return

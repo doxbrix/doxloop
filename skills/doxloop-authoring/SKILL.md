@@ -245,7 +245,8 @@ conformance for an unevaluated rendered site.
    [references/project-format.md](references/project-format.md) describes:
    narrowest supporting paths or API operations, `verifiedAt` and `verifiedOn`
    per checked source, `confidence` and `claimVerification` only to the
-   certainty the evidence supports, entries kept for untouched pages and
+   certainty the evidence supports, `claimSources` with the `source:path:line`
+   each claim rests on, entries kept for untouched pages and
    removed for deleted ones. Never attach a shared router, test, or entry point
    to every page it touches; if one path appears on more than half of the
    pages, keep only direct claim support. `doxloop check` uses this map to name

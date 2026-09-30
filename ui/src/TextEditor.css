@@ -9,3 +9,10 @@
 .authoring-request .batch-limits-control{margin-top:-10px;margin-bottom:-10px}.authoring-request .batch-limits-control summary{padding:2px 0}
 
 .authoring-request .text-editor-hint{margin:0 0 8px;font-size:12px;line-height:1.4}.text-editor-body label>input:not([type=checkbox]),.text-editor-body label>select,.text-editor-body label>textarea{display:block;padding:8px;margin-top:4px;border:1px solid var(--border,#bfcbd8);border-radius:6px;background:var(--panel,#fff);color:inherit;font:inherit}.text-editor-body label>textarea{width:100%;min-height:90px}.text-editor-body .text-editor-label>textarea{min-height:320px;font-family:ui-monospace,monospace}.page-list-panel>label:first-child:has(select){padding:12px}.page-list-panel select{display:block;min-height:36px;width:100%;background:var(--panel,#fff);color:inherit;border:1px solid var(--border,#bfcbd8);border-radius:6px}
+.page-claims{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.page-claim{display:grid;gap:6px;padding:10px 12px;border:1px solid #e3e8ef;border-radius:8px}
+.page-claim.contradicted{border-color:#f1b5ae;background:#fff7f6}
+.page-claim-head{display:flex;gap:10px;align-items:baseline;line-height:1.5}.page-claim-head .badge{flex:none}
+.page-claim small{color:#627086}
+.page-claim-location summary{padding:0;font-weight:400;font-size:13px}.page-claim-location code{font-size:12.5px}
+.page-claim-location pre{margin:6px 0 0;padding:10px;max-height:200px;overflow:auto;white-space:pre;background:#f2f4f8;color:#17213a;border-radius:6px;font-size:12.5px;line-height:1.5}

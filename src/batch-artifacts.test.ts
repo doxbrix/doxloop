@@ -173,7 +173,7 @@ describe('evidence ownership', () => {
     await writeFile(join(root, 'src/cited.ts'), 'export const y = 2')
     const slice = '.doxloop/cache/evidence-batch-1.json'
     await writeFile(join(root, slice), JSON.stringify({ schemaVersion: 1, pages: {
-      'guides/a.mdx': { sources: [{ source: 'app', paths: ['src/real.ts', 'src/made-up.ts', '../../etc/passwd'] }, { source: 'ghost', paths: ['x'] }], confidence: 'verified', claims: ['A does X.', ''], claimVerification: { 'A does X.': 'verified', 'other': 'verified' } },
+      'guides/a.mdx': { sources: [{ source: 'app', paths: ['src/real.ts', 'src/made-up.ts', '../../etc/passwd'] }, { source: 'ghost', paths: ['x'] }], confidence: 'verified', claims: ['A does X.', ''], claimVerification: { 'A does X.': 'verified', 'other': 'verified' }, claimSources: { 'A does X.': ['app:src/real.ts:1', 'ghost:x:1', 7], 'other': ['app:src/real.ts:1'] } },
       'guides/b.mdx': { sources: [], confidence: 'verified', claims: ['B does Y.'] },
     } }))
     const withTarget = { ...plan, target: { generator: 'doxbrix', contentDir: '', contentFormat: 'markdown', pageExtensions: ['.mdx'], navigationFiles: [] } } as unknown as DocumentationPlan
@@ -186,7 +186,7 @@ describe('evidence ownership', () => {
     const result = await reconcileEvidenceSlice(root, slice, withTarget, pages, [{ name: 'app', path: root }], reads)
     expect(result).toEqual({ pages: 3, droppedPaths: 2 })
     const saved = JSON.parse(await readFile(join(root, slice), 'utf8'))
-    expect(saved.pages['guides/a.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/cited.ts', 'src/real.ts'] }], confidence: 'verified', claims: ['A does X.'], claimVerification: { 'A does X.': 'verified' } })
+    expect(saved.pages['guides/a.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/cited.ts', 'src/real.ts'] }], confidence: 'verified', claims: ['A does X.'], claimVerification: { 'A does X.': 'verified' }, claimSources: { 'A does X.': ['app:src/real.ts:1'] } })
     // No plan citation and nothing the agent named: what the session read stands in, at inferred confidence.
     expect(saved.pages['guides/b.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/read-in-session.ts'] }], confidence: 'inferred', claims: ['B does Y.'] })
     expect(saved.pages['guides/c.mdx']).toEqual({ sources: [{ source: 'app', paths: ['src/read-in-session.ts'] }], confidence: 'inferred' })

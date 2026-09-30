@@ -83,3 +83,53 @@ export function Collections({ onChanged, onTranslate }: { onChanged: () => Promi
     <p role="status">{message}</p><p>Use Pages to edit and review each collection. Recent direct edits can undo collection creation while its files remain unchanged.</p>
   </div></details>
 }
+
+type ClaimLocation = { source: string; path: string; line?: number; excerpt?: string; cited: boolean }
+type ClaimEvidence = { claim: string; state: 'verified' | 'inferred' | 'contradicted' | 'needs-human'; locations: ClaimLocation[]; missingFacts?: string[]; evidenceFacts?: string[] }
+type PageClaimEvidence = { page: string; confidence?: 'verified' | 'inferred' | 'needs-human'; verifiedOn?: string; sources: Array<{ source: string; paths?: string[]; operations?: string[] }>; claims: ClaimEvidence[] }
+
+const CLAIM_STATES: Record<ClaimEvidence['state'], { label: string; tone: string }> = {
+  verified: { label: 'Verified', tone: 'good' },
+  inferred: { label: 'Inferred', tone: 'info' },
+  'needs-human': { label: 'Needs review', tone: 'warn' },
+  contradicted: { label: 'Contradicted', tone: 'bad' },
+}
+
+/**
+ * The claims a page makes and the source lines behind each one, so a
+ * reviewer who doubts a sentence reads the lines instead of every cited file.
+ */
+export function PageEvidence({ path, onRequest }: { path: string; onRequest?: (text: string) => Promise<void> }) {
+  const [evidence, setEvidence] = useState<PageClaimEvidence>()
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    let current = true
+    setEvidence(undefined)
+    setError('')
+    api<PageClaimEvidence>(`/api/pages/evidence?path=${encodeURIComponent(path)}`)
+      .then((value) => { if (current) setEvidence(value) })
+      .catch((cause) => { if (current) setError(cause.message) })
+    return () => { current = false }
+  }, [path])
+  const doubtful = evidence?.claims.filter((claim) => claim.state === 'contradicted' || claim.state === 'needs-human') ?? []
+  const sourceSummary = evidence?.sources.map((source) => [source.source, ...(source.paths ?? []).slice(0, 4), ...(source.operations ?? []).slice(0, 4)].join(' · ')).join('; ')
+  return <details class="text-editor page-evidence" open><summary>Claims and source evidence{evidence ? ` · ${evidence.claims.length} claim${evidence.claims.length === 1 ? '' : 's'}` : ''}</summary><div class="text-editor-body">
+    {error && <p role="alert">{error}</p>}
+    {!evidence && !error && <p>Loading evidence…</p>}
+    {evidence && evidence.claims.length === 0 && <p>{evidence.sources.length > 0 ? `This page records its sources (${sourceSummary}) but no individual claims. The next agent edit of this page records them.` : 'This page has no evidence record yet. An agent edit or a documentation run records which sources and lines it was written from.'}</p>}
+    {evidence && evidence.claims.length > 0 && <>
+      <p>{evidence.verifiedOn ? `Checked against the sources ${timeText(evidence.verifiedOn)}. ` : ''}Each claim below links to the lines it rests on; values are re-checked against those lines whenever you open this page.</p>
+      <ul class="page-claims">{evidence.claims.map((claim) => <li key={claim.claim} class={`page-claim ${claim.state}`}>
+        <div class="page-claim-head"><span class={`badge ${CLAIM_STATES[claim.state].tone}`}>{CLAIM_STATES[claim.state].label}</span><span>{claim.claim}</span></div>
+        {claim.state === 'contradicted' && <small>The cited evidence has {claim.evidenceFacts?.join(', ') ?? 'a different value'}, not {claim.missingFacts?.join(', ') ?? 'the value on the page'}.</small>}
+        {claim.locations.length === 0 && <small>No supporting line was found in the files this page cites.</small>}
+        {claim.locations.map((location) => <details key={`${location.source}:${location.path}:${location.line ?? ''}`} class="page-claim-location">
+          <summary><code>{location.source}: {location.path}{location.line ? `:${location.line}` : ''}</code>{location.cited ? '' : ' · found by Doxloop'}</summary>
+          {location.excerpt && <pre>{location.excerpt}</pre>}
+        </details>)}
+      </li>)}</ul>
+      {doubtful.length > 0 && onRequest && <div class="text-editor-actions"><button disabled={busy} onClick={() => { setBusy(true); void onRequest(`Check these claims against the source and correct the page or cite the supporting lines: ${doubtful.map((claim) => `"${claim.claim}"`).join('; ')}`).finally(() => setBusy(false)) }}>Ask the agent to check {doubtful.length} claim{doubtful.length === 1 ? '' : 's'}</button></div>}
+    </>}
+  </div></details>
+}

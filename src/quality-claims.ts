@@ -108,7 +108,7 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
 
-function semanticClaimState(claim: string, evidence: string, stale: boolean, recorded: ClaimVerificationState | undefined, fallback: ClaimVerificationState): ClaimVerificationState {
+export function semanticClaimState(claim: string, evidence: string, stale: boolean, recorded: ClaimVerificationState | undefined, fallback: ClaimVerificationState): ClaimVerificationState {
   if (recorded === 'contradicted') return 'contradicted'
   if (!evidence) return stale ? 'needs-human' : (recorded ?? fallback)
   const facts = extractFacts(claim)
@@ -123,7 +123,7 @@ function semanticClaimState(claim: string, evidence: string, stale: boolean, rec
   return 'needs-human'
 }
 
-function extractFacts(value: string): Array<{ kind: string; value: string }> {
+export function extractFacts(value: string): Array<{ kind: string; value: string }> {
   const facts: Array<{ kind: string; value: string }> = []
   const patterns: Array<[string, RegExp]> = [
     ['http-status', /\b[1-5]\d\d\b/g],

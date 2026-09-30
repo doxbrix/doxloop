@@ -167,6 +167,9 @@ or change pages:
       "claims": ["Access tokens expire after 900 seconds"],
       "claimVerification": {
         "Access tokens expire after 900 seconds": "verified"
+      },
+      "claimSources": {
+        "Access tokens expire after 900 seconds": ["product:src/auth.ts:42"]
       }
     }
   }
@@ -199,6 +202,12 @@ or change pages:
   the source changes. `claimVerification` records each exact claim as
   `verified`, `inferred`, `contradicted`, or `needs-human`; never overstate
   evidence.
+- `claimSources` cites, for each exact claim, the lines that support it:
+  `"<source>:<path>:<line>"`, `"<source>:<path>:<start>-<end>"`, or
+  `"<source>:<METHOD> <path>"` for an OpenAPI operation. Cite the line you
+  read, not the file head. Reviewers open these lines from the control center,
+  and Doxloop re-checks the claim's values (status codes, flags, variables,
+  versions) there; a claim the cited lines contradict is sent back to you.
 - Preserve entries for pages you did not touch, and remove entries for pages you
   deleted or renamed.
 

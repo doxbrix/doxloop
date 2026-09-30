@@ -439,6 +439,17 @@ export async function reconcileEvidenceSlice(
       const verification = Object.fromEntries(Object.entries(agent.claimVerification).filter(([claim, state]) => claims.includes(claim) && ['verified', 'inferred', 'contradicted', 'needs-human'].includes(String(state))))
       if (Object.keys(verification).length > 0) entry.claimVerification = verification as NonNullable<PageEvidence['claimVerification']>
     }
+    // Claim citations are kept only for a kept claim and a configured source;
+    // the lines themselves are checked when the claim evidence is read.
+    if (agent.claimSources && typeof agent.claimSources === 'object' && !Array.isArray(agent.claimSources)) {
+      const cited: Record<string, string[]> = {}
+      for (const [claim, citations] of Object.entries(agent.claimSources as Record<string, unknown>)) {
+        if (!claims.includes(claim) || !Array.isArray(citations)) continue
+        const kept = citations.filter((citation): citation is string => typeof citation === 'string' && roots.has(citation.split(':')[0]!.trim())).slice(0, 6)
+        if (kept.length > 0) cited[claim] = kept
+      }
+      if (Object.keys(cited).length > 0) entry.claimSources = cited
+    }
     next[expected] = entry
     result.pages += 1
   }

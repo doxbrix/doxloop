@@ -187,6 +187,12 @@ function isPageEvidence(value: unknown): value is PageEvidence {
       claim.trim() !== '' && ['verified', 'inferred', 'contradicted', 'needs-human'].includes(String(state)),
     )
   )) return false
+  if (evidence.claimSources !== undefined && (
+    !evidence.claimSources ||
+    typeof evidence.claimSources !== 'object' ||
+    Array.isArray(evidence.claimSources) ||
+    !Object.entries(evidence.claimSources).every(([claim, citations]) => claim.trim() !== '' && isTextList(citations))
+  )) return false
   const revisionMapValid = evidence.verifiedAt === undefined || (
     typeof evidence.verifiedAt === 'object' &&
     !Array.isArray(evidence.verifiedAt) &&

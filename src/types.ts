@@ -768,6 +768,13 @@ export interface PageEvidence {
   claims?: string[]
   /** Optional claim-level review state keyed by the exact reader-facing claim. */
   claimVerification?: Record<string, ClaimVerificationState>
+  /**
+   * Where each claim is supported, keyed by the exact claim: citations such as
+   * `product:src/auth.ts:42`, `product:src/auth.ts:40-58`, or
+   * `api:POST /oauth/token`. Lets a reviewer open the exact lines instead of
+   * a list of files, and lets Doxloop re-check the claim there.
+   */
+  claimSources?: Record<string, string[]>
 }
 
 export interface EvidenceMap {

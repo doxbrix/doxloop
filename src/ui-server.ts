@@ -113,6 +113,7 @@ import {
   remoteCredentialEnvironment,
   remoteHead,
 } from './remote-source.js'
+import { readPageClaimEvidence } from './claim-evidence.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
@@ -803,6 +804,15 @@ async function handleApi(
     await assertAgentSignedIn(spec.agent)
     const job = startCliJob(runtime, spec.type, spec.args, root, spec.agent)
     sendJson(response, 202, { job: publicJob(job) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/pages/evidence') {
+    // The claims a page makes and the source lines behind each one. Sources
+    // are read inside their configured roots only; nothing starts an agent.
+    const root = requireProject(runtime)
+    const page = url.searchParams.get('path') ?? ''
+    if (!page) throw new DoxloopError('Choose a page to show its evidence.')
+    sendJson(response, 200, await readPageClaimEvidence(root, await loadProject(root), page) ?? { page, confidence: undefined, sources: [], claims: [] })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/pages/metadata') {

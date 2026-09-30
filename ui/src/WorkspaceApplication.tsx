@@ -1,4 +1,4 @@
-import { Comments, BulkMetadata, AuditTools, Collections } from './WorkspaceTools'
+import { Comments, BulkMetadata, AuditTools, Collections, PageEvidence } from './WorkspaceTools'
 import { TextEditor, PageTools } from './TextEditor'
 import { PageContentEditor } from './PageContentEditor'
 import './PagesEditor.css'
@@ -2743,6 +2743,7 @@ function Pages({ state, act, streamConnected, onError }: { state: UiState; act: 
             </span>
           </div>
           {pageOptionsOpen && <section class="page-options-panel" aria-label="Page options">
+            <PageEvidence key={`evidence:${activePage.path}`} path={activePage.path} {...(!activeJob && !(reviewable && viewingProposalPage) ? { onRequest: async (text: string) => { await submit({ paths: [activePage.path], instruction: text }) } } : {})} />
             <Comments key={`comments:${activePage.path}`} path={activePage.path} onRequest={async text => { await submit({ paths: [activePage.path], instruction: `Address this reviewer comment on ${activePage.path}: ${text}` }) }} />
             {!activeJob && !(reviewable && viewingProposalPage) && <PageMetadataForm path={activePage.path} act={act} onError={onError} onSaved={() => { setPreviewNonce(value => value + 1); void refreshPages() }} />}
           </section>}
