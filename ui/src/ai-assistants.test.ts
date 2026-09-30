@@ -10,10 +10,10 @@ describe('AI assistant setup', () => {
   })
 
   test('builds the Claude Code, Codex, and JSON snippets for the absolute project folder', () => {
-    const [claude, codex, json] = assistantSnippets({ slug: 'acme', root: '/Users/me/acme docs' })
-    expect(claude!.text).toBe("claude mcp add acme-docs -- npx -y @doxbrix/doxloop mcp --cwd '/Users/me/acme docs'")
-    expect(codex!.text).toBe('[mcp_servers.acme_docs]\ncommand = "npx"\nargs = ["-y", "@doxbrix/doxloop", "mcp", "--cwd", "/Users/me/acme docs"]')
-    expect(JSON.parse(json!.text)).toEqual({ mcpServers: { 'acme-docs': { command: 'npx', args: ['-y', '@doxbrix/doxloop', 'mcp', '--cwd', '/Users/me/acme docs'] } } })
+    const [claude, codex, json] = assistantSnippets({ slug: 'acme', root: '/home/me/acme docs' })
+    expect(claude!.text).toBe("claude mcp add acme-docs -- npx -y @doxbrix/doxloop mcp --cwd '/home/me/acme docs'")
+    expect(codex!.text).toBe('[mcp_servers.acme_docs]\ncommand = "npx"\nargs = ["-y", "@doxbrix/doxloop", "mcp", "--cwd", "/home/me/acme docs"]')
+    expect(JSON.parse(json!.text)).toEqual({ mcpServers: { 'acme-docs': { command: 'npx', args: ['-y', '@doxbrix/doxloop', 'mcp', '--cwd', '/home/me/acme docs'] } } })
   })
 
   test('quotes a folder with a single quote for the shell and escapes Windows paths for TOML', () => {
