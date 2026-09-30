@@ -14,7 +14,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { chooseAgent } from './agents.js'
 import { readTaggedJson, type TaggedJsonContract } from './agent-reply.js'
-import { prepareAgentPrompt } from './author.js'
+import { captureAuthPrompt, prepareAgentPrompt } from './author.js'
+import { captureAuthContext, describeCaptureAuth } from './capture-auth.js'
 import { runReadOnlyAgentSession } from './documentation-plan.js'
 import { DoxloopError } from './errors.js'
 import { listPages, type PageSummary } from './pages.js'
@@ -68,9 +69,12 @@ export function defaultWalkthroughPages(pages: PageSummary[]): PageSummary[] {
   return (picked.length > 0 ? picked : pages.filter((page) => page.inNavigation)).slice(0, 2)
 }
 
-export function walkthroughPrompt(input: { pages: PageSummary[]; application?: string; productName: string }): string {
+export function walkthroughPrompt(input: { pages: PageSummary[]; application?: string; productName: string; signIn?: string }): string {
+  // Without the saved sign-in a Memos walkthrough failed to log in and made
+  // itself a new account through Sign up; the reader is a new reader of the
+  // docs, not of the application's account system.
   const browser = input.application
-    ? `The product's test application runs at ${input.application}. Follow every UI instruction there with the capture browser tools, exactly as written: find the named navigation, buttons, fields, and labels, and compare what you see with what the page says you should see. Creating the items a guide tells you to create is fine; never delete data you did not create, change account or security settings, invite real people, or send email.`
+    ? `The product's test application runs at ${input.application}. Follow every UI instruction there with the capture browser tools, exactly as written: find the named navigation, buttons, fields, and labels, and compare what you see with what the page says you should see. When a step asks you to sign in, use the saved test account: ${input.signIn ?? 'no sign-in material is saved, so report the step as not-tried.'} Never create accounts, sign up, or reset passwords to get past a sign-in, even when a page describes how. Creating the items a guide tells you to create is fine; never delete data you did not create, change account or security settings, invite real people, or send email.`
     : 'There is no test application, so follow UI instructions by checking the product source for the named screens, labels, and results.'
   return `You are testing documentation as a first-time reader of ${input.productName}. You have never used the product and you know only what these pages tell you.
 
@@ -166,7 +170,8 @@ export async function runReaderWalkthrough(root: string, options: WalkthroughOpt
   if (chosen.length === 0) throw new DoxloopError('This project has no pages to walk through yet.', 2)
   const selected = await chooseAgent(options.agent ?? project.defaultAgent)
   const application = project.application?.baseUrl
-  const prompt = walkthroughPrompt({ pages: chosen, ...(application ? { application } : {}), productName: project.title })
+  const signIn = application ? captureAuthPrompt(describeCaptureAuth(await captureAuthContext(root))) : undefined
+  const prompt = walkthroughPrompt({ pages: chosen, ...(application ? { application } : {}), ...(signIn ? { signIn } : {}), productName: project.title })
   const model = options.model ?? projectDefaultModel(project, selected.name)
   const execution: DocumentationPlanExecution = {
     agent: selected.name,

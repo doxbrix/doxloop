@@ -19,10 +19,12 @@ describe('choosing pages', () => {
   })
 
   test('the prompt keeps the reader honest and asks for a tagged report', () => {
-    const prompt = walkthroughPrompt({ pages: [page('quickstart.mdx', 'Quickstart')], application: 'http://localhost:5230', productName: 'Memos' })
+    const prompt = walkthroughPrompt({ pages: [page('quickstart.mdx', 'Quickstart')], application: 'http://localhost:5230', productName: 'Memos', signIn: 'fill DOXLOOP_APP_USERNAME and DOXLOOP_APP_PASSWORD.' })
     expect(prompt).toContain('first-time reader of Memos')
     expect(prompt).toContain('http://localhost:5230')
     expect(prompt).toContain('do not run anything')
+    expect(prompt).toContain('use the saved test account: fill DOXLOOP_APP_USERNAME')
+    expect(prompt).toContain('Never create accounts')
     expect(prompt).toContain('<doxloop-walkthrough>')
   })
 })
