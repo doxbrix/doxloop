@@ -11,8 +11,8 @@ publishing, Git commit and tag creation, pushing, and GitHub Release creation.
 - Authenticate the writable `doxbrix` GitHub account with `gh auth login` once.
   The release command selects that account automatically and configures Git to
   use its GitHub CLI credential.
-- Have npm publish access to `@doxbrix/doxloop` and any modified generator
-  packages, with 2FA/WebAuthn configured.
+- Have npm publish access to `@doxbrix/doxloop`, and to any generator packages
+  you choose to release, with 2FA/WebAuthn configured.
 
 Preview the next patch release without changing files or publishing:
 
@@ -51,12 +51,24 @@ detects the prepared tag, skips work already completed, and resumes the release.
 It also verifies that the remote tag resolves to the exact prepared commit
 before publishing.
 
-The root package is always released. The command also compares each generator
-package with its currently published source revision. Modified or unpublished
-generators are assigned the same target version as the root package, their core
-peer range is updated when necessary, and they are built and published after
-the root package. Unchanged generators keep their existing versions and are
-skipped. A dry run lists the exact package set without changing versions or
+The root package is always released. Generator packages are released only
+when you ask for them: a core release usually does not change them, and each
+one adds an npm 2FA prompt. The command compares each generator with its
+currently published source revision and lists the modified ones. In an
+interactive terminal it asks whether to publish them too (the default is no);
+choose up front with a flag instead:
+
+```bash
+pnpm release:local patch --generators                        # every modified generator
+pnpm release:local patch --generators=docusaurus,mkdocs      # only these
+pnpm release:local patch --no-generators                     # core only, no question
+```
+
+Generators you release are assigned the same target version as the root
+package, their core peer range is updated when necessary, and they are built
+and published after the root package. Modified generators you skip keep their
+current versions and stay unpublished until a later release includes them.
+A dry run lists the exact package set without changing versions or
 publishing.
 
 ## Evaluations
