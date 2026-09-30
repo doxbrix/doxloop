@@ -1578,6 +1578,23 @@ export function planningEffort(effort: ClaudeEffortLevel): ClaudeEffortLevel {
   return effort === 'high' || effort === 'max' ? 'medium' : effort
 }
 
+/**
+ * A read-only agent session with the planner's isolation, budget, timeout,
+ * and (when the application is configured) capture browser. Used by the
+ * reader walkthrough, which needs the same guarantees as planning: nothing in
+ * the project or its sources can change.
+ */
+export function runReadOnlyAgentSession(
+  root: string,
+  selected: { name: AgentName; executable: string },
+  prompt: string,
+  execution: DocumentationPlanExecution,
+  project: Awaited<ReturnType<typeof loadProject>>,
+  options: { browser?: boolean; label?: string; prefix?: string } = {},
+): Promise<string> {
+  return runAgentForPlan(root, selected, prompt, execution, project, options)
+}
+
 async function runAgentForPlan(
   root: string,
   selected: { name: AgentName; executable: string },

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api, post, put } from './api'
-import type { ProposalChange } from './types'
+import type { ProposalChange, UiJob } from './types'
+import { waitForJob } from './ScreenshotDrift'
 import { timeText } from './components'
 
 type Comment = { id: string; path: string; text: string; createdAt: string; proposalId?: string; changeId?: string; hunkId?: string; resolvedAt?: string }
@@ -185,5 +186,68 @@ export function PageExamples({ path, onRequest }: { path: string; onRequest?: (t
         <div class="page-claim-head"><span class={`badge ${EXAMPLE_OUTCOMES[result.outcome].tone}`}>{EXAMPLE_OUTCOMES[result.outcome].label}</span><code>{result.method} {result.url}</code></div>
         <small>Line {result.line}{result.status ? ` · HTTP ${result.status}` : ''}{result.expected && result.outcome === 'failed' ? ` · expected ${result.expected}` : ''}{result.detail ? ` · ${result.detail}` : ''}</small>
       </li>)}</ul>)}
+  </div></details>
+}
+
+type WalkthroughStep = { page: string; step: string; outcome: 'done' | 'stuck' | 'unclear' | 'different' | 'not-tried'; observation: string; fix?: string }
+type WalkthroughReport = { pages: string[]; checkedAt: string; agent: string; completed: boolean; score: number; summary: string; missingPrerequisites: string[]; steps: WalkthroughStep[]; usedApplication: boolean }
+
+const WALKTHROUGH_OUTCOMES: Record<WalkthroughStep['outcome'], { label: string; tone: string }> = {
+  done: { label: 'Worked', tone: 'good' },
+  stuck: { label: 'Stuck', tone: 'bad' },
+  unclear: { label: 'Had to guess', tone: 'warn' },
+  different: { label: 'Looked different', tone: 'warn' },
+  'not-tried': { label: 'Not tried', tone: 'neutral' },
+}
+
+/**
+ * Have an agent follow this page as a first-time reader and show where it
+ * got stuck, had to guess, or saw something the page does not describe.
+ */
+export function ReaderWalkthrough({ path, onRequest }: { path: string; onRequest?: (text: string) => Promise<void> }) {
+  const [report, setReport] = useState<WalkthroughReport | null>()
+  const [fix, setFix] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState('')
+  const [error, setError] = useState('')
+  const load = async () => {
+    const value = await api<{ report: WalkthroughReport | null; fix: string | null }>(`/api/walkthrough?page=${encodeURIComponent(path)}`)
+    setReport(value.report)
+    setFix(value.fix)
+  }
+  useEffect(() => { setReport(undefined); setError(''); void load().catch((cause) => setError(cause.message)) }, [path])
+  const run = async () => {
+    setRunning(true)
+    setError('')
+    setProgress('Starting the reader…')
+    try {
+      const job = await post<UiJob>('/api/walkthrough', { pages: [path] })
+      const finished = await waitForJob(job.id, setProgress)
+      if (finished?.status === 'failed') setError([...finished.lines].reverse().find((line) => line.trim()) ?? 'The walkthrough did not finish.')
+      await load()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setRunning(false)
+      setProgress('')
+    }
+  }
+  const steps = report?.steps.filter((step) => step.page === path) ?? []
+  return <details class="text-editor page-walkthrough"><summary>Reader walkthrough{report ? ` · ${report.score}/100${report.completed ? '' : ', did not finish'}` : ''}</summary><div class="text-editor-body">
+    <p>An agent follows this page as a first-time reader{report?.usedApplication === false ? '' : ', in the test application when one is set up,'} and checks each command and setting against the source. It changes nothing; it reports where a reader would get stuck, guess, or see something different.</p>
+    {error && <p role="alert">{error}</p>}
+    {running && progress && <p class="screenshot-drift-progress" role="status">{progress}</p>}
+    {report && <>
+      <p><strong>{report.completed ? 'The reader finished.' : 'The reader did not finish.'}</strong> {report.summary} <small>Checked {timeText(report.checkedAt)} with {report.agent}.</small></p>
+      {report.missingPrerequisites.length > 0 && <p>Assumed but never stated: {report.missingPrerequisites.join('; ')}.</p>}
+      <ul class="page-claims">{steps.map((step, index) => <li key={`${index}:${step.step}`} class={`page-claim ${step.outcome === 'stuck' ? 'contradicted' : ''}`}>
+        <div class="page-claim-head"><span class={`badge ${WALKTHROUGH_OUTCOMES[step.outcome].tone}`}>{WALKTHROUGH_OUTCOMES[step.outcome].label}</span><span>{step.step}</span></div>
+        {step.outcome !== 'done' && step.observation && <small>{step.observation}{step.fix ? ` Fix: ${step.fix}` : ''}</small>}
+      </li>)}</ul>
+    </>}
+    <div class="text-editor-actions">
+      <button disabled={running} onClick={() => void run()}>{running ? 'Following the page…' : report ? 'Walk through again' : 'Walk through as a new reader'}</button>
+      {fix && onRequest && <button disabled={running} onClick={() => { setRunning(true); void onRequest(fix).finally(() => setRunning(false)) }}>Ask the agent to fix what the reader hit</button>}
+    </div>
   </div></details>
 }

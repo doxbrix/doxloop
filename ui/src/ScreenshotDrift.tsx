@@ -19,7 +19,7 @@ const OUTCOMES: Record<DriftOutcome, string> = {
 }
 
 /** Page the running job until it finishes; the check can take a few minutes for a large set. */
-async function waitForJob(id: string, onLine: (line: string) => void): Promise<UiJob | undefined> {
+export async function waitForJob(id: string, onLine: (line: string) => void): Promise<UiJob | undefined> {
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     const job = (await api<UiJob[]>('/api/jobs')).find((item) => item.id === id)

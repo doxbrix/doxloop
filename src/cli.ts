@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { checkScreenshotDrift, readDriftReport, refreshScreenshots } from './screenshot-drift.js'
+import { runReaderWalkthrough } from './reader-walkthrough.js'
 import { replayRun } from './proposal-replay.js'
 import { auditDocumentation, backfillEvidence } from './workspace-tools.js'
 
@@ -192,6 +193,8 @@ async function main(): Promise<number> {
       return replayCommand(args, cwd)
     case 'screenshots':
       return screenshotsCommand(args, cwd)
+    case 'walkthrough':
+      return walkthroughCommand(args, cwd)
     case 'capture': {
       const root = await findProjectRoot(cwd)
       await capture({ root, urls: args.positionals })
@@ -882,6 +885,23 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
   return 0
 }
 
+async function walkthroughCommand(args: ParsedArgs, cwd: string): Promise<number> {
+  const root = await findProjectRoot(cwd)
+  const pages = flags(args, 'page')
+  const agent = parseAgent(flag(args, 'agent'))
+  const model = flag(args, 'model')
+  const report = await runReaderWalkthrough(root, { ...(pages.length > 0 ? { pages } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) })
+  if (flag(args, 'format') === 'json') {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    return 0
+  }
+  const problems = report.steps.filter((step) => step.outcome !== 'done')
+  process.stdout.write(`\nReader walkthrough of ${report.pages.join(', ')}: ${report.completed ? 'finished' : 'did not finish'}, score ${report.score}/100.\n${report.summary}\n`)
+  for (const step of problems) process.stdout.write(`- ${step.outcome}: ${step.step} — ${step.observation}\n`)
+  if (report.missingPrerequisites.length > 0) process.stdout.write(`Unstated prerequisites: ${report.missingPrerequisites.join('; ')}\n`)
+  return 0
+}
+
 async function screenshotsCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const action = args.positionals[0]
   const root = await findProjectRoot(cwd)
@@ -1281,6 +1301,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     deploy: ['dry-run', 'public', 'name', 'slug', 'api-url', 'target', 'site-id', 'project-id', 'team-id', 'branch', 'base-path'],
     export: ['out', 'zip', 'base-path', 'site-url'],
     screenshots: ['file', 'format'],
+    walkthrough: ['page', 'agent', 'model', 'format'],
   }
   if (args.command === undefined) {
     assertAllowedFlags(args, new Set())
@@ -1633,6 +1654,24 @@ Options:
   --cwd <directory>        Run from this project directory
 `
   }
+  if (command === 'walkthrough') {
+    return `Usage: doxloop walkthrough [--page <file>]... [options]
+
+An agent plays a first-time reader: it follows the chosen guides step by step
+(in the test application when one is configured, and against the product
+source for commands, flags, and configuration) and reports every step where a
+reader would get stuck, have to guess, or see something the page does not
+describe. The session is read-only. Without --page, the quickstart,
+installation, or getting-started guides are followed.
+
+Options:
+  --page <file>        A project-relative page to follow (repeatable, in order)
+  --agent <name>       codex, claude, or gemini (default: the project's)
+  --model <model>      Model for the reader session
+  --format json        Print the report as JSON
+  --cwd <directory>    Run from this project directory
+`
+  }
   if (command === 'screenshots') {
     return `Usage: doxloop screenshots <check|refresh> [--file <image>]... [options]
 
@@ -1872,6 +1911,7 @@ Maintain:
   coverage   Report source health, coverage, and evidence precision
   replay     Re-run the end-of-generation checks over a recorded run
   screenshots Check product screenshots against the running application
+  walkthrough Have an agent follow a guide as a first-time reader
   sync       Set up and run automatic documentation maintenance
 
 Visual:

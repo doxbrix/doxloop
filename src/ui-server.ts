@@ -117,6 +117,7 @@ import { readPageClaimEvidence } from './claim-evidence.js'
 import { testPageExamples } from './example-runs.js'
 import { readDriftReport, refreshScreenshots } from './screenshot-drift.js'
 import { readScreenshotLedger } from './screenshot-ledger.js'
+import { walkthroughFixRequest, walkthroughForPage } from './reader-walkthrough.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
@@ -197,6 +198,7 @@ const AGENT_ROUTES = [
   /^\/api\/proposals\/[^/]+\/(revise|regenerate|resume)$/,
   /^\/api\/pages\/edit$/,
   /^\/api\/author$/,
+  /^\/api\/walkthrough$/,
 ]
 
 const DEMO_NEEDS_AGENT = 'This step runs a coding agent (Claude Code, Codex, or Gemini CLI), and none is signed in on this computer. Everything else in the demo works without one: browse the plan and pages, review, accept, or reject the update, and preview the site. To try agent steps, set up an agent under Settings → General and sign in, then try again; the demo keeps running.'
@@ -1380,6 +1382,25 @@ async function handleApi(
     const root = requireProject(runtime)
     const plan = url.searchParams.get('plan')
     sendJson(response, 200, { captures: plan ? await listPlanCaptures(root, plan) : await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/walkthrough') {
+    const root = requireProject(runtime)
+    const page = url.searchParams.get('page') ?? ''
+    const report = page ? await walkthroughForPage(root, page) : undefined
+    sendJson(response, 200, { report: report ?? null, fix: report ? walkthroughFixRequest(report, page) ?? null : null })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/walkthrough') {
+    assertNoActiveDocumentationJob(runtime)
+    const root = requireProject(runtime)
+    const body = recordBody(await readJsonBody(request))
+    const agent = parseAgent(optionalString(body.agent)) ?? (await loadProject(root)).defaultAgent
+    await assertAgentSignedIn(agent)
+    const args = ['walkthrough', '--cwd', root]
+    for (const page of stringArray(body.pages)) args.push('--page', page)
+    appendOption(args, 'agent', agent)
+    sendJson(response, 202, publicJob(startCliJob(runtime, 'walkthrough', args, root, agent)))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/screenshots') {
@@ -2756,7 +2777,7 @@ async function reconcileInterruptedPlan(root: string | undefined, job: UiJob, me
 }
 
 /** Long agent runs the computer must stay awake for; laptop sleep used to kill their batches. */
-const KEEP_AWAKE_JOB_TYPES = /^(?:plan:|proposal:(?:resume|revise)|author:|sync$|page-edit:)/
+const KEEP_AWAKE_JOB_TYPES = /^(?:plan:|proposal:(?:resume|revise)|author:|sync$|page-edit:|walkthrough$|screenshots:)/
 
 function startCliJob(
   runtime: UiRuntime,
