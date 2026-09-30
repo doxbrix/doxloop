@@ -1,7 +1,7 @@
 import { createServer as createNetServer } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import { DoxloopError } from './errors.js'
-import { availableLocalPort, assertNoActiveDocumentationJobs, resolvePlanRunExecution, assertProjectSwitchAllowed, normalizeInitialPage, pageEditJobSpec, pageRefineJobSpec, previewIdentityMatches, uiErrorStatus, uiSessionCookieName, applicationFromBody } from './ui-server.js'
+import { availableLocalPort, assertNoActiveDocumentationJobs, resolvePlanRunExecution, assertProjectSwitchAllowed, normalizeInitialPage, pageEditJobSpec, pageRefineJobSpec, previewIdentityMatches, uiErrorStatus, uiSessionCookieName, applicationFromBody, screenshotCheckArgs, walkthroughArgs } from './ui-server.js'
 import type { DoxloopProject, SyncRun } from './types.js'
 
 describe('control-center CLI routes', () => {
@@ -202,5 +202,18 @@ describe('application URL', () => {
     for (const baseUrl of ['https://app.example.com/#section', 'https://user:pass@app.example.com/', 'https://app.example.com/?token=1', 'ftp://app.example.com/']) {
       expect(() => applicationFromBody({ baseUrl })).toThrow(/http:\/\/ or https:\/\//)
     }
+  })
+})
+
+describe('verification jobs', () => {
+  it('checks every recorded screenshot when no files are named, as the Images & files button asks', () => {
+    expect(screenshotCheckArgs('/docs', {})).toEqual(['screenshots', 'check', '--cwd', '/docs'])
+    expect(screenshotCheckArgs('/docs', { files: ['a.png', 'b.png'] })).toEqual(['screenshots', 'check', '--cwd', '/docs', '--file', 'a.png', '--file', 'b.png'])
+    expect(() => screenshotCheckArgs('/docs', { files: 'a.png' })).toThrow()
+  })
+
+  it('walks through the named pages with the chosen assistant, or the starter guides', () => {
+    expect(walkthroughArgs('/docs', { pages: ['quickstart.mdx'] }, 'claude')).toEqual(['walkthrough', '--cwd', '/docs', '--page', 'quickstart.mdx', '--agent', 'claude'])
+    expect(walkthroughArgs('/docs', {}, undefined)).toEqual(['walkthrough', '--cwd', '/docs'])
   })
 })

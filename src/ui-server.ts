@@ -1403,10 +1403,7 @@ async function handleApi(
     const body = recordBody(await readJsonBody(request))
     const agent = parseAgent(optionalString(body.agent)) ?? (await loadProject(root)).defaultAgent
     await assertAgentSignedIn(agent)
-    const args = ['walkthrough', '--cwd', root]
-    for (const page of stringArray(body.pages)) args.push('--page', page)
-    appendOption(args, 'agent', agent)
-    sendJson(response, 202, publicJob(startCliJob(runtime, 'walkthrough', args, root, agent)))
+    sendJson(response, 202, publicJob(startCliJob(runtime, 'walkthrough', walkthroughArgs(root, body, agent), root, agent)))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/screenshots') {
@@ -1424,10 +1421,7 @@ async function handleApi(
   if (request.method === 'POST' && url.pathname === '/api/screenshots/check') {
     assertNoActiveDocumentationJob(runtime)
     const root = requireProject(runtime)
-    const body = recordBody(await readJsonBody(request))
-    const args = ['screenshots', 'check', '--cwd', root]
-    for (const file of stringArray(body.files)) args.push('--file', file)
-    sendJson(response, 202, publicJob(startCliJob(runtime, 'screenshots:check', args, root)))
+    sendJson(response, 202, publicJob(startCliJob(runtime, 'screenshots:check', screenshotCheckArgs(root, recordBody(await readJsonBody(request))), root)))
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/screenshots/refresh') {
@@ -2930,6 +2924,21 @@ async function agentSignInState(agent: AgentName | undefined): Promise<{ name: A
   } catch {
     return { name: selected.name, status: 'unknown' }
   }
+}
+
+/** `doxloop screenshots check` for the control center; no file list means every recorded screenshot. */
+export function screenshotCheckArgs(root: string, body: Record<string, unknown>): string[] {
+  const args = ['screenshots', 'check', '--cwd', root]
+  for (const file of body.files === undefined ? [] : stringArray(body.files)) args.push('--file', file)
+  return args
+}
+
+/** `doxloop walkthrough` for the control center; no page list means the starter guides. */
+export function walkthroughArgs(root: string, body: Record<string, unknown>, agent: AgentName | undefined): string[] {
+  const args = ['walkthrough', '--cwd', root]
+  for (const page of body.pages === undefined ? [] : stringArray(body.pages)) args.push('--page', page)
+  appendOption(args, 'agent', agent)
+  return args
 }
 
 /**
