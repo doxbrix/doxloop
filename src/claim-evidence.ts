@@ -15,7 +15,7 @@ import { relative, resolve } from 'node:path'
 import { readEvidenceMap } from './evidence.js'
 import { loadOpenApiSource } from './openapi.js'
 import { sourceKind } from './project.js'
-import { extractFacts, semanticClaimState } from './quality-claims.js'
+import { extractFacts } from './quality-claims.js'
 import type { ClaimVerificationState, DoxloopProject, PageEvidence, ValidationIssue } from './types.js'
 
 export interface ClaimLocation {
@@ -121,6 +121,41 @@ export function bestLines(text: string, terms: string[], limit = MAX_LOCATIONS):
     if (picked.length >= limit) break
   }
   return picked
+}
+
+const STOPWORDS = new Set(['about', 'after', 'before', 'between', 'every', 'their', 'there', 'these', 'those', 'which', 'while', 'where', 'return', 'returns', 'value', 'values', 'using', 'default', 'defaults', 'limited', 'unless', 'given', 'first', 'other', 'another', 'should', 'would', 'could'])
+
+/** Words that say what a claim is about, without its values. */
+export function subjectTerms(claim: string, values: string[]): string[] {
+  const lowered = new Set(values.map((value) => value.toLowerCase()))
+  const words = claim.match(/[A-Za-z_][A-Za-z0-9_.-]{4,}/g) ?? []
+  return [...new Set(words.map((word) => word.toLowerCase().replace(/[.-]+$/, '')))].filter((word) => !lowered.has(word) && !STOPWORDS.has(word))
+}
+
+/**
+ * The lines in the cited files that talk about the claim's subject (two or
+ * more of its words) and carry a different value of the kind the claim is
+ * missing, such as another status code next to the same error name.
+ */
+function conflictingContext(claim: string, missing: Array<{ kind: string; value: string }>, files: EvidenceFile[]): { source: string; path: string; line: number; excerpt: string; values: string[] } | undefined {
+  const subject = subjectTerms(claim, extractFacts(claim).map((fact) => fact.value))
+  if (subject.length < 2) return undefined
+  // Flags and environment variables coexist, so another one nearby proves
+  // nothing; a status code or version next to the same subject does.
+  const kinds = new Set<string>(missing.map((fact) => fact.kind).filter((kind) => kind === 'http-status' || kind === 'version'))
+  if (kinds.size === 0) return undefined
+  for (const file of files) {
+    const lines = file.text.split(/\r?\n/)
+    for (const hit of bestLines(file.text, subject, 5)) {
+      if (hit.score < 2) continue
+      const start = Math.max(0, hit.line - 1 - 3)
+      const window = lines.slice(start, hit.line - 1 + 4).join('\n')
+      const values = [...new Set(extractFacts(window).filter((fact) => kinds.has(fact.kind)).map((fact) => fact.value))]
+        .filter((value) => !missing.some((fact) => fact.value.toLowerCase() === value.toLowerCase()))
+      if (values.length > 0) return { source: file.source, path: file.path, line: hit.line, excerpt: hit.excerpt, values: values.slice(0, 4) }
+    }
+  }
+  return undefined
 }
 
 interface EvidenceFile {
@@ -242,18 +277,37 @@ export async function pageClaimEvidence(root: string, project: DoxloopProject, p
       }
     }
     const fallback: ClaimVerificationState = evidence.confidence === 'verified' ? 'verified' : evidence.confidence === 'inferred' ? 'inferred' : 'needs-human'
-    const state = semanticClaimState(claim, allText, false, recorded, fallback)
     const facts = extractFacts(claim)
-    const missing = facts.filter((fact) => !allText.includes(fact.value.toLowerCase())).map((fact) => fact.value)
-    const kinds = new Set(facts.filter((fact) => missing.includes(fact.value)).map((fact) => fact.kind))
-    const comparable = state === 'contradicted'
-      ? [...new Set(extractFacts([...files.map((file) => file.text), ...operations.map((operation) => operation.text)].join('\n')).filter((fact) => kinds.has(fact.kind)).map((fact) => fact.value))].slice(0, 6)
-      : []
+    const missing = facts.filter((fact) => !allText.includes(fact.value.toLowerCase()))
+    let state: ClaimVerificationState
+    let comparable: string[] = []
+    if (recorded === 'contradicted') {
+      state = 'contradicted'
+    } else if (facts.length === 0) {
+      state = recorded ?? fallback
+    } else if (missing.length === 0) {
+      state = 'verified'
+    } else {
+      // A value missing from the cited files is only a contradiction when the
+      // lines about the same subject show another value of that kind. A value
+      // that is simply not in the cited files may live elsewhere in the
+      // source: the claim needs review (and a citation), not a correction.
+      const conflict = conflictingContext(claim, missing, files)
+      if (conflict) {
+        state = 'contradicted'
+        comparable = conflict.values
+        if (!locations.some((location) => location.path === conflict.path && location.line === conflict.line)) {
+          locations.unshift({ source: conflict.source, path: conflict.path, line: conflict.line, excerpt: conflict.excerpt, cited: false })
+        }
+      } else {
+        state = 'needs-human'
+      }
+    }
     claims.push({
       claim,
       state,
-      locations,
-      ...(missing.length > 0 && state !== 'verified' ? { missingFacts: missing } : {}),
+      locations: locations.slice(0, MAX_LOCATIONS),
+      ...(missing.length > 0 && state !== 'verified' ? { missingFacts: missing.map((fact) => fact.value) } : {}),
       ...(comparable.length > 0 ? { evidenceFacts: comparable } : {}),
     })
   }

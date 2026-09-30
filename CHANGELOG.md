@@ -48,8 +48,25 @@ uses semantic versioning after its first stable release.
   that fails. Pages → Evidence can also send a page's read-only requests to a
   test server and compare each status with what the page expects.
 
+- **A measured quality score on Home.** Documentation quality scores the site
+  out of 100 in the seven categories of the authoring skill's review rubric:
+  accuracy and evidence, task completion, structure, clarity and style,
+  examples, accessibility, and freshness. The score comes from validation,
+  claim and example checks, reader walkthroughs, and source and screenshot
+  changes, never from an agent grading its own work. Each category shows how
+  many pages pass it, and every lost point names the page and the finding.
+
 ### Changed
 
+- **The editorial standard is checked, not only requested.** Pages that open
+  by announcing themselves ("This guide shows…"), call a step simple or easy,
+  use Title Case headings, describe results in the future tense, or end a
+  procedure without a next step get a warning, and the end-of-run fix pass
+  rewrites only the named sentence or heading.
+- **A claim is reported as contradicted only when the evidence disagrees.**
+  A status code or version is contradicted when the lines about the same
+  subject show a different one. A value that is not in the cited files is
+  marked for review and a citation instead of being "corrected".
 - **Guesswork is sent back to the writer.** Pages that hedge about the
   product ("probably", "appears to", "depending on your configuration") get a
   warning, and the fix pass replaces each guess with what the source shows.

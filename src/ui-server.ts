@@ -118,6 +118,7 @@ import { testPageExamples } from './example-runs.js'
 import { readDriftReport, refreshScreenshots } from './screenshot-drift.js'
 import { readScreenshotLedger } from './screenshot-ledger.js'
 import { walkthroughFixRequest, walkthroughForPage } from './reader-walkthrough.js'
+import { measureQuality } from './quality-score.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
@@ -1382,6 +1383,11 @@ async function handleApi(
     const root = requireProject(runtime)
     const plan = url.searchParams.get('plan')
     sendJson(response, 200, { captures: plan ? await listPlanCaptures(root, plan) : await listRunCaptures(root, url.searchParams.get('run') ?? undefined) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/quality') {
+    // Measured without an agent; every point lost names its page and finding.
+    sendJson(response, 200, await measureQuality(requireProject(runtime)))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/walkthrough') {

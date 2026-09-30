@@ -206,6 +206,7 @@ wizard:
 | 🧭 **Plan before writing** | Proposes readers, page coverage, and navigation as an editable plan that you approve before anything is written. |
 | ✍️ **Generator-native output** | Creates the right Markdown, MDX, configuration, components, and theme for the selected generator. |
 | ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, page depth, and generator conventions on every proposal and before every deploy. Hedged guesses about the product go back to the writer to be settled from the source. |
+| 📈 **Measured quality** | Home scores the site out of 100 across accuracy, task completion, structure, clarity, examples, accessibility, and freshness. Every lost point names the page and the finding behind it. |
 | 🧾 **Claims you can check** | Each claim a page makes links to the source lines behind it. A claim those lines contradict is sent back to be fixed before you review it. |
 | 🧪 **Tested examples** | JSON and YAML must parse, API requests must match the OpenAPI contract and its request schemas, and read-only requests can be sent to a test server. |
 | 🚶 **Reader walkthrough** | An agent follows a guide as a first-time reader and reports every step where a real reader would get stuck, guess, or see a different screen. |
@@ -223,7 +224,7 @@ left navigation shows:
 
 | Page | What you do there |
 | --- | --- |
-| **Home** | Follow the loop from sources through plan, write, review, and publish. See what needs your review, overall coverage, the published address, and recent activity. Press ⌘K to search pages, screens, and actions from anywhere. |
+| **Home** | Follow the loop from sources through plan, write, review, and publish. See the measured documentation quality score, what needs your review, overall coverage, the published address, and recent activity. Press ⌘K to search pages, screens, and actions from anywhere. |
 | **Sources** | Connect and test local folders, Git repositories, OpenAPI specifications, and existing documentation sites. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
 | **Plan** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
 | **Docs** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Evidence** tab shows each claim with the source lines behind it, tests the page's examples, and walks through the page as a first-time reader. The **Navigation** view arranges the sidebar. **Images & files** manages uploads and alt text, and checks product screenshots against the running application. |

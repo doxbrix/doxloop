@@ -1,4 +1,5 @@
 import { validateHedging } from './hedging.js'
+import { editorialIssues } from './editorial.js'
 import { projectContracts } from './api-contracts.js'
 import { exampleIssues } from './example-checks.js'
 import { documentationCollections, collectionForPath } from './documentation-collections.js'
@@ -66,6 +67,8 @@ export async function validateProject(root: string): Promise<ValidationResult> {
   // Examples aimed at the product's API are checked against its contract;
   // without one only JSON and YAML syntax is checked.
   const contracts = await projectContracts(root, project).catch(() => [])
+  // Product and UI names keep their capitals in headings.
+  const knownNames = new Set(Object.values(project.documentation.terminology ?? {}).flatMap((term) => term.split(/\s+/)).filter((word) => /^[A-Z]/.test(word)))
   for (const path of files) {
     const file = relativePath(root, path)
     const raw = await readFile(path, 'utf8')
@@ -99,6 +102,8 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     const planned = planTypes.get(file.replace(/\.[^./]+$/, ''))
     issues.push(...validatePageDepth(page.body, file, planned?.type))
     issues.push(...validateHedging(page.body, file))
+    // A starter page is replaced wholesale; its prose is not worth a fix.
+    if (!isStarterContent(raw)) issues.push(...editorialIssues(page.body, file, { ...(planned?.type ? { planType: planned.type } : {}), knownNames }))
     if ((adapter?.project.contentFormat ?? 'markdown') === 'markdown') issues.push(...exampleIssues(page.body, file, contracts))
     if (planned?.diagram === 'required' && !hasDiagram(raw)) {
       issues.push(

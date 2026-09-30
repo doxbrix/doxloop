@@ -1,4 +1,5 @@
 import { Comments, BulkMetadata, AuditTools, Collections, PageEvidence, PageExamples, ReaderWalkthrough } from './WorkspaceTools'
+import { QualityScore } from './QualityScore'
 import { TextEditor, PageTools } from './TextEditor'
 import { PageContentEditor } from './PageContentEditor'
 import './PagesEditor.css'
@@ -537,6 +538,8 @@ function Overview({ state, act, navigate, openPreview }: { state: UiState; act: 
         <Icon name="chevronRight" size={16} class="ov-metric-arrow" />
       </button>
     </div>
+
+    {hasDocs && <QualityScore openPage={(path) => navigate('pages', { path })} />}
 
     {hasDocs && issues.length > 0 && <section class="panel ov-issues" aria-label="Validation issues">
       <header class="panel-head">

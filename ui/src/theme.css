@@ -1056,3 +1056,45 @@
 .field-hint:hover, .field-hint:focus-visible { color: var(--brand); background: var(--brand-soft); }
 .field-hint::after { content: attr(data-hint); position: absolute; z-index: 60; left: 50%; bottom: calc(100% + 6px); width: max-content; max-width: 280px; padding: 7px 9px; border-radius: 7px; color: #fff; background: var(--ink); box-shadow: 0 6px 18px rgb(15 31 61 / 18%); font-size: 12px; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; white-space: normal; transform: translateX(-50%); opacity: 0; pointer-events: none; transition: opacity .12s ease; }
 .field-hint:hover::after, .field-hint:focus-visible::after { opacity: 1; }
+
+/* Documentation quality score */
+.quality-card { display: grid; gap: 0; padding: 0; overflow: hidden; }
+.quality-loading, .quality-error { display: flex; align-items: center; gap: 10px; padding: 18px 22px; color: var(--muted); font-size: 14px; }
+.quality-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 20px 22px; border-bottom: 1px solid var(--border); }
+.quality-figure { display: flex; align-items: baseline; gap: 2px; min-width: 92px; }
+.quality-figure strong { color: var(--ink); font-family: var(--font-display); font-size: 44px; line-height: 44px; font-weight: 650; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.quality-figure span { color: var(--faint, var(--muted)); font-size: 15px; }
+.quality-figure.good strong { color: var(--good); }
+.quality-figure.warn strong { color: var(--warn); }
+.quality-figure.bad strong { color: var(--bad); }
+.quality-copy { display: grid; gap: 4px; min-width: 0; }
+.quality-copy small { color: var(--muted); font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
+.quality-copy h2 { margin: 0; color: var(--ink); font-size: 17px; font-weight: 650; }
+.quality-copy p { margin: 0; color: var(--muted); font-size: 13px; line-height: 19px; max-width: 70ch; }
+.quality-categories { margin: 0; padding: 6px 0; list-style: none; }
+.quality-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 2fr) 64px; align-items: center; gap: 18px; width: 100%; padding: 10px 22px; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
+.quality-row:disabled { cursor: default; }
+.quality-row:not(:disabled):hover { background: var(--subtle); }
+.quality-label { display: grid; gap: 2px; min-width: 0; }
+.quality-label strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.quality-label small { color: var(--muted); font-size: 12px; }
+.quality-bar { height: 8px; border-radius: 99px; background: var(--subtle); box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; }
+.quality-bar i { display: block; height: 100%; border-radius: 99px; background: var(--good); }
+.quality-bar i.warn { background: var(--warn-dot); }
+.quality-bar i.bad { background: var(--bad); }
+.quality-points { color: var(--ink); font-family: var(--font-display); font-size: 16px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.quality-points small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.quality-detail { display: grid; gap: 8px; padding: 4px 22px 14px; }
+.quality-detail > p { margin: 0; color: var(--muted); font-size: 13px; }
+.quality-detail ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.quality-detail li { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 12px; font-size: 13px; line-height: 18px; color: var(--text); }
+.quality-file { padding: 0; border: 0; background: none; color: var(--brand); font-family: var(--font-mono); font-size: 12px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.quality-file:hover { text-decoration: underline; }
+.quality-more { margin: 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 760px) {
+  .quality-head { grid-template-columns: auto minmax(0, 1fr); }
+  .quality-head > .btn { grid-column: 1 / -1; justify-self: start; }
+  .quality-row { grid-template-columns: minmax(0, 1fr) 56px; }
+  .quality-bar { grid-column: 1 / -1; grid-row: 2; }
+  .quality-detail li { grid-template-columns: 1fr; gap: 2px; }
+}
