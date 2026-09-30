@@ -44,4 +44,8 @@ describe('summarizeRunActivity', () => {
     ])
     expect(activity.screenshots).toBe(39)
   })
+
+  it('takes the verified total from the capture stage once early lines have scrolled out', () => {
+    expect(summarizeRunActivity(['13:12:31 Documentation plan is generated.'], [{ label: 'Verified 63 application screenshots' }]).screenshots).toBe(63)
+  })
 })

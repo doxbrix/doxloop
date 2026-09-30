@@ -56,7 +56,7 @@ function sessionName(raw: string): string {
  * stream of tool calls ("Using doxloop_capture browser_evaluate") that only
  * an engineer can read. Counts come from completed actions only.
  */
-export function summarizeRunActivity(lines: readonly string[]): RunActivity {
+export function summarizeRunActivity(lines: readonly string[], stages: ReadonlyArray<{ label: string }> = []): RunActivity {
   let screenshots = 0
   let sourceReads = 0
   const sessions: string[] = []
@@ -78,5 +78,9 @@ export function summarizeRunActivity(lines: readonly string[]): RunActivity {
     else if (/^✓ Running /.test(body)) sourceReads += 1
     else if (session && body.length > 40 && !/^[→✓✗×!]/.test(body) && !/^(?:Using|Running|Codex|Claude|Gemini) /.test(body)) latestNote = { session, text: body }
   }
+  // The job keeps only its latest log lines, so a finished run's early
+  // captures scroll out; the capture stage's own total is the floor.
+  const verified = stages.map((stage) => /^Verified (\d+) application screenshots?/.exec(stage.label)?.[1]).find(Boolean)
+  if (verified) screenshots = Math.max(screenshots, Number(verified))
   return { screenshots, sourceReads, sessions, ...(latestNote ? { latestNote } : {}) }
 }

@@ -2195,7 +2195,7 @@ function AuthoringLiveLog({ job, act, stopLabel = 'Stop update', hideStop = fals
       {job.stages.map((stage) => <li class={stage.status} key={stage.id}><span class="pl-stage-mark">{stage.status === 'completed' ? <Icon name="check" size={12} /> : stage.status === 'failed' ? <Icon name="alert" size={12} /> : stage.status === 'running' ? <i /> : null}</span><strong>{stage.label}</strong><small>{stageDetailText(stage)}</small></li>)}
     </ol>}
     {(() => {
-      const activity = summarizeRunActivity(job.lines)
+      const activity = summarizeRunActivity(job.lines, job.stages)
       if (!activity.sessions.length && !activity.screenshots && !activity.sourceReads) return null
       return <div class="pl-activity-summary" aria-live="polite">
         {activity.latestNote && <p><strong>{activity.latestNote.session}</strong><span>{activity.latestNote.text.length > 240 ? `${activity.latestNote.text.slice(0, 237)}…` : activity.latestNote.text}</span></p>}
