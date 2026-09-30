@@ -46,7 +46,9 @@ export interface ScreenshotRecord {
 
 /** A dialog, menu, tab, or any click or typing between the route and the screenshot. */
 export function reachedByInteraction(record: Pick<ScreenshotRecord, 'action' | 'expectedState'>): boolean {
-  return needsInteraction(record.action) || /\b(?:dialog|modal|menu|popover|drop-?down|picker|tooltip|drawer|tab|toast|confirmation)\b/i.test(`${record.action} ${record.expectedState}`)
+  return needsInteraction(record.action)
+    || /^\s*(?:search|filter|sort)(?:es|ed|ing)?\b/i.test(record.action)
+    || /\b(?:dialog|modal|menu|popover|drop-?down|picker|tooltip|drawer|tab|toast|confirmation)\b/i.test(`${record.action} ${record.expectedState}`)
 }
 
 export interface ScreenshotLedger {

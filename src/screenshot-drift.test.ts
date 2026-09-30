@@ -128,3 +128,19 @@ describe('screenshot drift', () => {
     await expect(checkScreenshotDrift(root, { capturePage: async () => { throw new Error('unused') } })).rejects.toThrow(/application URL/)
   })
 })
+
+describe('screens reached by interaction', () => {
+  test('are recognised from the recorded action and state', async () => {
+    const { reachedByInteraction } = await import('./screenshot-ledger.js')
+    const cases: Array<[string, string, boolean]> = [
+      ['Open Explore', 'Protected and Public memos', false],
+      ['Open Inbox', 'All, Unread, Archived tabs', false],
+      ["Search 'checklist'", 'three results under a chip', true],
+      ['Click Create Access Token and fill Description', 'dialog with Expiration', true],
+      ['Choose Focus Mode', 'expanded editor', true],
+      ['Click Documents', 'Documents tab', true],
+      ['Open the expiry dropdown in the share dialog', 'expiry options listed', true],
+    ]
+    for (const [action, expectedState, expected] of cases) expect([action, reachedByInteraction({ action, expectedState })]).toEqual([action, expected])
+  })
+})
