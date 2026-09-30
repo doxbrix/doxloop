@@ -167,6 +167,83 @@ export interface TaggedJsonContract {
  * Also reports why the most answer-like candidate failed, so a malformed reply
  * is distinguishable from one that never contained an answer at all.
  */
+/**
+ * Drop the backslash from escapes JSON does not define (`\'`, `\a`, `\-`)
+ * inside strings, keeping every valid escape as written.
+ */
+export function removeInvalidEscapes(text: string): { text: string; removed: number } {
+  let out = ''
+  let inString = false
+  let removed = 0
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    if (!inString) {
+      if (char === '"') inString = true
+      out += char
+      continue
+    }
+    if (char === '\\') {
+      const next = text[index + 1]
+      if (next !== undefined && '"\\/bfnrtu'.includes(next)) {
+        out += char + next
+      } else if (next !== undefined) {
+        out += next
+        removed += 1
+      }
+      index += 1
+      continue
+    }
+    if (char === '"') inString = false
+    out += char
+  }
+  return { text: out, removed }
+}
+
+/**
+ * The position of a `}` that closed an object early: the parser stopped at
+ * the colon of a key that now sits directly in an array (`…},"notes":`),
+ * which can only mean the brace before it belonged later.
+ */
+function strayCloserBefore(text: string, position: number): number | undefined {
+  let index = position
+  if (text[index] !== ':') return undefined
+  index -= 1
+  while (index >= 0 && /\s/.test(text[index]!)) index -= 1
+  if (text[index] !== '"') return undefined
+  index -= 1
+  while (index >= 0 && !(text[index] === '"' && text[index - 1] !== '\\')) index -= 1
+  index -= 1
+  while (index >= 0 && /\s/.test(text[index]!)) index -= 1
+  if (text[index] !== ',') return undefined
+  index -= 1
+  while (index >= 0 && /\s/.test(text[index]!)) index -= 1
+  return text[index] === '}' ? index : undefined
+}
+
+/** Parse the object at `start` after removing invalid escapes and stray early closers. */
+export function mendObjectAt(text: string, start: number): { value: unknown; stray: number; escapes: number } | undefined {
+  const escapes = removeInvalidEscapes(text.slice(start))
+  let tail = escapes.text
+  let stray = 0
+  // A model that makes this mistake makes it on every array element (one
+  // Memos brief had 46), so the loop allows one repair per element.
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const candidate = objectTextAt(tail, 0) ?? closeObjectAt(tail, 0)?.text
+    if (!candidate) return undefined
+    try {
+      const value = JSON.parse(candidate) as unknown
+      return stray > 0 || escapes.removed > 0 ? { value, stray, escapes: escapes.removed } : undefined
+    } catch (error) {
+      const position = /position (\d+)/.exec(String(error))?.[1]
+      const brace = position === undefined ? undefined : strayCloserBefore(candidate, Number(position))
+      if (brace === undefined) return undefined
+      tail = `${tail.slice(0, brace)}${tail.slice(brace + 1)}`
+      stray += 1
+    }
+  }
+  return undefined
+}
+
 function lastAcceptedIn(text: string, contract: TaggedJsonContract, sent?: string): { value?: unknown; repair?: string; defect?: string } {
   const starts = objectStarts(text, contract.tag)
   let defect: string | undefined
@@ -202,6 +279,19 @@ function lastAcceptedIn(text: string, contract: TaggedJsonContract, sent?: strin
         } catch {
           // Fall through to report the original defect.
         }
+      }
+      // Claude Opus 5.5 twice closed every capability of a Memos research
+      // brief one brace early (`"evidence":[…]},"notes":"…"}`), failing a
+      // fifteen-minute planning run. A key directly inside an array can only
+      // mean the brace before it belonged later, so the brace is moved. An
+      // escape JSON does not define (`\'`) is dropped for the same reason.
+      const mended = mendObjectAt(text, start)
+      if (mended && contract.accept(mended.value)) {
+        const parts = [
+          ...(mended.stray > 0 ? [`removed ${mended.stray} misplaced closing brace${mended.stray === 1 ? '' : 's'}`] : []),
+          ...(mended.escapes > 0 ? [`dropped ${mended.escapes} invalid escape${mended.escapes === 1 ? '' : 's'} such as \\'`] : []),
+        ]
+        return { value: mended.value, repair: `Doxloop ${parts.join(' and ')} in the agent's ${contract.noun} JSON before reading it.` }
       }
       // Prose and templates fail here too; only report a candidate that was
       // clearly trying to be the answer.
