@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "doxloop-demo",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dist/cli.js", "demo", "--no-open", "--port", "4396"],
+      "port": 4396
+    }
+  ]
+}

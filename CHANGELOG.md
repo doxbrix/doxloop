@@ -5,6 +5,8 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+## 0.2.2 - 2026-09-30
+
 ### Added
 
 - **Documentation sites are readable by AI assistants.** Every static build
