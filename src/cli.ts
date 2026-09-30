@@ -1323,6 +1323,7 @@ function validateCommandArguments(args: ParsedArgs): void {
       'pages',
       'capture',
       'sync',
+      'screenshots',
     ].includes(args.command) &&
     args.positionals.length > 0
   ) {
