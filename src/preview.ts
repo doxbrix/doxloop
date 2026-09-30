@@ -8,6 +8,7 @@ import chokidar from 'chokidar'
 import { renderMarkdown, type TocEntry } from './doxbrix-markdown.js'
 import { DoxloopError } from './errors.js'
 import { resolveContainedDirectory } from './fs.js'
+import { buildLlmsOutput, markdownFileForRequest, markdownMirror } from './llms-output.js'
 import { loadQualityConfig } from './quality-config.js'
 import { reverifyClaims } from './quality-claims.js'
 import { loadGeneratorAdapter } from './generators.js'
@@ -127,6 +128,12 @@ async function startDoxbrixPreview(
         return
       }
 
+      const aiFile = await aiReadableFile(options.root, url, request.headers)
+      if (aiFile) {
+        send(response, 200, aiFile.type, aiFile.body)
+        return
+      }
+
       const staticPath = safeStaticPath(contentRoot, url.pathname, ignoredDirectories)
       if (staticPath && STATIC_TYPES[extname(staticPath).toLowerCase()]) {
         try {
@@ -240,6 +247,29 @@ async function startDoxbrixPreview(
   }
   process.once('SIGINT', () => void stop())
   process.once('SIGTERM', () => void stop())
+}
+
+/**
+ * `/llms.txt`, `/llms-full.txt`, and `/<route>.md`, generated on each request
+ * so the preview shows what a static build will publish. A `.md` link clicked
+ * inside the preview itself keeps opening the rendered page, as it always has:
+ * authors link to source files and the reader resolves them to pages.
+ */
+export async function aiReadableFile(
+  root: string,
+  url: URL,
+  headers: import('node:http').IncomingHttpHeaders,
+): Promise<{ type: string; body: string } | undefined> {
+  const llmsFile = url.pathname === '/llms.txt' || url.pathname === '/llms-full.txt'
+  const markdownFile = llmsFile ? undefined : markdownFileForRequest(url.pathname)
+  if (!llmsFile && !markdownFile) return undefined
+  if (markdownFile && headers['sec-fetch-site'] === 'same-origin' && headers['sec-fetch-mode'] === 'navigate') return undefined
+  const output = await buildLlmsOutput(root, { siteUrl: url.origin })
+  if (url.pathname === '/llms.txt') return { type: 'text/plain; charset=utf-8', body: output.llmsTxt }
+  if (url.pathname === '/llms-full.txt') return { type: 'text/plain; charset=utf-8', body: output.llmsFullTxt }
+  const page = output.pages.find((entry) => entry.markdownFile === markdownFile)
+  // Unknown `.md` paths fall through to the page lookup, which still maps source-file links.
+  return page ? { type: 'text/markdown; charset=utf-8', body: markdownMirror(page) } : undefined
 }
 
 /**
@@ -1503,7 +1533,7 @@ function send(
   response.writeHead(status, {
     'Content-Type': type,
     'Cache-Control':
-      type.startsWith('text/html') || type.startsWith('application/json')
+      type.startsWith('text/html') || type.startsWith('application/json') || type.startsWith('text/plain') || type.startsWith('text/markdown')
         ? 'no-store'
         : 'public, max-age=60',
   })

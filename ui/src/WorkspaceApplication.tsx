@@ -31,6 +31,7 @@ import { AgentCapabilityMatrix } from './agent-capabilities'
 import { ProposalRationaleDrawer, ProposalRenderedDiff, ProposalSourceDiff } from './proposal-diff'
 import { AssetLibrary, AssetPicker, readFileAsBase64 } from './AssetLibrary'
 import { BrandingPanel } from './BrandingPanel'
+import { aiReadableFiles, assistantSnippets, type AssistantSnippet } from './ai-assistants'
 import { DemoBadge, DemoTour, reopenDemoTour } from './DemoTour'
 import { GlossaryPanel, PageMetadataForm, ReleaseTemplateFields, TermsEditor, recordFromTerms, termsFromRecord, type ReleaseTemplateForm } from './content-types'
 import { NavigationView, PlanNavigationEditor } from './NavigationView'
@@ -4152,6 +4153,7 @@ const SETTINGS_SECTIONS = [
   ['branding', 'Branding', 'Logo, colours, and fonts', 'sparkle'],
   ['tools', 'Generator', 'Active documentation generator', 'publish'],
   ['monitoring', 'Monitoring', 'Schedule and budgets', 'bell'],
+  ['assistants', 'AI assistants', 'llms.txt and assistant setup', 'bot'],
 ] as const
 
 type SettingsSection = typeof SETTINGS_SECTIONS[number][0]
@@ -4373,6 +4375,8 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
             <SettingRow label="Watched paths" value={sync.watch.length ? listSummary(sync.watch, 2) : 'Everything'} sub={sync.ignore.length ? `${sync.ignore.length} ignored` : undefined} onOpen={() => setMonitoringOpen(true)} />
           </div>
         </Panel>}
+
+        {section === 'assistants' && <AiAssistantsSettings state={state} />}
       </div>
     </div>
     {monitoringOpen && <MonitoringDialog state={state} act={act} onClose={() => setMonitoringOpen(false)} />}
@@ -4380,6 +4384,53 @@ function Settings({ state, act, onError }: { state: UiState; act: Action; onErro
       {openSheetSpec.body}
     </OpsSheet>}
   </>
+}
+
+/**
+ * What the published site offers AI assistants, and how to connect a coding
+ * assistant to this project's pages through the local docs MCP server.
+ */
+function AiAssistantsSettings({ state }: { state: UiState }) {
+  const project = state.project!
+  const recorded = state.latestDeployment?.status === 'succeeded' ? state.latestDeployment.url : undefined
+  // Older deployments recorded an editor link, which is not the reader site.
+  const publishedUrl = recorded && !recorded.includes('/editor?project=') ? recorded : undefined
+  const { base, files } = aiReadableFiles({
+    generator: project.generator,
+    previewUrl: state.preview?.running ? state.preview.url : undefined,
+    publishedUrl,
+  })
+  const snippets = assistantSnippets({ slug: state.effectiveDeployment?.slug || project.title, root: state.root ?? state.cwd })
+  return <>
+    <Panel title="Readable by AI assistants" description="Every build of the site includes these files, so assistants such as Claude, ChatGPT, Cursor, and Codex learn your product from the pages you approved." flush>
+      <div class="vrows">
+        {files.map((file) => <div key={file.label} class="vrow settings-row static">
+          <span class="vrow-label">{file.label}<small>{file.detail}</small></span>
+          <span class="vrow-value">{file.url ? <a href={file.url} target="_blank" rel="noreferrer"><code>{file.path}</code></a> : <code>{file.path}</code>}</span>
+        </div>)}
+      </div>
+      {!base && <p class="assistant-hint">{project.generator === 'doxbrix' ? 'Start the preview or publish the site to open these files.' : 'Publish the site to open these files.'}</p>}
+    </Panel>
+    <Panel title="Connect this documentation to your coding assistant" description="Your assistant can search and read these pages while it works, including edits that are not published yet. It runs on this computer and reads this project folder; nothing is uploaded.">
+      <div class="assistant-snippets">
+        {snippets.map((snippet) => <AssistantSnippetBlock key={snippet.id} snippet={snippet} />)}
+      </div>
+    </Panel>
+  </>
+}
+
+function AssistantSnippetBlock({ snippet }: { snippet: AssistantSnippet }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    void navigator.clipboard?.writeText(snippet.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600) }).catch(() => undefined)
+  }
+  return <section class="assistant-snippet" aria-label={`${snippet.label} setup`}>
+    <header>
+      <span><strong>{snippet.label}</strong><small>{snippet.where}</small></span>
+      <Button size="sm" tone="ghost" icon={copied ? 'check' : 'copy'} onClick={copy}>{copied ? 'Copied' : 'Copy'}</Button>
+    </header>
+    <pre><code>{snippet.text}</code></pre>
+  </section>
 }
 
 /** One settings fact: label left, current value right, a chevron when it opens a sheet. */

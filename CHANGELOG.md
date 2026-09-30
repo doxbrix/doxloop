@@ -5,6 +5,24 @@ uses semantic versioning after its first stable release.
 
 ## Unreleased
 
+### Added
+
+- **Documentation sites are readable by AI assistants.** Every static build
+  and export now includes `llms.txt` (an index of the pages in navigation
+  order, following llmstxt.org), `llms-full.txt` (the whole documentation as
+  one Markdown file, capped at 8 MB with long pages truncated at 40 KB), and a
+  clean Markdown copy beside each page at its address plus `.md`. Doxbrix
+  components such as callouts, steps, tabs, cards, code groups, and API
+  endpoints are flattened into plain Markdown. Sites built by another
+  generator get the same files unless the generator already writes its own
+  `llms.txt` or builds inside the pages folder (Static HTML, VitePress). The
+  Doxbrix preview serves them too, so they can be checked before publishing.
+- **Connect a coding assistant to your documentation.** Settings → AI
+  assistants shows copyable setup for Claude Code, Codex, and Cursor. The
+  assistant then searches, lists, and reads the project's pages through a
+  local MCP server, including edits that are not published yet. It runs on
+  this computer and never uploads the pages.
+
 ## 0.2.1 - 2026-09-29
 
 ### Changed

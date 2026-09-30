@@ -10,6 +10,7 @@ import { buildDoxbrixStaticSite } from './doxbrix-build.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
 import { loadGeneratorAdapter } from './generators.js'
+import { addLlmsOutputToBuild } from './llms-output.js'
 import { loadProject } from './project.js'
 import { validateProject } from './validation.js'
 
@@ -58,6 +59,8 @@ export async function exportStaticSite(options: ExportSiteOptions): Promise<Expo
       const siteUrl = options.siteUrl ?? process.env.DOXLOOP_SITE_URL ?? 'https://example.com'
       await runLocalBuild(adapter.id, adapter.build.command, root, siteUrl)
       builtOutput = containedOutput(root, adapter.build.outputDir)
+      const publicUrl = options.siteUrl ?? process.env.DOXLOOP_SITE_URL
+      await addLlmsOutputToBuild(root, builtOutput, { ...(publicUrl ? { siteUrl: publicUrl } : {}), ...(options.basePath ? { basePath: options.basePath } : {}) })
     }
     if (overlaps(outputDir, builtOutput)) {
       throw new DoxloopError('Export output must be different from the generator build directory.')

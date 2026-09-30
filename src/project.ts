@@ -645,10 +645,25 @@ export async function loadPages(root: string, project: DoxloopProject): Promise<
   const collections = await documentationCollections(root, project)
   const sets = await Promise.all(collections.map(async (collection) => {
     const directory = await resolveContainedDirectory(root, collection.directory, 'Collection directory', { allowRoot: project.generator === 'doxbrix' })
-    return listFiles(directory, extensions, { ...(directory === resolve(root) ? { ignoredDirectories: ROOT_CONTENT_IGNORED_DIRECTORIES } : {}) })
+    return listFiles(directory, extensions, { ...(directory === resolve(root) ? { ignoredDirectories: await rootIgnoredDirectories(directory) } : {}) })
   }))
   return [...new Set(sets.flat())].sort()
 
+}
+
+/**
+ * A Doxbrix static build inside the project (the default `build/`) carries a
+ * Markdown copy of every page for AI assistants. It is output, never content,
+ * so a folder holding the build's own `__doxloop/doxbrix.css` is skipped.
+ */
+async function rootIgnoredDirectories(root: string): Promise<ReadonlySet<string>> {
+  const ignored = new Set(ROOT_CONTENT_IGNORED_DIRECTORIES)
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (entry.isDirectory() && !ignored.has(entry.name) && await pathExists(join(root, entry.name, '__doxloop', 'doxbrix.css'))) {
+      ignored.add(entry.name)
+    }
+  }
+  return ignored
 }
 
 /**

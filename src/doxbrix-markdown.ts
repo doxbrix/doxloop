@@ -10,19 +10,19 @@
 
 import hljs from 'highlight.js/lib/common'
 
-type Props = Record<string, string | boolean>
+export type Props = Record<string, string | boolean>
 
-interface ElNode {
+export interface ElNode {
   type: 'el'
   name: string
   props: Props
   inner: string
 }
-interface MdNode {
+export interface MdNode {
   type: 'md'
   text: string
 }
-type Node = ElNode | MdNode
+export type Node = ElNode | MdNode
 
 export interface TocEntry {
   id: string
@@ -144,9 +144,10 @@ function renderParseError(msg: string): string {
 
 // ---------------------------------------------------------------------------
 // Tokenizer: split a source into top-level component elements and markdown runs.
+// Exported for the Markdown flattener, which walks the same component tree.
 // ---------------------------------------------------------------------------
 
-function extractNodes(src: string): Node[] {
+export function extractNodes(src: string): Node[] {
   const lines = src.split('\n')
   const nodes: Node[] = []
   let md: string[] = []
@@ -281,7 +282,7 @@ function readOpenTag(s: string):
   return { name, props: parseProps(inside.replace(/\/\s*$/, '')), selfClosed, tagEnd: i + 1 }
 }
 
-function parseProps(attrStr: string): Props {
+export function parseProps(attrStr: string): Props {
   const props: Props = {}
   const re = /([A-Za-z_][\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}))?/g
   let m: RegExpExecArray | null
@@ -344,7 +345,7 @@ function isTagBoundary(c: string | undefined): boolean {
 // Component renderers (emit reader `dp-` classes).
 // ---------------------------------------------------------------------------
 
-const CALLOUTS: Record<string, { icon: string; cls: string }> = {
+export const CALLOUTS: Record<string, { icon: string; cls: string }> = {
   Info: { icon: 'ℹ️', cls: 'callout-info' },
   Note: { icon: '📝', cls: 'callout-note' },
   Tip: { icon: '💡', cls: 'callout-tip' },
@@ -1019,11 +1020,11 @@ function inline(text: string): string {
 // Small helpers.
 // ---------------------------------------------------------------------------
 
-function childElements(inner: string, name: string): ElNode[] {
+export function childElements(inner: string, name: string): ElNode[] {
   return extractNodes(inner).filter((n): n is ElNode => n.type === 'el' && n.name === name)
 }
 
-function parseFences(src: string): { lang: string; label: string; code: string }[] {
+export function parseFences(src: string): { lang: string; label: string; code: string }[] {
   const lines = src.split('\n')
   const blocks: { lang: string; label: string; code: string }[] = []
   let i = 0

@@ -6,6 +6,7 @@ import matter from 'gray-matter'
 import { renderMarkdown } from './doxbrix-markdown.js'
 import { DoxloopError } from './errors.js'
 import { listFiles, resolveContainedDirectory } from './fs.js'
+import { writeLlmsOutput } from './llms-output.js'
 import { loadQualityConfig } from './quality-config.js'
 import { reverifyClaims } from './quality-claims.js'
 import {
@@ -131,6 +132,8 @@ export async function buildDoxbrixStaticSite(
   await writeFile(join(outputDir, '__doxloop', 'search-index.json'), `${JSON.stringify(search, null, 2)}\n`, 'utf8')
   await writeFile(join(outputDir, 'sitemap.xml'), sitemapXml(sitemap), 'utf8')
   await writeFile(join(outputDir, 'robots.txt'), robotsTxt(siteUrl), 'utf8')
+  // llms.txt, llms-full.txt, and a Markdown copy beside every page, for AI assistants.
+  await writeLlmsOutput(root, outputDir, { ...(siteUrl ? { siteUrl } : {}), basePath })
 
   let assets = 0
   const ignoredDirectories = new Set(ROOT_CONTENT_IGNORED_DIRECTORIES)

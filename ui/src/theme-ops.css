@@ -312,6 +312,17 @@
 .settings-row > .vrow-value > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row:focus-visible { outline-offset: -2px; }
 
+/* Settings → AI assistants: one copyable block per assistant, stacked */
+.assistant-hint { margin: 0; padding: 12px 20px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+.assistant-snippets { display: grid; gap: 16px; }
+.assistant-snippet { display: grid; gap: 8px; min-width: 0; }
+.assistant-snippet > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.assistant-snippet > header > span { display: grid; gap: 2px; min-width: 0; }
+.assistant-snippet > header strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.assistant-snippet > header small { color: var(--muted); font-size: 12.5px; }
+.assistant-snippet pre { margin: 0; padding: 12px 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--subtle); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; white-space: pre; }
+.assistant-snippet pre code { padding: 0; border: 0; background: none; font: inherit; color: inherit; }
+
 /* Application sign-in blocks inside the sheet */
 .capture-signin-embedded { display: grid; gap: 20px; }
 .shell:has(.reference-sidebar-nav) .capture-signin { gap: 0; }

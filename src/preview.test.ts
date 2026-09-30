@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
+  aiReadableFile,
   doxbrixDocument,
   firstSitePage,
   previewErrorPage,
@@ -13,6 +14,7 @@ import {
   docusaurusPreviewInvocation,
 } from '@doxbrix/doxloop-generator-docusaurus'
 import { mkdocsPreviewInvocation } from '@doxbrix/doxloop-generator-mkdocs'
+import { scaffoldProject } from './project.js'
 
 const roots: string[] = []
 
@@ -376,5 +378,24 @@ describe('generator preview', () => {
     expect(html).toContain('<code>doxloop test</code>')
     expect(html).toContain("new EventSource('/__doxloop/events')")
     expect(html).not.toContain('replaceAll')
+  })
+})
+
+describe('AI-readable preview files', () => {
+  test('serves llms.txt, llms-full.txt, and page Markdown, but keeps in-preview .md links on the page', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'doxloop-preview-llms-'))
+    roots.push(parent)
+    const root = await scaffoldProject({ directory: join(parent, 'docs'), title: 'Preview test', sources: [] })
+    const origin = 'http://127.0.0.1:4321'
+    const llms = await aiReadableFile(root, new URL('/llms.txt', origin), {})
+    expect(llms?.type).toBe('text/plain; charset=utf-8')
+    expect(llms?.body).toContain(`(${origin}/quickstart.md)`)
+    expect((await aiReadableFile(root, new URL('/llms-full.txt', origin), {}))?.body).toContain(`Source: ${origin}/quickstart`)
+    const page = await aiReadableFile(root, new URL('/quickstart.md', origin), {})
+    expect(page?.type).toBe('text/markdown; charset=utf-8')
+    expect(page?.body).toMatch(/^# Quickstart\n/)
+    expect(await aiReadableFile(root, new URL('/quickstart.md', origin), { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' })).toBeUndefined()
+    expect(await aiReadableFile(root, new URL('/missing.md', origin), {})).toBeUndefined()
+    expect(await aiReadableFile(root, new URL('/quickstart', origin), {})).toBeUndefined()
   })
 })

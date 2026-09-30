@@ -210,6 +210,7 @@ wizard:
 | 📊 **Coverage by surface** | Shows which discovered product surfaces have documentation evidence and lets you resolve gaps. |
 | ⚙️ **Monitoring** | Polls the source repository on a local schedule and drafts a proposal when documentation goes stale. |
 | 📸 **Guide screenshots** | Gives the agent a scoped browser, verifies every PNG, and embeds images beside the steps they explain. |
+| 🤖 **AI-ready documentation** | Every published site includes `llms.txt`, `llms-full.txt`, and a Markdown copy of each page, so Claude, ChatGPT, Cursor, and Codex learn your product from the pages you approved. **Settings → AI assistants** connects your coding assistant to the same pages. |
 | 🔐 **Local-first control** | Keeps authoring, validation, and preview on your machine. Deploying is a separate confirmed action and credentials never reach the browser. |
 
 ## The workspace
@@ -225,7 +226,7 @@ left navigation shows:
 | **Docs** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
 | **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, ask the agent to revise, and optionally prepare a pull request branch. |
 | **Publish** | Publish to Doxbrix: a pre-publish checklist, public or private access, the live site with its address, changes waiting since the last publish, and **History**. |
-| **Settings** | Change the site title, default agent, audience and voice, terminology and the generated glossary, application screenshot settings, branding (logo, colours, fonts), and see the active generator. |
+| **Settings** | Change the site title, default agent, audience and voice, terminology and the generated glossary, application screenshot settings, branding (logo, colours, fonts), and see the active generator. Connect a coding assistant to the documentation under **AI assistants**. |
 
 **Preview docs** in the top bar starts a local preview of the current
 documentation and opens it in a new tab. The project name at the top of the
@@ -313,7 +314,7 @@ without an agent run.
 
 ### Change project settings
 
-Open **Settings** instead of editing `.doxloop/project.json` by hand. Its five
+Open **Settings** instead of editing `.doxloop/project.json` by hand. Its
 sections manage:
 
 - **General**: site title and the default documentation agent;
@@ -329,11 +330,31 @@ sections manage:
   agent;
 - **Branding**: logo, favicon, colours, colour mode, and fonts for Doxbrix
   sites, or the theme file to edit for other generators; and
-- **Generator**: the generator selected for this workspace.
+- **Generator**: the generator selected for this workspace; and
+- **AI assistants**: the AI-readable files the site publishes and the setup
+  that connects a coding assistant to your pages.
 
 Generator changes are intentionally not performed in place because changing
 frameworks can overwrite generator-native files. Start a new documentation
 project when migrating generators.
+
+### Connect AI assistants
+
+Assistants increasingly learn a product from its documentation, so every site
+Doxloop builds is published in a form they read directly:
+
+- `llms.txt`, an index of every page in navigation order
+  ([llmstxt.org](https://llmstxt.org));
+- `llms-full.txt`, the whole documentation as one Markdown file; and
+- a clean Markdown copy of each page: add `.md` to the page's address.
+
+**Settings → AI assistants** links these files once the preview is running or
+the site is published. The same section connects the documentation to the
+coding assistant you work in. Copy the snippet for Claude Code, Codex, or
+Cursor (any assistant that reads an `mcpServers` JSON file works too), and the
+assistant can search and read your pages while it writes code, including edits
+you have not published yet. The connection runs on your computer and reads the
+project folder; nothing is uploaded.
 
 ### Ask for exactly what you need
 

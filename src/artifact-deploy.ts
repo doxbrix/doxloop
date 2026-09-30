@@ -6,6 +6,7 @@ import { zipSync } from 'fflate'
 import { apiUrl, authenticatedRequest, authenticatedRequestOptional } from './auth.js'
 import { DoxloopError } from './errors.js'
 import { loadGeneratorAdapter } from './generators.js'
+import { addLlmsOutputToBuild } from './llms-output.js'
 import { loadProject } from './project.js'
 import { createStepList, formatDuration } from './progress.js'
 import { validateProject } from './validation.js'
@@ -113,6 +114,9 @@ export async function deployGeneratedSite(options: {
     const building = steps.start(`Building ${adapter.displayName} site locally`)
     await runLocalBuild(adapter.id, adapter.build.command, options.root, siteUrl)
     const outputRoot = containedOutput(options.root, adapter.build.outputDir)
+    // The placeholder URL is only for the generator's own build; llms.txt links fall back to root-relative.
+    const publicUrl = target?.hostedUrl ?? process.env.DOXLOOP_SITE_URL
+    await addLlmsOutputToBuild(options.root, outputRoot, publicUrl ? { siteUrl: publicUrl } : {})
     const packaged = await packageStaticOutput(outputRoot)
     building.done(
       `Built ${adapter.displayName} artifact`,

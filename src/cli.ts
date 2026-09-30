@@ -97,6 +97,7 @@ import {
   validateProjectSourceBoundaries,
 } from './project.js'
 import { crawlDocumentationSite } from './docs-crawl.js'
+import { startDocsMcpServer } from './docs-mcp.js'
 import { describeDocsSite, docsSiteBinding, materializeDocsSiteSnapshot } from './docs-site.js'
 import { importExistingDocumentation } from './project-import.js'
 import { isInteractive, promptConfirm, type PromptIo } from './prompts.js'
@@ -284,6 +285,15 @@ async function main(): Promise<number> {
         port: numberFlag(args, 'port', 4321),
         open: booleanFlag(args, 'open'),
       })
+      return 0
+    }
+    case 'mcp': {
+      const root = await findProjectRoot(cwd).catch(() => {
+        throw new DoxloopError(`No Doxloop documentation project found at ${cwd}. Pass --cwd <project folder> (the folder that holds .doxloop/project.json).`, 2)
+      })
+      // Fail before the client connects when the pages cannot be read at all.
+      await loadProject(root)
+      await startDocsMcpServer(root)
       return 0
     }
     case 'login':
@@ -1264,6 +1274,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     history: ['format', 'limit', 'page', 'deployments'],
     settings: [],
     preview: ['host', 'port', 'open'],
+    mcp: [],
     login: ['api-url', 'token'],
     logout: [],
     whoami: ['api-url'],
@@ -1553,6 +1564,19 @@ Options:
   --port <port>            Listening port (default: 4321)
   --open                   Open the preview in a browser
   --cwd <directory>        Run from this project directory
+`
+  }
+  if (command === 'mcp') {
+    return `Usage: doxloop mcp [options]
+
+Serve this project's documentation to a coding assistant (Claude Code, Codex,
+Cursor) as a local Model Context Protocol server over stdio. The assistant can
+search the pages, read any page as Markdown, and list the navigation. Pages are
+read from disk on each request, so unpublished edits are included. Settings →
+AI assistants in the control center shows the setup for each assistant.
+
+Options:
+  --cwd <directory>        The documentation project to serve (default: current directory)
 `
   }
   if (command === 'sync') {
@@ -1870,6 +1894,9 @@ Publish:
   whoami     Show the current Doxbrix account
   deploy     Publish through the public Doxbrix HTTP API
   export     Build a self-hostable static folder or zip archive
+
+AI assistants:
+  mcp        Serve the documentation to a coding assistant over MCP (stdio)
 
 Global options:
   --cwd <directory>  Run as if started in this directory

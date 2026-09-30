@@ -5,6 +5,7 @@ import { packageStaticOutput, containedOutput, runLocalBuild, writeDryRunArchive
 import { buildDoxbrixStaticSite } from '../doxbrix-build.js'
 import { DoxloopError } from '../errors.js'
 import { loadGeneratorAdapter } from '../generators.js'
+import { addLlmsOutputToBuild } from '../llms-output.js'
 import { recordDeployment } from '../history.js'
 import { loadProject } from '../project.js'
 import { validateProject } from '../validation.js'
@@ -50,6 +51,10 @@ export async function publishStaticTarget(
         const adapter = await loadGeneratorAdapter(options.root, project)
         await runLocalBuild(adapter.id, adapter.build.command, options.root, configured.siteUrl ?? 'https://example.com')
         outputDir = containedOutput(options.root, adapter.build.outputDir)
+        await addLlmsOutputToBuild(options.root, outputDir, {
+          ...(configured.siteUrl ? { siteUrl: configured.siteUrl } : {}),
+          ...(configured.basePath ? { basePath: configured.basePath } : {}),
+        })
       }
       const packaged = await packageStaticOutput(outputDir)
       const bundle: DeployBundle = { outputDir, archive: packaged.archive, files: packaged.files, bytes: packaged.archive.byteLength, sha256: packaged.sha256 }
