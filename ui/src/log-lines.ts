@@ -67,7 +67,14 @@ export function summarizeRunActivity(lines: readonly string[]): RunActivity {
     const session = tagged ? sessionName(tagged[1]!) : ''
     const body = (tagged ? tagged[2]! : text).trim()
     if (session && !sessions.includes(session)) sessions.push(session)
-    if (/^✓ Using \S*capture\S* browser_take_screenshot/.test(body)) screenshots += 1
+    // Screenshots come from three places: the agent's capture browser,
+    // Doxloop's own navigation-only captures, and planning captures reused
+    // as they are. Counting only the first read "0 captured" while 37 were
+    // already in place.
+    const reused = /^Reused (\d+) approved screenshots? from planning/.exec(body)
+    if (reused) screenshots += Number(reused[1])
+    else if (/^Captured \S+ at \S+ -> \S+\.png$/.test(body)) screenshots += 1
+    else if (/^✓ Using \S*capture\S* browser_take_screenshot/.test(body)) screenshots += 1
     else if (/^✓ Running /.test(body)) sourceReads += 1
     else if (session && body.length > 40 && !/^[→✓✗×!]/.test(body) && !/^(?:Using|Running|Codex|Claude|Gemini) /.test(body)) latestNote = { session, text: body }
   }

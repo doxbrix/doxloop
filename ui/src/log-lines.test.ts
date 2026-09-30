@@ -35,4 +35,13 @@ describe('summarizeRunActivity', () => {
       latestNote: { session: 'Existing docs review', text: 'Reading the CLI troubleshooting pages for recurring errors and their fixes.' },
     })
   })
+
+  it('counts screenshots reused from planning and captured by Doxloop itself', () => {
+    const activity = summarizeRunActivity([
+      '12:40:03 Reused 37 approved screenshots from planning.',
+      '12:40:36 Captured tag-appearance/01 at /setting#tags -> assets/guides/tag-appearance/01-tag-metadata-section.png',
+      '12:41:02 [batch 1] ✓ Using doxloop_capture browser_take_screenshot',
+    ])
+    expect(activity.screenshots).toBe(39)
+  })
 })
