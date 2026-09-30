@@ -4,13 +4,14 @@ import { Button, Note, timeText } from './components'
 import type { UiJob } from './types'
 
 type Action = <T>(run: () => Promise<T>, success?: string, reload?: boolean) => Promise<T | undefined>
-type DriftOutcome = 'unchanged' | 'changed' | 'sign-in' | 'unreachable' | 'no-route' | 'missing' | 'error'
+type DriftOutcome = 'unchanged' | 'changed' | 'needs-run' | 'sign-in' | 'unreachable' | 'no-route' | 'missing' | 'error'
 type DriftResult = { file: string; page: string; step: string; expectedState: string; route?: string; outcome: DriftOutcome; difference?: number; detail?: string }
 type ScreenshotState = { recorded: number; recapturable: number; application: string | null; report: { checkedAt: string; recorded: number; results: DriftResult[] } | null }
 
 const OUTCOMES: Record<DriftOutcome, string> = {
   unchanged: 'unchanged',
   changed: 'changed',
+  'needs-run': 'reached by clicking (a documentation run re-captures them)',
   'sign-in': 'behind sign-in',
   unreachable: 'unreachable',
   'no-route': 'without a route',

@@ -21,7 +21,7 @@ import { applyDirectEdit, safePath } from './direct-edit.js'
 import { DoxloopError } from './errors.js'
 import { assertInside, pathExists } from './fs.js'
 import { loadProject } from './project.js'
-import { imageFacts, readScreenshotLedger, writeScreenshotLedger, type ScreenshotRecord } from './screenshot-ledger.js'
+import { imageFacts, reachedByInteraction, readScreenshotLedger, writeScreenshotLedger, type ScreenshotRecord } from './screenshot-ledger.js'
 
 export const SCREENSHOT_DRIFT_DIRECTORY = join('.doxloop', 'cache', 'screenshot-drift')
 export const SCREENSHOT_DRIFT_REPORT = join(SCREENSHOT_DRIFT_DIRECTORY, 'report.json')
@@ -30,7 +30,7 @@ export const SCREENSHOT_DRIFT_REPORT = join(SCREENSHOT_DRIFT_DIRECTORY, 'report.
 export const CHANGED_SHARE = 0.01
 const LOGIN_ROUTE = /(?:^|[/#])(?:login|log-in|sign-?in|signin|auth|oauth|sso)(?:[/?#]|$)/i
 
-export type DriftOutcome = 'unchanged' | 'changed' | 'sign-in' | 'unreachable' | 'no-route' | 'missing' | 'error'
+export type DriftOutcome = 'unchanged' | 'changed' | 'needs-run' | 'sign-in' | 'unreachable' | 'no-route' | 'missing' | 'error'
 
 export interface DriftResult {
   file: string
@@ -94,6 +94,10 @@ async function recheck(root: string, record: ScreenshotRecord, base: string, cap
   const absolute = join(root, record.file)
   if (!(await pathExists(absolute))) return { ...result, outcome: 'missing', detail: 'The image is no longer in the project.' }
   if (!record.route) return { ...result, outcome: 'no-route', detail: 'This screenshot was captured without a recorded route; the next documentation run that captures it records one.' }
+  // Opening the route shows the page without the dialog, menu, or tab the
+  // screenshot needed, which read as "91% changed" and offered to replace a
+  // dialog screenshot with the bare page behind it.
+  if (record.interactive || reachedByInteraction(record)) return { ...result, outcome: 'needs-run', detail: 'This screen is reached by clicking or typing, so opening its route does not show it; a documentation run re-captures it.' }
   let url: string
   try { url = applicationUrl(base, record.route).toString() } catch { return { ...result, outcome: 'error', detail: `The route ${record.route} is not a valid address.` } }
   let shot: CapturedPage

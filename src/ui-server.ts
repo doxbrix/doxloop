@@ -116,7 +116,7 @@ import {
 import { readPageClaimEvidence } from './claim-evidence.js'
 import { testPageExamples } from './example-runs.js'
 import { readDriftReport, refreshScreenshots } from './screenshot-drift.js'
-import { readScreenshotLedger } from './screenshot-ledger.js'
+import { reachedByInteraction, readScreenshotLedger } from './screenshot-ledger.js'
 import { walkthroughFixRequest, walkthroughForPage } from './reader-walkthrough.js'
 import { measureQuality } from './quality-score.js'
 import {
@@ -1412,7 +1412,7 @@ async function handleApi(
     const ledger = await readScreenshotLedger(root)
     sendJson(response, 200, {
       recorded: ledger.screenshots.length,
-      recapturable: ledger.screenshots.filter((record) => record.route).length,
+      recapturable: ledger.screenshots.filter((record) => record.route && !record.interactive && !reachedByInteraction(record)).length,
       application: (await loadProject(root)).application?.baseUrl ?? null,
       report: await readDriftReport(root) ?? null,
     })

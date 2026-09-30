@@ -127,7 +127,7 @@ export function isNavigationOnlyStep(action: string): { path?: string } | undefi
 }
 
 /** Whether the prose (routes removed, so "/settings/upload" is not an upload) names an interaction. */
-function needsInteraction(text: string): boolean {
+export function needsInteraction(text: string): boolean {
   const prose = text.replace(new RegExp(ABSOLUTE_URL.source, 'gi'), ' ').replace(new RegExp(PATH_TOKEN.source, 'g'), ' ')
   return INTERACTION_VERB.test(prose)
 }

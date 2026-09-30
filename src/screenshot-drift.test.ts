@@ -37,11 +37,13 @@ async function project() {
   await writeFile(join(root, 'images', 'guides', 'projects', 'list.png'), image())
   await writeFile(join(root, 'images', 'guides', 'projects', 'settings.png'), image(200))
   await writeFile(join(root, 'images', 'guides', 'projects', 'old.png'), image())
+  await writeFile(join(root, 'images', 'guides', 'projects', 'dialog.png'), image(120))
   await mkdir(join(root, '.doxloop'), { recursive: true })
   await writeFile(join(root, SCREENSHOT_MANIFEST_FILE), JSON.stringify({ schemaVersion: 1, guides: [{ page: 'projects', steps: [
     { id: 'list', action: 'Open the project list', expectedState: 'The project list shows two projects', status: 'verified', file: 'images/guides/projects/list.png', route: '/projects' },
     { id: 'settings', action: 'Open project settings', expectedState: 'The settings form is open', status: 'verified', file: 'images/guides/projects/settings.png', route: '/#/settings' },
     { id: 'modal', action: 'Click Delete', expectedState: 'The delete dialog asks to confirm', status: 'verified', file: 'images/guides/projects/old.png' },
+    { id: 'dialog', action: 'Click New project', expectedState: 'The new project dialog is open', status: 'verified', file: 'images/guides/projects/dialog.png', route: '/projects' },
     { id: 'skipped', action: 'Open billing', expectedState: 'Billing is shown', status: 'text-only' },
   ] }] }))
   return root
@@ -51,9 +53,11 @@ describe('screenshot ledger', () => {
   test('records verified captures with route, size, and hash, and keeps capture time for unchanged bytes', async () => {
     const root = await project()
     const project_ = await loadProject(root)
-    expect(await recordScreenshots(root, project_)).toEqual({ recorded: 3, recapturable: 2 })
+    // The dialog has a route, but only a click reaches it.
+    expect(await recordScreenshots(root, project_)).toEqual({ recorded: 4, recapturable: 2 })
     const first = await readScreenshotLedger(root)
     expect(first.screenshots.map((record) => [record.file, record.route, record.width, record.height])).toEqual([
+      ['images/guides/projects/dialog.png', '/projects', 400, 240],
       ['images/guides/projects/list.png', '/projects', 400, 240],
       ['images/guides/projects/old.png', undefined, 400, 240],
       ['images/guides/projects/settings.png', '/#/settings', 400, 240],
@@ -63,8 +67,9 @@ describe('screenshot ledger', () => {
     await rm(join(root, 'images', 'guides', 'projects', 'old.png'))
     await recordScreenshots(root, project_)
     const second = await readScreenshotLedger(root)
-    expect(second.screenshots.map((record) => record.file)).toEqual(['images/guides/projects/list.png', 'images/guides/projects/settings.png'])
-    expect(second.screenshots[0]!.capturedAt).toBe(first.screenshots[0]!.capturedAt)
+    expect(second.screenshots.map((record) => record.file)).toEqual(['images/guides/projects/dialog.png', 'images/guides/projects/list.png', 'images/guides/projects/settings.png'])
+    expect(second.screenshots[1]!.capturedAt).toBe(first.screenshots[1]!.capturedAt)
+    expect(first.screenshots[0]!.interactive).toBe(true)
   })
 })
 
@@ -87,8 +92,11 @@ describe('screenshot drift', () => {
         return { png: image(20, [200, 40, 40]), finalUrl: 'http://localhost:4999/#/login', status: 200, hasPasswordField: true }
       },
     })
+    // The dialog screenshot is never re-captured by opening its route: that
+    // shows the page behind the dialog and would offer to replace it.
     expect(visited).toEqual(['http://localhost:4999/projects', 'http://localhost:4999/#/settings'])
     expect(report.results.map((result) => [result.file, result.outcome])).toEqual([
+      ['images/guides/projects/dialog.png', 'needs-run'],
       ['images/guides/projects/list.png', 'unchanged'],
       ['images/guides/projects/old.png', 'no-route'],
       ['images/guides/projects/settings.png', 'sign-in'],

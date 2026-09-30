@@ -910,7 +910,7 @@ async function screenshotsCommand(args: ParsedArgs, cwd: string): Promise<number
     const report = await checkScreenshotDrift(root, { ...(files.length > 0 ? { files } : {}), log: (line) => process.stdout.write(`${line}\n`) })
     if (flag(args, 'format') === 'json') process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
     const count = (outcome: string) => report.results.filter((result) => result.outcome === outcome).length
-    process.stdout.write(`\nChecked ${report.results.length} of ${report.recorded} recorded screenshot${report.recorded === 1 ? '' : 's'}: ${count('changed')} changed, ${count('unchanged')} unchanged, ${count('sign-in')} behind sign-in, ${count('unreachable')} unreachable, ${count('no-route')} without a route.\n`)
+    process.stdout.write(`\nChecked ${report.results.length} of ${report.recorded} recorded screenshot${report.recorded === 1 ? '' : 's'}: ${count('changed')} changed, ${count('unchanged')} unchanged, ${count('needs-run')} reached by clicking (re-captured by a documentation run), ${count('sign-in')} behind sign-in, ${count('unreachable')} unreachable, ${count('no-route')} without a route.\n`)
     return 0
   }
   if (action === 'refresh') {

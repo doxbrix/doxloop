@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { PNG } from 'pngjs'
+import { needsInteraction } from './deterministic-capture.js'
 import { pathExists } from './fs.js'
 import { SCREENSHOT_MANIFEST_FILE } from './screenshot-workflow.js'
 import type { DoxloopProject } from './types.js'
@@ -35,6 +36,17 @@ export interface ScreenshotRecord {
   height: number
   sha256: string
   capturedAt: string
+  /**
+   * The screen was reached by clicking or typing (a dialog, a menu, a
+   * selected tab, a filled form), so opening its route alone does not show
+   * it again; only a documentation run can re-capture it.
+   */
+  interactive?: boolean
+}
+
+/** A dialog, menu, tab, or any click or typing between the route and the screenshot. */
+export function reachedByInteraction(record: Pick<ScreenshotRecord, 'action' | 'expectedState'>): boolean {
+  return needsInteraction(record.action) || /\b(?:dialog|modal|menu|popover|drop-?down|picker|tooltip|drawer|tab|toast|confirmation)\b/i.test(`${record.action} ${record.expectedState}`)
 }
 
 export interface ScreenshotLedger {
@@ -84,7 +96,8 @@ export async function imageFacts(path: string): Promise<{ sha256: string; width:
  * Merge a run's verified captures into the workspace's ledger. An image whose
  * bytes did not change keeps its original capture time; entries whose file
  * no longer exists are dropped. Returns how many screenshots are recorded
- * and how many of them can be re-captured without an agent (have a route).
+ * and how many of them can be re-captured without an agent (a route, and no
+ * clicks between the route and the screen).
  */
 export async function recordScreenshots(workspace: string, project: Pick<DoxloopProject, 'application'>): Promise<{ recorded: number; recapturable: number }> {
   const ledger = await readScreenshotLedger(workspace)
@@ -112,11 +125,13 @@ export async function recordScreenshots(workspace: string, project: Pick<Doxloop
         ...facts,
         capturedAt: previous && previous.sha256 === facts.sha256 ? previous.capturedAt : now,
       })
+      const record = byFile.get(step.file)!
+      if (reachedByInteraction(record)) record.interactive = true
     }
   }
   const kept: ScreenshotRecord[] = []
   for (const record of byFile.values()) if (await pathExists(join(workspace, record.file))) kept.push(record)
   if (kept.length === 0 && ledger.screenshots.length === 0) return { recorded: 0, recapturable: 0 }
   await writeScreenshotLedger(workspace, { schemaVersion: 1, screenshots: kept })
-  return { recorded: kept.length, recapturable: kept.filter((record) => record.route).length }
+  return { recorded: kept.length, recapturable: kept.filter((record) => record.route && !record.interactive).length }
 }
