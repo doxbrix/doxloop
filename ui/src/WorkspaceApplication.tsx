@@ -2026,7 +2026,11 @@ export function workflowActivityLabel(type: string): string {
   if (type === 'deploy:dry-run') return 'Validating the deployment'
   if (type === 'deploy') return 'Deploying documentation'
   if (type === 'preview') return 'Running the local preview'
-  return 'Documentation workflow in progress'
+  if (type === 'walkthrough') return 'Walking through a guide as a new reader'
+  if (type === 'screenshots:check') return 'Checking screenshots against the application'
+  if (type === 'export') return 'Exporting the site'
+  // The status is shown beside the label, so the fallback names no state.
+  return 'Documentation task'
 }
 
 function workflowActivityIcon(type: string): string {

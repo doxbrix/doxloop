@@ -8,8 +8,8 @@ function job(overrides: Partial<UiJob>): UiJob {
 
 describe('activity feed labels', () => {
   it('names every job type the control center starts', () => {
-    for (const type of ['sync', 'login', 'agent:install', 'capture', 'generator', 'deploy', 'deploy:dry-run', 'preview', 'proposal:revise:run-1', 'proposal:resume:run-1', 'author:update', 'page-edit:run-2', 'plan:propose']) {
-      expect(workflowActivityLabel(type), type).not.toBe('Documentation workflow in progress')
+    for (const type of ['sync', 'login', 'agent:install', 'capture', 'generator', 'deploy', 'deploy:dry-run', 'preview', 'proposal:revise:run-1', 'proposal:resume:run-1', 'author:update', 'page-edit:run-2', 'plan:propose', 'walkthrough', 'screenshots:check', 'export']) {
+      expect(workflowActivityLabel(type), type).not.toBe('Documentation task')
     }
   })
 })
