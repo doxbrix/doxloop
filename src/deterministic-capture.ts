@@ -95,6 +95,7 @@ interface Manifest {
 const DEFAULT_TIME_BUDGET_MS = 4 * 60_000
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 }
 const GOTO_TIMEOUT_MS = 30_000
+const NETWORK_IDLE_MS = 5_000
 const SETTLE_ATTEMPTS = 4
 const SETTLE_DELAY_MS = 1_200
 /** Share of one colour at or above which a screenshot is treated as blank or still loading. */
@@ -476,13 +477,12 @@ export async function openBrowser(input: Pick<DeterministicCaptureInput, 'projec
     async capturePage(url) {
       const page = await context.newPage()
       try {
-        let response: { status(): number; url(): string } | null
-        try {
-          response = await page.goto(url, { waitUntil: 'networkidle', timeout: GOTO_TIMEOUT_MS })
-        } catch (error) {
-          if (!isTimeout(error)) throw error
-          response = await page.goto(url, { waitUntil: 'load', timeout: GOTO_TIMEOUT_MS })
-        }
+        // Wait for the page to load, then briefly for the network to go
+        // quiet. Apps that hold a connection open (Memos streams updates)
+        // never reach network idle, and waiting for it cost 30 seconds per
+        // screenshot before falling back.
+        const response: { status(): number; url(): string } | null = await page.goto(url, { waitUntil: 'load', timeout: GOTO_TIMEOUT_MS })
+        await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_MS }).catch(() => {})
         let png = await page.screenshot({ type: 'png' })
         for (let attempt = 1; attempt < SETTLE_ATTEMPTS; attempt += 1) {
           if (dominantColorShare(PNG.sync.read(png)) < UNIFORM_SHARE) break
