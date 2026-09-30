@@ -22,6 +22,50 @@ uses semantic versioning after its first stable release.
   assistant then searches, lists, and reads the project's pages through a
   local MCP server, including edits that are not published yet. It runs on
   this computer and never uploads the pages.
+- **Walk through a guide as a first-time reader.** Pages → Evidence has a
+  Reader walkthrough: an agent follows the page step by step, in the test
+  application when one is set up and against the product source for commands,
+  flags, and configuration, and reports each step as worked, stuck, had to
+  guess, looked different, or not tried, with the prerequisites the page never
+  states and a score out of 100. The session is read-only. One click turns the
+  findings into an agent edit of the page.
+- **Screenshots are re-checked against the running application.** Every run
+  now records where each product screenshot was taken, in
+  `.doxloop/screenshots.json`. Pages → Images & files → Screenshots against
+  the application re-captures each one with the saved sign-in, compares it
+  pixel by pixel, and shows changed screens side by side. Replacing one or all
+  of them is a single edit you can undo.
+- **Every claim shows the source lines behind it.** The evidence map can cite
+  the exact lines each claim rests on (`claimSources`), and Doxloop finds them
+  when the writer did not. Pages → Evidence lists each claim with its state
+  and an excerpt of those lines. A claim whose value (status code, flag,
+  environment variable, version) the cited lines contradict is sent back to
+  the writer before the proposal is ready.
+- **Examples are checked the way a reader uses them.** JSON and YAML blocks
+  must parse. curl commands and raw HTTP requests aimed at the product's API
+  must name an operation in its OpenAPI contract, and their JSON bodies must
+  satisfy its request schema. The end-of-run fix pass corrects any example
+  that fails. Pages → Evidence can also send a page's read-only requests to a
+  test server and compare each status with what the page expects.
+
+### Changed
+
+- **Guesswork is sent back to the writer.** Pages that hedge about the
+  product ("probably", "appears to", "depending on your configuration") get a
+  warning, and the fix pass replaces each guess with what the source shows.
+- **A sleeping laptop no longer kills a run.** Time limits and the idle
+  watchdog count only the time the computer is awake, the run log says when
+  it slept, and Doxloop keeps the computer from sleeping while it is plugged
+  in.
+- **Sign-in problems are caught before a run, not halfway through it.** Every
+  action that starts an agent checks that the assistant is signed in first,
+  including page edits, Monitoring runs, and proposal revisions. A generation
+  that stops on a sign-in or usage limit says so and can continue with
+  another assistant; the pages already written are kept.
+- **Expired sessions are caught before capture.** The application check
+  opens the page in a browser with the saved session, so an expired session is
+  reported before the run starts. Single-page apps return HTTP 200 even when
+  signed out, so the old HTTP-only check could not tell.
 
 ## 0.2.1 - 2026-09-29
 

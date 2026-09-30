@@ -205,11 +205,14 @@ wizard:
 | 🔁 **Rewrite existing docs** | Crawls the documentation you publish today, reports coverage gaps, contradicted claims, and obsolete pages against your sources, and rewrites it with redirects from every old page. |
 | 🧭 **Plan before writing** | Proposes readers, page coverage, and navigation as an editable plan that you approve before anything is written. |
 | ✍️ **Generator-native output** | Creates the right Markdown, MDX, configuration, components, and theme for the selected generator. |
-| ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, page depth, and generator conventions on every proposal and before every deploy. |
+| ✅ **Built-in quality checks** | Validates pages, navigation, links, metadata, code fences, page depth, and generator conventions on every proposal and before every deploy. Hedged guesses about the product go back to the writer to be settled from the source. |
+| 🧾 **Claims you can check** | Each claim a page makes links to the source lines behind it. A claim those lines contradict is sent back to be fixed before you review it. |
+| 🧪 **Tested examples** | JSON and YAML must parse, API requests must match the OpenAPI contract and its request schemas, and read-only requests can be sent to a test server. |
+| 🚶 **Reader walkthrough** | An agent follows a guide as a first-time reader and reports every step where a real reader would get stuck, guess, or see a different screen. |
 | 🔍 **Reviewable proposals** | Every run lands in an isolated proposal with rendered and source comparisons, per-change acceptance, rationale, and evidence. |
 | 📊 **Coverage by surface** | Shows which discovered product surfaces have documentation evidence and lets you resolve gaps. |
 | ⚙️ **Monitoring** | Polls the source repository on a local schedule and drafts a proposal when documentation goes stale. |
-| 📸 **Guide screenshots** | Gives the agent a scoped browser, verifies every PNG, and embeds images beside the steps they explain. |
+| 📸 **Guide screenshots** | Gives the agent a scoped browser, verifies every PNG, and embeds images beside the steps they explain. Later, Doxloop re-captures each screenshot from the running application and shows the ones whose screen changed. |
 | 🤖 **AI-ready documentation** | Every published site includes `llms.txt`, `llms-full.txt`, and a Markdown copy of each page, so Claude, ChatGPT, Cursor, and Codex learn your product from the pages you approved. **Settings → AI assistants** connects your coding assistant to the same pages. |
 | 🔐 **Local-first control** | Keeps authoring, validation, and preview on your machine. Deploying is a separate confirmed action and credentials never reach the browser. |
 
@@ -223,7 +226,7 @@ left navigation shows:
 | **Home** | Follow the loop from sources through plan, write, review, and publish. See what needs your review, overall coverage, the published address, and recent activity. Press ⌘K to search pages, screens, and actions from anywhere. |
 | **Sources** | Connect and test local folders, Git repositories, OpenAPI specifications, and existing documentation sites. Set documentation ownership per source, review coverage by surface, resolve gaps, and configure **Monitoring**. |
 | **Plan** | Describe what readers need, choose the planning agent, model, and screenshot behaviour, review and edit the plan, and approve generation. The page also keeps the **Update history** of every request. |
-| **Docs** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Navigation** view arranges the sidebar and **Images & files** manages uploads and alt text. |
+| **Docs** | Browse every page by navigation section, preview it, edit its metadata, and describe a focused agent edit. Review the rendered and source changes before accepting, rejecting, refining, or undoing them. The **Evidence** tab shows each claim with the source lines behind it, tests the page's examples, and walks through the page as a first-time reader. The **Navigation** view arranges the sidebar. **Images & files** manages uploads and alt text, and checks product screenshots against the running application. |
 | **Review** | Inspect each proposal file by file, read why each change was made, accept changes at any granularity, ask the agent to revise, and optionally prepare a pull request branch. |
 | **Publish** | Publish to Doxbrix: a pre-publish checklist, public or private access, the live site with its address, changes waiting since the last publish, and **History**. |
 | **Settings** | Change the site title, default agent, audience and voice, terminology and the generated glossary, application screenshot settings, branding (logo, colours, fonts), and see the active generator. Connect a coding assistant to the documentation under **AI assistants**. |
