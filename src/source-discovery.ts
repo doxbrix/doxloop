@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { matchesAnyGlob } from './globs.js'
 import { readDocsSiteManifest } from './docs-site.js'
-import { loadOpenApiSource, OPENAPI_FILE_NAME, OPENAPI_HEADER, OPENAPI_NOISE_PATH, parseOpenApi, type LoadedOpenApi } from './openapi.js'
+import { loadOpenApiSource, OPENAPI_FILE_NAME, OPENAPI_HEADER, OPENAPI_NOISE_PATH, parseRepositoryOpenApi, type LoadedOpenApi } from './openapi.js'
 import { loadPages, loadProject, sourceKind } from './project.js'
 import { sourceSnapshotFingerprints } from './sync.js'
 import type { DoxloopProject, SourceBinding, SourceKind } from './types.js'
@@ -396,7 +396,7 @@ async function repositoryOpenApiEvidence(source: string, files: Array<{ path: st
     } catch { continue }
     if (!OPENAPI_HEADER.test(content.slice(0, 4096))) continue
     try {
-      evidence.push(...openApiEvidence(source, sourcePath, parseOpenApi(content, sourcePath)))
+      evidence.push(...openApiEvidence(source, sourcePath, parseRepositoryOpenApi(content, sourcePath)))
       found += 1
     } catch (error) {
       warnings.push(`API contract ${sourcePath} could not be read: ${error instanceof Error ? error.message : String(error)}`)

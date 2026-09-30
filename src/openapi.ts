@@ -96,6 +96,26 @@ export function parseOpenApi(content: string, location = 'OpenAPI specification'
   }
 }
 
+/**
+ * Parse a specification found inside a repository. Generated contracts often
+ * leave `info.title` or `info.version` empty (protoc-gen-openapi writes
+ * `title: ""`, as in Memos' `proto/gen/openapi.yaml`); the operations are
+ * still the product's contract, so the missing metadata is filled in from the
+ * file name instead of discarding the whole contract.
+ */
+export function parseRepositoryOpenApi(content: string, location: string): LoadedOpenApi {
+  try {
+    return parseOpenApi(content, location)
+  } catch (error) {
+    if (!/missing the required info\.(?:title|version)/.test(String(error))) throw error
+    const raw = content.trimStart().startsWith('{') ? JSON.parse(content) as Record<string, unknown> : parseDocument(content).toJS({ maxAliasCount: 50 }) as Record<string, unknown>
+    const info = record(raw.info)
+    const name = location.split('/').pop()?.replace(/\.[^.]+$/, '') || 'API'
+    raw.info = { ...info, title: text(info.title) ?? name, version: text(info.version) ?? '0.0.0' }
+    return parseOpenApi(JSON.stringify(raw), location)
+  }
+}
+
 /** Load and validate either a local file or a safely fetched remote specification. */
 export async function loadOpenApiSource(
   root: string,

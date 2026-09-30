@@ -7,7 +7,7 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
-import { cachedRemoteOpenApi, OPENAPI_FILE_NAME, OPENAPI_HEADER, OPENAPI_NOISE_PATH, parseOpenApi, type LoadedOpenApi } from './openapi.js'
+import { cachedRemoteOpenApi, OPENAPI_FILE_NAME, OPENAPI_HEADER, OPENAPI_NOISE_PATH, parseRepositoryOpenApi, type LoadedOpenApi } from './openapi.js'
 import { isSpecUrl, sourceKind } from './project.js'
 import type { DoxloopProject } from './types.js'
 
@@ -32,7 +32,7 @@ async function parseFile(path: string, label: string): Promise<LoadedOpenApi | u
   let loaded: LoadedOpenApi | undefined
   try {
     const content = await readFile(path, 'utf8')
-    loaded = OPENAPI_HEADER.test(content.slice(0, 4096)) ? parseOpenApi(content, label) : undefined
+    loaded = OPENAPI_HEADER.test(content.slice(0, 4096)) ? parseRepositoryOpenApi(content, label) : undefined
   } catch {
     loaded = undefined
   }
