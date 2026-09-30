@@ -226,7 +226,7 @@ export function batchContract(input: BatchContractInput): string {
   lines.push(`BATCH ${batch.index} OF ${batch.total}. This session writes only the pages listed under "Pages in this batch". Doxloop runs the other batches in separate sessions${input.concurrent ? ' (several at the same time in this workspace)' : ''}, validates the workspace after each one, and sends any defect back to a short follow-up session, so do not spend turns on anything outside this list.`)
   if (artifacts.pack) {
     lines.push('')
-    lines.push(`Start from the evidence pack at ${artifacts.pack}: it holds the excerpts of every source file and existing-documentation page the plan cites for these pages. Write from the pack; open a full source file only for a claim the pack does not settle, and then read the specific lines you need.`)
+    lines.push(`Start from the evidence pack at ${artifacts.pack}: it holds the excerpts of every source file and existing-documentation page the plan cites for these pages. Write from the pack; open a full source file only for a claim the pack does not settle, and then read the specific lines you need. When the pack leaves a behavior uncertain, read those lines rather than writing around it: "probably", "likely", "appears to", or "depending on your configuration" about the product itself is flagged by Doxloop and sent back for a fix round.`)
   }
   if (artifacts.slice) {
     lines.push('')
@@ -373,7 +373,7 @@ export function fixContract(input: {
   }
   const sections = [...byFile.entries()].map(([file, issues]) => `${file}:\n${issues.map((issue) => `  - ${issue.severity} ${issue.code}: ${issue.message}`).join('\n')}`)
   const depth = input.issues.some((issue) => issue.code === 'thin-page' || issue.code === 'thin-procedure')
-  return `FIX ROUND ${input.round} OF ${input.maxRounds}. Doxloop validated the pages this run wrote and found the problems below. Fix exactly these problems in exactly these files and nothing else; do not rewrite passages that are not named, do not touch other pages, and do not run validation yourself — Doxloop re-validates the moment you finish. Do not re-read the skill, the plan, or the project configuration for this: ${depth ? 'read only the authoring skill\'s references/page-depth.md for the depth contract, then the named pages and the evidence they cite' : 'read only the named pages and the evidence they cite'}. A thin-page or thin-procedure warning means the page is missing parts of the depth contract (outcome-led opening, prerequisites, every step with its observable result, verification, evidence-backed troubleshooting, next step): add only the missing parts, written for this page's own task from the evidence it cites. If every part is already present and the evidence offers nothing more, leave the page unchanged and say so in your reply: never pad with generic advice, testing tips, restated steps, repeated cautions, or fixture details from the capture application, because a short accurate page beats a long padded one and the warning is then accepted as is. A broken-link error names a target that does not exist: point the link at the real page path or remove it. When you finish, reply with one sentence per file saying what changed.
+  return `FIX ROUND ${input.round} OF ${input.maxRounds}. Doxloop validated the pages this run wrote and found the problems below. Fix exactly these problems in exactly these files and nothing else; do not rewrite passages that are not named, do not touch other pages, and do not run validation yourself — Doxloop re-validates the moment you finish. Do not re-read the skill, the plan, or the project configuration for this: ${depth ? 'read only the authoring skill\'s references/page-depth.md for the depth contract, then the named pages and the evidence they cite' : 'read only the named pages and the evidence they cite'}. A thin-page or thin-procedure warning means the page is missing parts of the depth contract (outcome-led opening, prerequisites, every step with its observable result, verification, evidence-backed troubleshooting, next step): add only the missing parts, written for this page's own task from the evidence it cites. If every part is already present and the evidence offers nothing more, leave the page unchanged and say so in your reply: never pad with generic advice, testing tips, restated steps, repeated cautions, or fixture details from the capture application, because a short accurate page beats a long padded one and the warning is then accepted as is. A broken-link error names a target that does not exist: point the link at the real page path or remove it. A hedged-wording warning quotes sentences that guess at the product's behavior: open the source the page cites (the specific lines, not whole files) and replace each guess with what the source shows, name the exact condition or version it depends on, or delete the sentence; if the source cannot settle it, keep one plainly worded note that says what is not confirmed instead of hedging throughout. When you finish, reply with one sentence per file saying what changed.
 
 Files: ${input.files.join(', ')}
 
@@ -395,7 +395,7 @@ export function issuesForFiles(issues: ValidationIssue[], files: Set<string>, op
 }
 
 /** Warnings worth a fix session: they are the depth contract the writer owes, not taste. */
-export const FIXABLE_WARNINGS = new Set(['thin-page', 'thin-procedure', 'missing-diagram', 'api-endpoint-param-example'])
+export const FIXABLE_WARNINGS = new Set(['thin-page', 'thin-procedure', 'missing-diagram', 'api-endpoint-param-example', 'hedged-wording'])
 
 const SUGGESTION_LABELS: Record<string, string> = {
   'thin-page': 'thin pages',
@@ -403,6 +403,7 @@ const SUGGESTION_LABELS: Record<string, string> = {
   'missing-diagram': 'missing diagrams',
   'api-endpoint-param-example': 'missing parameter examples',
   'api-endpoint-missing': 'endpoints without a reference block',
+  'hedged-wording': 'hedged wording',
 }
 
 function plural(count: number, noun: string): string {

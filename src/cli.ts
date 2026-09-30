@@ -829,7 +829,7 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
   const action = args.positionals[0]
   const id = flag(args, 'id')
   if (!id || (action !== 'revise' && action !== 'recover' && action !== 'resume')) {
-    throw new UsageError('Usage: doxloop proposal <revise|recover|resume> --id <run-id> [--change <change-id> --request <instruction>] [--ignore-screenshot-problems]')
+    throw new UsageError('Usage: doxloop proposal <revise|recover|resume> --id <run-id> [--change <change-id> --request <instruction>] [--ignore-screenshot-problems] [--agent <codex|claude|gemini> --model <model>]')
   }
   if (action === 'recover') {
     const run = await recoverSyncRun(await findProjectRoot(cwd), id, {
@@ -846,7 +846,12 @@ async function proposalCommand(args: ParsedArgs, cwd: string): Promise<number> {
     const fallbackAuthoring = failed.planId
       ? await planAuthoringRecord(root, await readDocumentationPlan(root, failed.planId)).catch(() => undefined)
       : undefined
-    const run = await resumeSyncRun(root, id, fallbackAuthoring ? { fallbackAuthoring } : {})
+    const agent = parseAgent(flag(args, 'agent'))
+    const model = flag(args, 'model')
+    const run = await resumeSyncRun(root, id, {
+      ...(fallbackAuthoring ? { fallbackAuthoring } : {}),
+      ...(agent ? { agentOverride: { agent, ...(model ? { model } : {}) } } : {}),
+    })
     if (run.status === 'failed') throw new DoxloopError(run.error ?? 'The resumed proposal failed.')
     process.stdout.write(`\nDocumentation proposal ${run.id} is ${run.status}.\n`)
     return 0
@@ -1221,7 +1226,7 @@ function validateCommandArguments(args: ParsedArgs): void {
     update: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print', 'screenshots', 'no-screenshots'],
     review: ['agent', 'model', 'reasoning', 'effort', 'reference', 'print'],
     plan: ['id', 'feedback', 'strategy'],
-    proposal: ['id', 'change', 'hunk', 'request', 'ignore-screenshot-problems'],
+    proposal: ['id', 'change', 'hunk', 'request', 'ignore-screenshot-problems', 'agent', 'model'],
     pages: ['format', 'path', 'request', 'allow-related', 'screenshots', 'run-id', 'agent', 'model', 'reasoning', 'effort'],
     capture: [],
     test: ['format'],

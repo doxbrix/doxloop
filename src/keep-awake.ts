@@ -4,9 +4,11 @@
  * held while any job needs it (reference-counted across concurrent jobs) and
  * released when the last one ends or the server exits.
  *
- * macOS: `caffeinate -i -w <server pid>` (also exits on its own if the
- * server dies). Linux: `systemd-inhibit --what=idle:sleep … sleep infinity`
- * when systemd-inhibit is installed. Elsewhere, or with
+ * macOS: `caffeinate -i -s -w <server pid>` (also exits on its own if the
+ * server dies): -i blocks idle sleep, -s blocks system sleep while on mains
+ * power. Closing the lid still sleeps a laptop; run budgets then pause
+ * instead of expiring (see monotonic-clock.ts). Linux: `systemd-inhibit
+ * --what=idle:sleep … sleep infinity` when systemd-inhibit is installed. Elsewhere, or with
  * DOXLOOP_KEEP_AWAKE=0, nothing happens.
  */
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
@@ -30,7 +32,7 @@ export function keepAwakeCommand(options: Pick<KeepAwakeOptions, 'platform' | 'e
   const platform = options.platform ?? process.platform
   const hasCommand = options.hasCommand ?? ((command: string) => commandOnPath(command, env))
   if (platform === 'darwin') {
-    return { command: 'caffeinate', args: ['-i', '-w', String(options.pid ?? process.pid)] }
+    return { command: 'caffeinate', args: ['-i', '-s', '-w', String(options.pid ?? process.pid)] }
   }
   if (platform === 'linux' && hasCommand('systemd-inhibit')) {
     return {

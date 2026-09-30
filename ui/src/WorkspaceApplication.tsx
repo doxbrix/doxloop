@@ -1481,6 +1481,10 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
   const planAgentSignedOut = retryOptions.some((agent) => agent.name === planAgentName && agent.status === 'unauthenticated')
   const chosenRetryAgent = retryAgent || retryAgentChoice(retryOptions, planAgentName || undefined, defaultAgent || undefined)
   const chosenRetrySignedOut = retryOptions.some((agent) => agent.name === chosenRetryAgent && agent.status === 'unauthenticated')
+  // After a failed generation the reviewer can carry on with another
+  // assistant: the finished pages stay, only the assistant changes.
+  const generationFailed = plan.status === 'failed' && plan.failure?.stage === 'generate'
+  const switchedAgent: { agent?: string } = generationFailed && chosenRetryAgent && chosenRetryAgent !== planAgentName ? { agent: chosenRetryAgent } : {}
   const coverageKey = `${plan.id}:${plan.version}`
   const screenshotCoverage = planningFailed ? undefined : planScreenshotCoverage(pages, screenshotIntent, captureReadiness)
   const approvalControls = planApprovalControls({
@@ -1586,7 +1590,7 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
     setContinuing(strategy)
     try {
       await act(
-        () => post<{ plan?: DocumentationPlan; job?: UiJob }>(`/api/plans/${plan.id}/continue`, { strategy }),
+        () => post<{ plan?: DocumentationPlan; job?: UiJob }>(`/api/plans/${plan.id}/continue`, { strategy, ...(strategy === 'resume' ? switchedAgent : {}) }),
         strategy === 'resume' ? 'Continuing the documentation run' : 'Continuing with the work already done',
       )
     } finally { setContinuing(undefined) }
@@ -1607,7 +1611,7 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
         if (!approved) return
       }
       setGenerating(true)
-      await act(() => post<UiJob>(`/api/plans/${plan.id}/generate`), 'Documentation generation started')
+      await act(() => post<UiJob>(`/api/plans/${plan.id}/generate`, generationFailed ? switchedAgent : {}), 'Documentation generation started')
     } finally {
       setApproving(false)
       setGenerating(false)
@@ -1689,6 +1693,11 @@ function DocumentationPlanReview({ plan, act, busy, agents, defaultAgent, onStar
         {plan.failure.stage === 'generate' && plan.failure.ignorable && <li><strong>Ignore the problems</strong><span>Accepts the generated files for review now. Each screenshot problem is recorded on its step as text-only and listed on the proposal so you can judge it before publishing.</span></li>}
         {plan.failure.stage !== 'generate' && <li><strong>Review this plan anyway</strong><span>Opens the plan the planner left behind. The unmet gate becomes a note on the review, and approval still checks required screenshots and open questions.</span></li>}
       </ul>
+      {plan.failure.stage === 'generate' && plan.failure.kind && <Note tone="warn">{plan.failure.kind === 'sign-in'
+        ? `${agentLabel(planAgentName)} could not sign in, so retrying with it fails the same way. Sign it in again, or continue with another assistant below.`
+        : `${agentLabel(planAgentName)} reached an account or usage limit. Wait for it to reset, or continue with another assistant below.`}</Note>}
+      {plan.failure.stage === 'generate' && installedAgents.length > 1 && <Field label="Continue with"><Select aria-label="Assistant to continue generation with" value={chosenRetryAgent} disabled={busy || Boolean(continuing)} onChange={(event) => setRetryAgent(event.currentTarget.value)}>{installedAgents.map((agent) => <option key={agent.name} value={agent.name}>{`${agentLabel(agent.name)} · ${retryStatusLabel(agent.authentication.status)}`}</option>)}</Select></Field>}
+      {plan.failure.stage === 'generate' && chosenRetrySignedOut && <Note tone="warn">{agentLabel(chosenRetryAgent)} is signed out. {agentSignInHint(chosenRetryAgent)}</Note>}
       {plan.failure.stage === 'generate' && plan.failure.proposalId && <section class="plan-recovery-captures" aria-label="Screenshots already captured">
         <h3>Screenshots already captured</h3>
         <p>These images are kept by both choices below. Resume recaptures only the states that are still missing.</p>

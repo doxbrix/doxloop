@@ -60,7 +60,17 @@ interface ProbeBrowser {
   close(): Promise<void>
 }
 
-export type SignInProbe = (url: string, options?: { timeoutMs?: number }) => Promise<SignInWall | undefined>
+export interface SignInProbeOptions {
+  timeoutMs?: number
+  /**
+   * A saved browser session (Playwright storage state) to load first. A
+   * single-page application answers 200 even after its session expired, so
+   * only loading the page signed in shows whether the session still works.
+   */
+  storageState?: object
+}
+
+export type SignInProbe = (url: string, options?: SignInProbeOptions) => Promise<SignInWall | undefined>
 
 const DEFAULT_PROBE_TIMEOUT_MS = 8_000
 /** Client-side guards often redirect just after the first idle moment. */
@@ -70,7 +80,7 @@ const SETTLE_AFTER_IDLE_MS = 400
  * Load `url` headless and report a sign-in wall, or undefined when the page
  * is not one or nothing could be learned (no browser, timeout, crash).
  */
-export async function probeSignInWall(url: string, options: { timeoutMs?: number } = {}): Promise<SignInWall | undefined> {
+export async function probeSignInWall(url: string, options: SignInProbeOptions = {}): Promise<SignInWall | undefined> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
   let browser: ProbeBrowser | undefined
   let timer: NodeJS.Timeout | undefined
@@ -85,7 +95,7 @@ export async function probeSignInWall(url: string, options: { timeoutMs?: number
       return undefined
     }
     browser = launched
-    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ...(options.storageState ? { storageState: options.storageState } : {}) })
     const page = (await context.newPage()) as ProbePage
     const deadline = Date.now() + timeoutMs
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })

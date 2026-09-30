@@ -517,16 +517,30 @@ const MAX_READINESS_REDIRECTS = 5
 export async function checkApplicationReadiness(application?: ApplicationConfig, auth?: CaptureAuthContext, options: ApplicationReadinessOptions = {}): Promise<ApplicationReadiness> {
   const readiness = await httpApplicationReadiness(application, auth)
   if (!options.browserProbe || readiness.status !== 'ready' || !readiness.url) return readiness
-  // Sign-in material already handles a wall; only an anonymous visit needs the browser.
-  if (readiness.authentication !== 'none' || auth?.credentials) return readiness
+  // Saved credentials sign in during capture whatever the page shows. An
+  // anonymous visit and a saved session both need the browser: a single-page
+  // application answers 200 to a request whose session expired long ago, and
+  // only the page it renders tells the two apart.
+  if (auth?.credentials) return readiness
+  const withSession = readiness.authentication === 'session' && auth?.session !== undefined
+  if (readiness.authentication !== 'none' && !withSession) return readiness
   const probe = typeof options.browserProbe === 'function' ? options.browserProbe : probeSignInWall
   let wall: Awaited<ReturnType<SignInProbe>>
   try {
-    wall = await probe(readiness.url)
+    wall = await probe(readiness.url, withSession ? { storageState: auth!.session! } : {})
   } catch {
     return readiness
   }
   if (!wall) return readiness
+  if (withSession) return {
+    configured: true,
+    reachable: true,
+    status: 'authentication-required',
+    url: readiness.url,
+    authentication: 'expired',
+    signInPath: wall.signInPath,
+    message: `The saved browser session no longer signs in: the application sent the browser to ${wall.signInPath}. Sign in with the browser again under Settings → Visual evidence, or save a test account's credentials, before capturing.`,
+  }
   return {
     configured: true,
     reachable: true,

@@ -23,7 +23,7 @@ function fakeSpawner() {
 
 describe('keepAwakeCommand', () => {
   test('uses caffeinate tied to the server process on macOS', () => {
-    expect(keepAwakeCommand({ platform: 'darwin', env: {}, pid: 4242 })).toEqual({ command: 'caffeinate', args: ['-i', '-w', '4242'] })
+    expect(keepAwakeCommand({ platform: 'darwin', env: {}, pid: 4242 })).toEqual({ command: 'caffeinate', args: ['-i', '-s', '-w', '4242'] })
   })
 
   test('uses systemd-inhibit on Linux only when it is installed', () => {
@@ -43,7 +43,7 @@ describe('KeepAwake', () => {
     const awake = new KeepAwake({ platform: 'darwin', env: {}, pid: 7, spawn: fake.spawn, registerExitHook: false })
     const first = awake.acquire()
     const second = awake.acquire()
-    expect(fake.calls).toEqual([{ command: 'caffeinate', args: ['-i', '-w', '7'] }])
+    expect(fake.calls).toEqual([{ command: 'caffeinate', args: ['-i', '-s', '-w', '7'] }])
     expect(awake.count).toBe(2)
     first()
     first()

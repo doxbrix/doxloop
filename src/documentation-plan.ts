@@ -4,7 +4,7 @@ import { assertBatchFits, batchLimits, defaultBatchLimits, hasPageLimit } from '
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { AgentSessionError, agentFailureDetail } from './agent-failure.js'
+import { AgentSessionError, agentFailureDetail, failureKindOfMessage } from './agent-failure.js'
 import { codexUserMcpServers } from './agent-isolation.js'
 import { AGENT_LOG_HEARTBEAT_MS, createAgentLogFormatter } from './agent-log.js'
 import { readPlanOutput, readPlanPatchOutput, type PlanReply } from './agent-reply.js'
@@ -306,6 +306,12 @@ async function inferPlanFailure(root: string, plan: DocumentationPlan): Promise<
  * each run; rebuilt here for runs that predate that record so they can still
  * be resumed from their approved plan.
  */
+/** A sign-in or account cause, recorded so the control center can offer a switch of assistant. */
+function failureKindField(error: unknown): { kind?: 'sign-in' | 'account' } {
+  const kind = error instanceof AgentSessionError ? error.kind : failureKindOfMessage(error instanceof Error ? error.message : String(error))
+  return kind === 'other' ? {} : { kind }
+}
+
 export async function planAuthoringRecord(root: string, plan: DocumentationPlan): Promise<Omit<RunAuthoringRecord, 'schemaVersion'>> {
   const project = await loadProject(root)
   const screenshotIntent = normalizeScreenshotIntent(plan.execution.screenshots)
@@ -763,6 +769,7 @@ export async function generateApprovedDocumentationPlan(root: string, id: string
       error: error instanceof Error ? error.message : String(error),
       failure: {
         stage: 'generate',
+        ...failureKindField(error),
         ...(failedProposal ? { proposalId: failedProposal.id } : {}),
         resumable: Boolean(preserved) && failedProposal?.recovery?.resumable !== false,
         ignorable: Boolean(preserved) && failedProposal?.recovery?.ignorable !== false,
@@ -1164,7 +1171,7 @@ ${gateRevisionInstructions(planningIssue, raw, { briefed })}`
       status: 'failed',
       updatedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
-      failure: { stage, resumable: false, ignorable: Boolean(failedCandidate) },
+      failure: { stage, ...failureKindField(error), resumable: false, ignorable: Boolean(failedCandidate) },
     }
     await persistPlan(root, failed, false)
     throw error
@@ -1394,7 +1401,17 @@ export async function continueDocumentationPlanGeneration(
       emitWorkflowStage('validating', 'Validating generated documentation', 'running')
     }
     const proposal = strategy === 'resume'
-      ? await resumeSyncRun(root, proposalId, { fallbackAuthoring: await planAuthoringRecord(root, plan) })
+      ? await resumeSyncRun(root, proposalId, {
+          fallbackAuthoring: await planAuthoringRecord(root, plan),
+          // The plan's assistant is the one the reviewer chose last, including
+          // a switch made after the run failed on a signed-out assistant.
+          ...(plan.execution.agent ? { agentOverride: {
+            agent: plan.execution.agent,
+            ...(plan.execution.model ? { model: plan.execution.model } : {}),
+            ...(plan.execution.reasoning ? { reasoning: plan.execution.reasoning } : {}),
+            ...(plan.execution.effort ? { effort: plan.execution.effort } : {}),
+          } } : {}),
+        })
       : await recoverSyncRun(root, proposalId, { ignoreScreenshotProblems: true })
     if (proposal.status === 'failed') {
       throw new DoxloopError(proposal.error ?? 'Documentation generation failed.')
@@ -1431,6 +1448,7 @@ export async function continueDocumentationPlanGeneration(
       error: error instanceof Error ? error.message : String(error),
       failure: {
         stage: 'generate',
+        ...failureKindField(error),
         proposalId,
         resumable: await pathExists(runWorkspace(root, proposalId)),
         ignorable: await pathExists(runWorkspace(root, proposalId)),

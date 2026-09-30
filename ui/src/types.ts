@@ -195,7 +195,7 @@ export interface DocumentationPlan {
   approvedHash?: string
   proposalId?: string
   error?: string
-  failure?: { stage: 'propose' | 'revise' | 'generate'; proposalId?: string; resumable: boolean; ignorable: boolean }
+  failure?: { stage: 'propose' | 'revise' | 'generate'; kind?: 'sign-in' | 'account'; proposalId?: string; resumable: boolean; ignorable: boolean }
   advisories?: string[]
   /** Present when a docs-site source is configured: the planner's audit of each existing documentation site. */
   existingDocumentation?: ExistingDocumentationAssessment[]

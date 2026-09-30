@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { AgentSessionError, agentFailureDetail, agentFailureKind, agentSignedOutMessage, describeAgentFailure } from './agent-failure.js'
+import { AgentSessionError, agentFailureDetail, agentFailureKind, agentSignedOutMessage, describeAgentFailure, failureKindOfMessage } from './agent-failure.js'
 
 describe('agent failure reasons', () => {
   test('turns an expired Claude sign-in into an actionable sentence', () => {
@@ -34,5 +34,20 @@ describe('agent failure reasons', () => {
     expect(agentSignedOutMessage('claude')).toContain('`claude auth login`')
     expect(agentSignedOutMessage('codex')).toContain('`codex login`')
     expect(agentSignedOutMessage('gemini')).toContain('GEMINI_API_KEY')
+  })
+})
+
+describe('failure kind from a final message', () => {
+  test('recognises Doxloop\'s own wording once a cause was described', () => {
+    expect(failureKindOfMessage(describeAgentFailure('claude', 'Failed to authenticate: OAuth token has expired').message)).toBe('sign-in')
+    expect(failureKindOfMessage(agentSignedOutMessage('codex'))).toBe('sign-in')
+    expect(failureKindOfMessage('2 of the authoring batches did not finish: Codex stopped on an account limit (usage limit reached).')).toBe('account')
+    expect(failureKindOfMessage('The documentation agent exited with status 1. Batch 3 stopped.')).toBe('other')
+    expect(failureKindOfMessage(undefined)).toBe('other')
+  })
+
+  test('classifies a failure the agent only wrote to stderr', () => {
+    const stderr = 'Reading additional input from stdin...\n2026-09-30T10:00:00Z ERROR Not logged in. Please run codex login\n'
+    expect(agentFailureKind(agentFailureDetail(undefined, stderr))).toBe('sign-in')
   })
 })

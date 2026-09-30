@@ -78,6 +78,19 @@ export function describeAgentFailure(agent: AgentName, detail: string): { kind: 
   return { kind, message: compact(detail) }
 }
 
+/**
+ * The kind of a failure from its final message, including Doxloop's own
+ * wording once a cause was described ("could not sign in", "is signed out",
+ * "stopped on an account limit"). Plans record it so the control center can
+ * offer the matching next step instead of a plain retry.
+ */
+export function failureKindOfMessage(message: string | undefined): AgentFailureKind {
+  const text = message ?? ''
+  if (/\bcould not sign in\b|\bis signed out\b|\bis not signed in\b/i.test(text)) return 'sign-in'
+  if (/\bstopped on an account limit\b/i.test(text)) return 'account'
+  return agentFailureKind(text)
+}
+
 /** A session failure that carries its cause, so callers can tell sign-in trouble from task failures. */
 export class AgentSessionError extends DoxloopError {
   readonly kind: AgentFailureKind

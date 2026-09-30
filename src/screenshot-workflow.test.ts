@@ -987,6 +987,33 @@ describe('screenshot workflow', () => {
     }
   })
 
+  test('loads a saved session in the browser, because a single-page app answers 200 to an expired one', async () => {
+    const server = createServer((_request, response) => { response.statusCode = 200; response.end('<div id="root"></div>') })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    try {
+      if (!address || typeof address === 'string') throw new Error('Missing test server address')
+      const application = { baseUrl: `http://127.0.0.1:${address.port}` }
+      const session = { cookies: [{ name: 'sid', value: 'old', domain: '127.0.0.1', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' as const }], origins: [] }
+      const states: unknown[] = []
+      const wall = async (_url: string, options?: { storageState?: object }) => { states.push(options?.storageState); return { signInPath: '/#/login' } }
+      await expect(checkApplicationReadiness(application, { session, credentials: false }, { browserProbe: wall })).resolves.toMatchObject({
+        status: 'authentication-required',
+        authentication: 'expired',
+        signInPath: '/#/login',
+        message: expect.stringContaining('no longer signs in'),
+      })
+      expect(states).toEqual([session])
+      // A session that still reaches the application stays ready.
+      await expect(checkApplicationReadiness(application, { session, credentials: false }, { browserProbe: async () => undefined })).resolves.toMatchObject({ status: 'ready', authentication: 'session' })
+      // Credentials sign in during capture, so the probe is skipped.
+      await expect(checkApplicationReadiness(application, { session, credentials: true }, { browserProbe: wall })).resolves.toMatchObject({ status: 'ready' })
+      expect(states).toHaveLength(1)
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    }
+  })
+
   test('follows same-origin redirects and treats only sign-in, external, and looping redirects as blockers', async () => {
     const server = createServer((request, response) => {
       if (request.url === '/dashboard') { response.statusCode = 200; response.end('app shell'); return }

@@ -6,7 +6,7 @@ import { isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import { computeDrift } from './drift.js'
-import { driftReason, pendingProposalPaths, resolvedByPendingChanges } from './sync-runs.js'
+import { driftReason, pendingProposalPaths, resolvedByPendingChanges, withAgentOverride } from './sync-runs.js'
 import { writeEvidenceMap } from './evidence.js'
 import { createProposalBranch, publishProposalBranch } from './git-delivery.js'
 import { loadProject, scaffoldProject } from './project.js'
@@ -994,5 +994,23 @@ describe('driftReason', () => {
   test('explains a page drift did not name as a consistency edit, and leaves supporting files alone', () => {
     expect(driftReason({ path: 'other.mdx', title: 'Other', category: 'page' }, options)).toBe('Kept consistent with the pages the api change made stale; this page does not document anything that changed.')
     expect(driftReason({ path: 'orders.mdx', title: 'Place orders', category: 'navigation' }, options)).toBeUndefined()
+  })
+})
+
+describe('resuming with another assistant', () => {
+  const recorded = { schemaVersion: 1 as const, mode: 'create' as const, trigger: 'manual' as const, screenshots: 'auto' as const, agent: 'claude' as const, model: 'claude-opus-5-5', effort: 'high' as const }
+
+  test('keeps the record when nothing changes', () => {
+    expect(withAgentOverride(recorded, undefined)).toBe(recorded)
+    expect(withAgentOverride(recorded, { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' })).toBe(recorded)
+  })
+
+  test('a new assistant drops the old one\'s model and effort', () => {
+    expect(withAgentOverride(recorded, { agent: 'codex' })).toEqual({ schemaVersion: 1, mode: 'create', trigger: 'manual', screenshots: 'auto', agent: 'codex' })
+    expect(withAgentOverride(recorded, { agent: 'codex', model: 'gpt-5.6', reasoning: 'high' })).toMatchObject({ agent: 'codex', model: 'gpt-5.6', reasoning: 'high' })
+  })
+
+  test('the same assistant with a new model keeps its other settings', () => {
+    expect(withAgentOverride(recorded, { agent: 'claude', model: 'claude-sonnet-5' })).toMatchObject({ agent: 'claude', model: 'claude-sonnet-5', effort: 'high' })
   })
 })

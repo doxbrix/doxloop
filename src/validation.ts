@@ -1,3 +1,4 @@
+import { validateHedging } from './hedging.js'
 import { documentationCollections, collectionForPath } from './documentation-collections.js'
 import { contentLinks } from './content-links.js'
 import { access, readFile } from 'node:fs/promises'
@@ -92,6 +93,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     issues.push(...validateShellExamples(raw, file))
     const planned = planTypes.get(file.replace(/\.[^./]+$/, ''))
     issues.push(...validatePageDepth(page.body, file, planned?.type))
+    issues.push(...validateHedging(page.body, file))
     if (planned?.diagram === 'required' && !hasDiagram(raw)) {
       issues.push(
         warning(

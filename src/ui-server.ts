@@ -122,6 +122,7 @@ import {
   markInterruptedSyncRuns,
   pruneSyncRuns,
   readSyncRun,
+  recordedRunAgent,
   recoverSyncRun,
   runWorkspace,
   readSyncRunChangeContent,
@@ -691,6 +692,7 @@ async function handleApi(
   }
   if (request.method === 'POST' && url.pathname === '/api/sync/now') {
     const root = requireProject(runtime)
+    await assertAgentSignedIn((await loadProject(root)).defaultAgent)
     sendJson(response, 202, publicJob(startCliJob(runtime, 'sync', ['sync', 'now', '--trigger', 'manual', '--cwd', root], root)))
     return
   }
@@ -798,6 +800,7 @@ async function handleApi(
     const runId = createRunId()
     const spec = pageEditJobSpec(root, project, runId, await readJsonBody(request))
     await resolveEditScope(root, project, spec.paths, spec.allowRelated)
+    await assertAgentSignedIn(spec.agent)
     const job = startCliJob(runtime, spec.type, spec.args, root, spec.agent)
     sendJson(response, 202, { job: publicJob(job) })
     return
@@ -1299,6 +1302,7 @@ async function handleApi(
       : optionalString(body.instruction) ?? ''
     if (!instruction) throw new DoxloopError('Describe how the selected documentation should change.')
     if (changeIds.length === 0) throw new DoxloopError('Select at least one file to revise.')
+    await assertAgentSignedIn(await proposalAgent(root, run, 'plan'))
     const args = ['proposal', 'revise', '--id', run.id, '--request', instruction, '--cwd', root]
     for (const changeId of changeIds) args.push('--change', changeId)
     for (const hunkId of stringArray(body.hunkIds)) args.push('--hunk', hunkId)
@@ -1312,6 +1316,7 @@ async function handleApi(
     const root = requireProject(runtime)
     const run = await readSyncRun(root, proposalRefine[1]!)
     const spec = pageRefineJobSpec(root, run, await readJsonBody(request))
+    await assertAgentSignedIn(await proposalAgent(root, run, 'recorded'))
     const job = startCliJob(runtime, spec.type, spec.args, root)
     sendJson(response, 202, { job: publicJob(job) })
     return
@@ -1337,7 +1342,16 @@ async function handleApi(
     const root = requireProject(runtime)
     const run = await readSyncRun(root, proposalResume[1]!)
     if (run.status !== 'failed' && run.status !== 'generating') throw new DoxloopError(`Only a failed or interrupted proposal can be resumed; ${run.id} is ${run.status}.`)
-    const job = startCliJob(runtime, `proposal:resume:${run.id}`, ['proposal', 'resume', '--id', run.id, '--cwd', root], root)
+    // A reviewer may continue with a different assistant, for example after
+    // the first one signed out or ran out of usage mid-run.
+    const body = recordBody(await readJsonBody(request))
+    const requestedAgent = parseAgent(optionalString(body.agent))
+    const requestedModel = optionalString(body.model)
+    await assertAgentSignedIn(requestedAgent ?? await proposalAgent(root, run, 'recorded'))
+    const args = ['proposal', 'resume', '--id', run.id, '--cwd', root]
+    appendOption(args, 'agent', requestedAgent)
+    appendOption(args, 'model', requestedAgent ? requestedModel ?? projectDefaultModel(await loadProject(root), requestedAgent) : undefined)
+    const job = startCliJob(runtime, `proposal:resume:${run.id}`, args, root, requestedAgent)
     sendJson(response, 202, publicJob(job))
     return
   }
@@ -1418,6 +1432,7 @@ async function handleApi(
     }
     const requestedAgent = parseAgent(optionalString(body.agent))
     const effectiveAgent = requestedAgent ?? project.defaultAgent
+    await assertAgentSignedIn(effectiveAgent)
     const receipt = await readOptionalJson(join(root, '.doxloop', 'last-run.json'))
     const pendingRemovedSources = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
       ? (receipt as Record<string, unknown>).pendingRemovedSources
@@ -2830,6 +2845,18 @@ async function agentSignInState(agent: AgentName | undefined): Promise<{ name: A
   } catch {
     return { name: selected.name, status: 'unknown' }
   }
+}
+
+/**
+ * The assistant a proposal's next agent session uses: the one its run
+ * recorded, or the plan's, or the project default. A revision runs with the
+ * plan's assistant first, as `reviseSyncRun` does.
+ */
+async function proposalAgent(root: string, run: SyncRun, prefer: 'recorded' | 'plan'): Promise<AgentName | undefined> {
+  const recorded = await recordedRunAgent(root, run.id).catch(() => undefined)
+  const planned = run.planId ? await readDocumentationPlan(root, run.planId).then((plan) => plan.execution.agent, () => undefined) : undefined
+  const fallback = (await loadProject(root)).defaultAgent
+  return prefer === 'plan' ? planned ?? recorded ?? fallback : recorded ?? planned ?? fallback
 }
 
 /** Refuse to start an agent run with a signed-out assistant (HTTP 400). */

@@ -372,6 +372,8 @@ export interface ExistingDocumentationAssessment {
 
 export interface DocumentationPlanFailure {
   stage: 'propose' | 'revise' | 'generate'
+  /** The agent could not sign in or hit an account limit: retrying with the same assistant fails the same way. */
+  kind?: 'sign-in' | 'account'
   /** The preserved proposal workspace a generation failure left behind. */
   proposalId?: string
   /** The agent can continue in the preserved workspace without redoing finished work. */

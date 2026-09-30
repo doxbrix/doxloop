@@ -9,6 +9,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { agentFailureDetail, agentFailureKind, describeAgentFailure } from './agent-failure.js'
+import { formatSleep, monotonicNow, SleepDetector } from './monotonic-clock.js'
 import { CLAUDE_ISOLATION_ARGUMENTS, codexIsolationArguments, codexUserMcpServers } from './agent-isolation.js'
 import { AGENT_LOG_HEARTBEAT_MS, createAgentLogFormatter, formatAgentUsage, mergeAgentUsage, type AgentLogFormatter } from './agent-log.js'
 import {
@@ -264,7 +265,10 @@ export async function runAuthor(options: {
     return 0
   }
   if (options.mode !== 'review' && screenshotIntent === 'enabled') {
-    const readiness = await checkApplicationReadiness(project.application, captureAuth)
+    // The browser probe catches a saved session that expired on a
+    // single-page application, which answers every request with 200: without
+    // it the run spent its capture sessions on sign-in screens.
+    const readiness = await checkApplicationReadiness(project.application, captureAuth, { browserProbe: process.env.DOXLOOP_READINESS_BROWSER_PROBE !== '0' })
     if (!readiness.configured) {
       throw new DoxloopError(`Cannot start required screenshot capture. ${readiness.message}`)
     }
@@ -275,6 +279,8 @@ export async function runAuthor(options: {
     } else if (!readiness.reachable) {
       process.stdout.write(`Screenshot warning: ${readiness.message} Continuing; capture is attempted and any screen that cannot be reached is written as text-only steps.\n`)
       screenshotIntent = 'auto'
+    } else if (readiness.status === 'authentication-required') {
+      process.stdout.write(`Screenshot warning: ${readiness.message} Continuing; screens behind sign-in are written as text-only steps.\n`)
     }
   }
 
@@ -407,11 +413,13 @@ export async function runAuthor(options: {
   let stoppedByBudget = false
   let stoppedBySignal = false
   // A run's time budget covers every session, so a later batch or a resumed
-  // session gets only what is left of it.
+  // session gets only what is left of it. Budgets count awake time only: a
+  // laptop that slept mid-run resumes with the time it had left.
   const deadline =
     options.timeoutMinutes !== undefined && options.timeoutMinutes > 0
-      ? Date.now() + options.timeoutMinutes * 60_000
+      ? monotonicNow() + options.timeoutMinutes * 60_000
       : undefined
+  const sleepDetector = new SleepDetector()
   const resumeLimit = agentApiResumeLimit()
   const resumeCount = { value: 0 }
   /** Every session's log, so token usage can be summed for the run. */
@@ -457,7 +465,11 @@ export async function runAuthor(options: {
     log: AgentLogFormatter | undefined
     /** Source files the session opened, by configured source: Doxloop's own record of what the pages were written from. */
     reads: SessionSourceReads
+    /** The agent's own error text when the session failed: its stop reason or the end of stderr. */
+    failureText?: string
   }
+  /** Error text of every failed session, so a sign-in or account cause is found even when the agent only wrote it to stderr. */
+  const sessionFailures: string[] = []
   /** Absolute paths every tool call of the current session named; reset per session. */
   let sessionPaths = new Set<string>()
   /**
@@ -474,7 +486,8 @@ export async function runAuthor(options: {
     }
     if (selected.name === 'gemini') await writeGeminiCaptureSettings(options.root, session.browser === false ? undefined : captureProvider)
     sessionPaths = new Set<string>()
-    const sessionDeadline = session.minutes !== undefined ? Date.now() + session.minutes * 60_000 : undefined
+    const sessionDeadline = session.minutes !== undefined ? monotonicNow() + session.minutes * 60_000 : undefined
+    let stderrTail = ''
     let sessionExit = 1
     let stoppedBySessionBudget = false
     let stoppedByInactivity = false
@@ -516,10 +529,10 @@ export async function runAuthor(options: {
         )
         const budgetSession = usageBudget?.register(() => { void agent.stop() })
         const { child } = agent
-        let lastOutputAt = Date.now()
+        let lastOutputAt = monotonicNow()
         if (attemptLog) {
           child.stdout?.on('data', (chunk: Buffer | string) => {
-            lastOutputAt = Date.now()
+            lastOutputAt = monotonicNow()
             const lines = attemptLog.push(chunk)
             if (budgetSession) usageBudget?.update(budgetSession, attemptLog.usage, attemptLog.stopReason)
             writeAgentLogLines(lines)
@@ -532,15 +545,16 @@ export async function runAuthor(options: {
           })
         } else if (pipeOutput) {
           child.stdout?.on('data', (chunk: Buffer | string) => {
-            lastOutputAt = Date.now()
+            lastOutputAt = monotonicNow()
             const value = chunk.toString()
             if (captureReview) reviewOutput.push(value)
             process.stdout.write(value)
           })
         }
         if (pipeOutput) child.stderr?.on('data', (chunk: Buffer | string) => {
-          lastOutputAt = Date.now()
+          lastOutputAt = monotonicNow()
           process.stderr.write(chunk.toString())
+          stderrTail = `${stderrTail}${chunk.toString()}`.slice(-4_000)
           if (budgetSession && isAccountLimit(chunk.toString())) usageBudget?.update(budgetSession, attemptLog?.usage, chunk.toString())
         })
         // Long thinking, a long page being written, or a slow tool call prints
@@ -557,7 +571,12 @@ export async function runAuthor(options: {
         const idleLimit = pipeOutput ? agentIdleLimitMs() : 0
         const idleWatch = idleLimit > 0
           ? setInterval(() => {
-              if (stoppedByInactivity || Date.now() - lastOutputAt < idleLimit) return
+              // Say so when the computer slept, so a slow batch reads as paused
+              // rather than hung. The agent's own network connection may still
+              // drop on wake; the idle limit then retries it as usual.
+              const slept = sleepDetector.check()
+              if (slept) process.stderr.write(`The computer was asleep for ${formatSleep(slept.sleptMs)}; Doxloop paused this run's time budget meanwhile.\n`)
+              if (stoppedByInactivity || monotonicNow() - lastOutputAt < idleLimit) return
               stoppedByInactivity = true
               process.stderr.write(`No output from ${selected.name} for ${formatIdleMinutes(idleLimit)}; stopping this session so the run can retry it in a fresh one.\n`)
               void agent.stop()
@@ -583,7 +602,7 @@ export async function runAuthor(options: {
                   }
                   void agent.stop()
                 },
-                Math.max(0, effectiveDeadline - Date.now()),
+                Math.max(0, effectiveDeadline - monotonicNow()),
               )
             : undefined
         budget?.unref?.()
@@ -632,7 +651,16 @@ export async function runAuthor(options: {
     } finally {
       if (preparedPrompt.path) await rm(preparedPrompt.path, { force: true })
     }
-    return { exitCode: sessionExit, stoppedBySessionBudget, stalled: stoppedByInactivity, log: lastLog, reads: attributeReadsToSources(sessionPaths, promptSources, options.root) }
+    const failureText = sessionExit !== 0 ? agentFailureDetail(lastLog?.stopReason, stderrTail) : undefined
+    if (failureText) sessionFailures.push(failureText)
+    return {
+      exitCode: sessionExit,
+      stoppedBySessionBudget,
+      stalled: stoppedByInactivity,
+      log: lastLog,
+      reads: attributeReadsToSources(sessionPaths, promptSources, options.root),
+      ...(failureText ? { failureText } : {}),
+    }
   }
 
   const batchFailures: string[] = []
@@ -972,7 +1000,7 @@ Take the image immediately when its state is reached; no redundant snapshots. Re
           ? `its ${session.minutes}-minute cap`
           : outcome.log?.stopReason ?? `exit status ${outcome.exitCode}`
       let missing = unfinished(result) ? await unwrittenPlanPages(options.root, approved, batch.pages, before) : []
-      if (unfinished(result) && !stoppedByBudget && !stoppedBySignal && !usageBudget?.stoppedReason && !isAccountLimit(result.log?.stopReason) && agentFailureKind(result.log?.stopReason) === 'other') {
+      if (unfinished(result) && !stoppedByBudget && !stoppedBySignal && !usageBudget?.stoppedReason && !isAccountLimit(result.log?.stopReason) && agentFailureKind(result.failureText ?? result.log?.stopReason) === 'other') {
         if (missing.length === 0) {
           say(`Batch ${batch.index} stopped (${stopReason(result)}) after writing every page of the batch; keeping them.`)
         } else {
@@ -1102,7 +1130,7 @@ Finish with a short summary of what you changed and anything the instruction ask
       : ''
     // A signed-out or out-of-credit agent fails every session the same way;
     // the reader needs that cause and its fix, not a list of batches to retry.
-    const blockingStop = sessionLogs.map((log) => log.stopReason).find((reason) => agentFailureKind(reason) !== 'other')
+    const blockingStop = [...sessionLogs.map((log) => log.stopReason), ...sessionFailures].find((reason) => agentFailureKind(reason) !== 'other')
     const blocking = blockingStop ? describeAgentFailure(selected.name, agentFailureDetail(blockingStop) ?? blockingStop).message : undefined
     failureDetail = blocking && !stoppedByBudget
       ? batchFailures.length > 0

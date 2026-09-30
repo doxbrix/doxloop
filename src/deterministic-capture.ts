@@ -5,6 +5,7 @@ import { applicationUrl } from './application-url.js'
 import { ensurePlaywright } from './capture.js'
 import { DoxloopError } from './errors.js'
 import { pathExists } from './fs.js'
+import { monotonicNow } from './monotonic-clock.js'
 import { GUIDE_ASSET_ROOTS, SCREENSHOT_MANIFEST_FILE, dominantColorShare } from './screenshot-workflow.js'
 import type { DocumentationPlan, DocumentationPlanPage, DoxloopProject } from './types.js'
 
@@ -181,7 +182,7 @@ export async function captureNavigableSteps(input: DeterministicCaptureInput): P
   const contentDir = input.project.contentDir || input.plan.target?.contentDir || ''
   const assetRoot = GUIDE_ASSET_ROOTS[input.project.generator] ?? 'assets/guides'
   const budget = input.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS
-  const started = Date.now()
+  const started = monotonicNow()
   const browser = input.capturePage ? undefined : await openBrowser(input)
   const capturePage = input.capturePage ?? browser!.capturePage
   const signIn = input.signIn ?? browser?.signIn
@@ -202,7 +203,7 @@ export async function captureNavigableSteps(input: DeterministicCaptureInput): P
     for (const candidate of candidates) {
       const { page, step, requestedPath } = candidate
       const label = `${page.id}/${step.id}`
-      if (Date.now() - started >= budget) {
+      if (monotonicNow() - started >= budget) {
         result.skipped.push({ page: page.id, step: step.id, reason: 'time budget exhausted' })
         continue
       }

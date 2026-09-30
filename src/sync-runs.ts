@@ -436,6 +436,32 @@ export interface RunAuthoringRecord {
   editRequest?: SyncRun['editRequest']
 }
 
+/**
+ * The run's recorded instructions with a different assistant. A new agent
+ * drops the old agent's model and reasoning settings, which belong to it.
+ */
+export function withAgentOverride(authoring: RunAuthoringRecord, override: ResumeSyncRunOptions['agentOverride']): RunAuthoringRecord {
+  if (!override?.agent) return authoring
+  const sameAgent = override.agent === authoring.agent
+  if (sameAgent && override.model === authoring.model && override.reasoning === authoring.reasoning && override.effort === authoring.effort) return authoring
+  const { agent: _agent, model: _model, reasoning: _reasoning, effort: _effort, ...rest } = authoring
+  const model = override.model ?? (sameAgent ? authoring.model : undefined)
+  const reasoning = override.reasoning ?? (sameAgent ? authoring.reasoning : undefined)
+  const effort = override.effort ?? (sameAgent ? authoring.effort : undefined)
+  return {
+    ...rest,
+    agent: override.agent,
+    ...(model ? { model } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(effort ? { effort } : {}),
+  }
+}
+
+/** The assistant a run was started with (or last resumed with), if it recorded one. */
+export async function recordedRunAgent(root: string, id: string): Promise<AgentName | undefined> {
+  return (await readPersistedAuthoring(root, id))?.agent
+}
+
 async function readPersistedAuthoring(root: string, id: string): Promise<RunAuthoringRecord | undefined> {
   const path = join(runDirectory(root, id), AUTHORING_FILE)
   if (!(await pathExists(path))) return undefined
@@ -808,6 +834,12 @@ export interface ResumeSyncRunOptions {
    * authoring inputs. A plan-first run can rebuild them from its approved plan.
    */
   fallbackAuthoring?: Omit<RunAuthoringRecord, 'schemaVersion'>
+  /**
+   * The assistant to continue with instead of the one the run started with:
+   * a reviewer who switched assistant after a sign-in or account failure
+   * expects the resumed run to use the new one. Recorded for later resumes.
+   */
+  agentOverride?: Pick<RunAuthoringRecord, 'agent' | 'model' | 'reasoning' | 'effort'>
 }
 
 /**
@@ -835,11 +867,13 @@ async function resumeSyncRunLocked(root: string, id: string, options: ResumeSync
   if (!(await pathExists(workspace))) {
     throw new DoxloopError(`Proposal ${id} no longer has a preserved workspace to resume. Generate a new proposal instead.`)
   }
-  const authoring = (await readPersistedAuthoring(root, id))
+  const recorded = (await readPersistedAuthoring(root, id))
     ?? (options.fallbackAuthoring ? { schemaVersion: 1 as const, ...options.fallbackAuthoring } : undefined)
-  if (!authoring) {
+  if (!recorded) {
     throw new DoxloopError(`Proposal ${id} did not record the instructions it was started with, so it cannot be resumed. Recover its output or generate a new proposal instead.`)
   }
+  const authoring = withAgentOverride(recorded, options.agentOverride)
+  if (authoring !== recorded) await writeFile(join(runDirectory(root, id), AUTHORING_FILE), `${JSON.stringify(authoring, null, 2)}\n`, 'utf8')
   const project = await loadProject(root)
   // A source edit made while the run was stopped is a reason to re-check the
   // pages, not to discard them: the resumed agent reads the current sources.
