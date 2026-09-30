@@ -1,4 +1,6 @@
 import { validateHedging } from './hedging.js'
+import { projectContracts } from './api-contracts.js'
+import { exampleIssues } from './example-checks.js'
 import { documentationCollections, collectionForPath } from './documentation-collections.js'
 import { contentLinks } from './content-links.js'
 import { access, readFile } from 'node:fs/promises'
@@ -61,6 +63,9 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     )
   }
 
+  // Examples aimed at the product's API are checked against its contract;
+  // without one only JSON and YAML syntax is checked.
+  const contracts = await projectContracts(root, project).catch(() => [])
   for (const path of files) {
     const file = relativePath(root, path)
     const raw = await readFile(path, 'utf8')
@@ -94,6 +99,7 @@ export async function validateProject(root: string): Promise<ValidationResult> {
     const planned = planTypes.get(file.replace(/\.[^./]+$/, ''))
     issues.push(...validatePageDepth(page.body, file, planned?.type))
     issues.push(...validateHedging(page.body, file))
+    if ((adapter?.project.contentFormat ?? 'markdown') === 'markdown') issues.push(...exampleIssues(page.body, file, contracts))
     if (planned?.diagram === 'required' && !hasDiagram(raw)) {
       issues.push(
         warning(

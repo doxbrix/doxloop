@@ -14,6 +14,10 @@ const MAX_SPEC_BYTES = 5 * 1024 * 1024
 const MAX_REDIRECTS = 3
 const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'options', 'head', 'trace'] as const
 
+/** File names a repository keeps its API contract under (RealWorld: `specs/api/openapi.yml`). */
+export const OPENAPI_FILE_NAME = /(?:^|\/)(?:[^/]*(?:openapi|swagger)[^/]*|api)\.(?:ya?ml|json)$/i
+export const OPENAPI_NOISE_PATH = /(^|\/)(?:__tests__|tests?|testdata|fixtures?|mocks?|__mocks__|node_modules|vendor|third[_-]?party|examples?|samples?)(\/|$)/i
+export const OPENAPI_HEADER = /^\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?\d/m
 export interface LoadedOpenApi {
   content: string
   hash: string
@@ -329,6 +333,16 @@ function assertOpenApiContentType(raw: string | null, url: string): void {
   if (type && !supported.has(type) && !/\.(json|ya?ml)$/i.test(new URL(url).pathname)) {
     throw new DoxloopError(`Remote OpenAPI returned unsupported content type "${type}". Expected JSON or YAML.`)
   }
+}
+
+/**
+ * A remote specification as last fetched, without touching the network:
+ * validation runs many times per generation and must not depend on it.
+ */
+export async function cachedRemoteOpenApi(root: string, url: string): Promise<LoadedOpenApi | undefined> {
+  const cached = await readRemoteCache(root, url)
+  if (!cached) return undefined
+  try { return parseOpenApi(cached.content, url) } catch { return undefined }
 }
 
 async function readRemoteCache(root: string, url: string): Promise<RemoteOpenApiCache | undefined> {

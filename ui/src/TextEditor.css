@@ -16,3 +16,4 @@
 .page-claim small{color:#627086}
 .page-claim-location summary{padding:0;font-weight:400;font-size:13px}.page-claim-location code{font-size:12.5px}
 .page-claim-location pre{margin:6px 0 0;padding:10px;max-height:200px;overflow:auto;white-space:pre;background:#f2f4f8;color:#17213a;border-radius:6px;font-size:12.5px;line-height:1.5}
+.page-examples input{display:block;margin-top:5px;padding:9px;width:min(100%,420px);box-sizing:border-box;border:1px solid #aebbc9;border-radius:6px;background:var(--panel,#fff);color:inherit;font:inherit}

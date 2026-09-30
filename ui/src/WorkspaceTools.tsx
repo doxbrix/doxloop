@@ -133,3 +133,57 @@ export function PageEvidence({ path, onRequest }: { path: string; onRequest?: (t
     </>}
   </div></details>
 }
+
+type ExampleResult = { line: number; method: string; url: string; outcome: 'passed' | 'failed' | 'needs-sign-in' | 'unreachable' | 'skipped'; status?: number; expected?: string; detail?: string }
+type ExampleReport = { path: string; checkedAt: string; contracts: string[]; suggestedBaseUrl?: string; baseUrl?: string; issues: Array<{ code: string; message: string }>; results: ExampleResult[] }
+
+const EXAMPLE_OUTCOMES: Record<ExampleResult['outcome'], { label: string; tone: string }> = {
+  passed: { label: 'Passed', tone: 'good' },
+  failed: { label: 'Failed', tone: 'bad' },
+  'needs-sign-in': { label: 'Needs sign-in', tone: 'warn' },
+  unreachable: { label: 'Unreachable', tone: 'warn' },
+  skipped: { label: 'Not sent', tone: 'neutral' },
+}
+
+/**
+ * Check a page's examples the way a reader would use them: JSON and YAML
+ * must parse, API requests must match the contract, and read-only requests
+ * can be sent to a test server.
+ */
+export function PageExamples({ path, onRequest }: { path: string; onRequest?: (text: string) => Promise<void> }) {
+  const [report, setReport] = useState<ExampleReport>()
+  const [baseUrl, setBaseUrl] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const run = async (live: boolean) => {
+    setBusy(true)
+    setError('')
+    try {
+      const next = await post<ExampleReport>('/api/pages/examples', { path, ...(live && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}) })
+      setReport(next)
+      if (!baseUrl && next.suggestedBaseUrl) setBaseUrl(next.suggestedBaseUrl)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+  useEffect(() => { setReport(undefined); setError(''); void run(false) }, [path])
+  const failing = [...(report?.issues ?? []).map((item) => item.message), ...(report?.results ?? []).filter((result) => result.outcome === 'failed').map((result) => `${result.method} ${result.url} returned ${result.status}, expected ${result.expected}`)]
+  return <details class="text-editor page-examples"><summary>Examples{report ? ` · ${report.issues.length === 0 ? 'no problems found' : `${report.issues.length} problem${report.issues.length === 1 ? '' : 's'}`}` : ''}</summary><div class="text-editor-body">
+    {error && <p role="alert">{error}</p>}
+    <p>{report?.contracts.length ? `Requests are checked against ${report.contracts.join(', ')}.` : 'No API contract was found in the sources, so only JSON and YAML syntax is checked.'} Read-only requests (GET and HEAD) can also be sent to a test server; requests that change data are never sent.</p>
+    {report && report.issues.length > 0 && <ul class="page-claims">{report.issues.map((item) => <li key={item.message} class="page-claim contradicted"><div class="page-claim-head"><span class="badge bad">{item.code.replace(/^example-/, '').replace(/-/g, ' ')}</span><span>{item.message}</span></div></li>)}</ul>}
+    <label>Test server<input value={baseUrl} placeholder="http://localhost:3000" onInput={(event) => setBaseUrl(event.currentTarget.value)} /></label>
+    <div class="text-editor-actions">
+      <button disabled={busy || !baseUrl.trim()} onClick={() => void run(true)}>{busy ? 'Testing…' : 'Send read-only requests'}</button>
+      {failing.length > 0 && onRequest && <button disabled={busy} onClick={() => { setBusy(true); void onRequest(`Fix these examples so a reader can run them as shown, taking methods, paths, and bodies from the API contract: ${failing.join(' | ')}`).finally(() => setBusy(false)) }}>Ask the agent to fix {failing.length} example{failing.length === 1 ? '' : 's'}</button>}
+    </div>
+    {report && report.baseUrl && (report.results.length === 0
+      ? <p>This page has no requests aimed at the API.</p>
+      : <ul class="page-claims">{report.results.map((result) => <li key={`${result.line}:${result.url}`} class={`page-claim ${result.outcome === 'failed' ? 'contradicted' : ''}`}>
+        <div class="page-claim-head"><span class={`badge ${EXAMPLE_OUTCOMES[result.outcome].tone}`}>{EXAMPLE_OUTCOMES[result.outcome].label}</span><code>{result.method} {result.url}</code></div>
+        <small>Line {result.line}{result.status ? ` · HTTP ${result.status}` : ''}{result.expected && result.outcome === 'failed' ? ` · expected ${result.expected}` : ''}{result.detail ? ` · ${result.detail}` : ''}</small>
+      </li>)}</ul>)}
+  </div></details>
+}

@@ -114,6 +114,7 @@ import {
   remoteHead,
 } from './remote-source.js'
 import { readPageClaimEvidence } from './claim-evidence.js'
+import { testPageExamples } from './example-runs.js'
 import {
   acceptSyncChanges,
   archiveSyncRun,
@@ -813,6 +814,12 @@ async function handleApi(
     const page = url.searchParams.get('path') ?? ''
     if (!page) throw new DoxloopError('Choose a page to show its evidence.')
     sendJson(response, 200, await readPageClaimEvidence(root, await loadProject(root), page) ?? { page, confidence: undefined, sources: [], claims: [] })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pages/examples') {
+    // Static checks always; read-only requests only to a server the reviewer names.
+    const body = recordBody(await readJsonBody(request))
+    sendJson(response, 200, await testPageExamples(requireProject(runtime), body.path, body.baseUrl))
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/pages/metadata') {

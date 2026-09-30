@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { matchesAnyGlob } from './globs.js'
 import { readDocsSiteManifest } from './docs-site.js'
-import { loadOpenApiSource, parseOpenApi, type LoadedOpenApi } from './openapi.js'
+import { loadOpenApiSource, OPENAPI_FILE_NAME, OPENAPI_HEADER, OPENAPI_NOISE_PATH, parseOpenApi, type LoadedOpenApi } from './openapi.js'
 import { loadPages, loadProject, sourceKind } from './project.js'
 import { sourceSnapshotFingerprints } from './sync.js'
 import type { DoxloopProject, SourceBinding, SourceKind } from './types.js'
@@ -381,9 +381,6 @@ export function openApiEvidence(source: string, path: string, loaded: Pick<Loade
  * showed no operations at all. Test fixtures and vendored specs are not the
  * product's contract.
  */
-const OPENAPI_FILE_NAME = /(?:^|\/)(?:[^/]*(?:openapi|swagger)[^/]*|api)\.(?:ya?ml|json)$/i
-const OPENAPI_NOISE_PATH = /(^|\/)(?:__tests__|tests?|testdata|fixtures?|mocks?|__mocks__|node_modules|vendor|third[_-]?party|examples?|samples?)(\/|$)/i
-const OPENAPI_HEADER = /^\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?\d/m
 const MAX_OPENAPI_FILES_PER_SOURCE = 5
 
 async function repositoryOpenApiEvidence(source: string, files: Array<{ path: string; sourcePath: string }>, warnings: string[]): Promise<DiscoveryEvidence[]> {
